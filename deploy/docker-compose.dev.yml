@@ -1,0 +1,58 @@
+# Control Plane - Docker Compose Development Override
+#
+# Usage: docker-compose -f docker-compose.yml -f docker-compose.dev.yml up
+#
+# This override:
+# - Enables local MongoDB (no Atlas needed)
+# - Disables Caddy proxy (use localhost directly)
+# - Exposes ports directly
+
+version: '3.8'
+
+services:
+  # Override API for development
+  control-plane-api:
+    ports:
+      - "5005:5005"  # Expose directly, not just to localhost
+    environment:
+      - MONGODB_URI=mongodb://controlplane:${MONGO_ROOT_PASSWORD}@control-plane-mongodb:27017/control-plane?authSource=admin
+      - REDIS_URL=redis://:${REDIS_PASSWORD}@control-plane-redis:6379
+    depends_on:
+      control-plane-mongodb:
+        condition: service_healthy
+      control-plane-redis:
+        condition: service_healthy
+
+  # Override Web for development
+  control-plane-web:
+    ports:
+      - "3000:3000"  # Expose directly
+
+  # Enable local MongoDB for development
+  control-plane-mongodb:
+    image: mongo:7
+    container_name: control-plane-mongodb
+    restart: unless-stopped
+    networks:
+      - control-plane
+    environment:
+      - MONGO_INITDB_ROOT_USERNAME=controlplane
+      - MONGO_INITDB_ROOT_PASSWORD=${MONGO_ROOT_PASSWORD}
+    volumes:
+      - control-plane-mongodb:/data/db
+    ports:
+      - "127.0.0.1:27017:27017"
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Disable Caddy proxy for development
+  control-plane-proxy:
+    profiles:
+      - donotstart
+
+volumes:
+  control-plane-mongodb:
+    name: control-plane-mongodb

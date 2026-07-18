@@ -1,0 +1,7 @@
+{
+  "version": "latest",
+  "api": "latest",
+  "web": "latest",
+  "minDockerVersion": 24,
+  "changelog": "https://github.com/goweekdays/control-plane/releases"
+}

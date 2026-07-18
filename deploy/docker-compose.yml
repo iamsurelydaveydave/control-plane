@@ -1,0 +1,150 @@
+# Control Plane - Docker Compose
+# Production deployment configuration
+#
+# For development, use: docker-compose -f docker-compose.yml -f docker-compose.dev.yml up
+# For production, use:  docker-compose up -d
+
+version: '3.8'
+
+services:
+  # ================================
+  # Control Plane API
+  # ================================
+  control-plane-api:
+    image: ${REGISTRY_URL:-ghcr.io}/goweekdays/control-plane-api:${VERSION:-latest}
+    container_name: control-plane-api
+    restart: unless-stopped
+    networks:
+      - control-plane
+    ports:
+      - "127.0.0.1:5005:5005"
+    environment:
+      - NODE_ENV=production
+      - PORT=5005
+      - MONGODB_URI=${MONGODB_URI}
+      - REDIS_URL=${REDIS_URL:-redis://control-plane-redis:6379}
+      - JWT_SECRET=${JWT_SECRET}
+      - SESSION_SECRET=${SESSION_SECRET}
+      - COOKIE_DOMAIN=${COOKIE_DOMAIN:-}
+      - ALLOWED_ORIGINS=${ALLOWED_ORIGINS:-http://localhost:3000}
+    volumes:
+      - control-plane-ssh:/data/control-plane/ssh
+      - control-plane-logs:/data/control-plane/logs
+      - control-plane-backups:/data/control-plane/backups
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5005/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    depends_on:
+      control-plane-redis:
+        condition: service_healthy
+
+  # ================================
+  # Control Plane Web (Nuxt)
+  # ================================
+  control-plane-web:
+    image: ${REGISTRY_URL:-ghcr.io}/goweekdays/control-plane-web:${VERSION:-latest}
+    container_name: control-plane-web
+    restart: unless-stopped
+    networks:
+      - control-plane
+    ports:
+      - "127.0.0.1:3000:3000"
+    environment:
+      - NODE_ENV=production
+      - NUXT_HOST=0.0.0.0
+      - NUXT_PORT=3000
+      - API_URL=http://control-plane-api:5005
+      - COOKIE_DOMAIN=${COOKIE_DOMAIN:-}
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    depends_on:
+      control-plane-api:
+        condition: service_healthy
+
+  # ================================
+  # Redis (Caching & Sessions)
+  # ================================
+  control-plane-redis:
+    image: redis:7-alpine
+    container_name: control-plane-redis
+    restart: unless-stopped
+    networks:
+      - control-plane
+    command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD:-}
+    volumes:
+      - control-plane-redis:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+
+  # ================================
+  # Caddy (Reverse Proxy + TLS)
+  # ================================
+  control-plane-proxy:
+    image: caddy:2-alpine
+    container_name: control-plane-proxy
+    restart: unless-stopped
+    networks:
+      - control-plane
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - control-plane-caddy-data:/data
+      - control-plane-caddy-config:/config
+    depends_on:
+      - control-plane-web
+      - control-plane-api
+
+# ================================
+# Local MongoDB (Development/Single-node only)
+# For production, use MongoDB Atlas and remove this service
+# ================================
+#  control-plane-mongodb:
+#    image: mongo:7
+#    container_name: control-plane-mongodb
+#    restart: unless-stopped
+#    networks:
+#      - control-plane
+#    environment:
+#      - MONGO_INITDB_ROOT_USERNAME=${MONGO_ROOT_USER:-controlplane}
+#      - MONGO_INITDB_ROOT_PASSWORD=${MONGO_ROOT_PASSWORD}
+#    volumes:
+#      - control-plane-mongodb:/data/db
+#    healthcheck:
+#      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+#      interval: 30s
+#      timeout: 10s
+#      retries: 3
+
+networks:
+  control-plane:
+    name: control-plane
+    driver: bridge
+
+volumes:
+  control-plane-ssh:
+    name: control-plane-ssh
+  control-plane-logs:
+    name: control-plane-logs
+  control-plane-backups:
+    name: control-plane-backups
+  control-plane-redis:
+    name: control-plane-redis
+  control-plane-caddy-data:
+    name: control-plane-caddy-data
+  control-plane-caddy-config:
+    name: control-plane-caddy-config
+  # control-plane-mongodb:
+  #   name: control-plane-mongodb

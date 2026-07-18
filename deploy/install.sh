@@ -60,6 +60,33 @@ log_section() {
     echo -e "${PURPLE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 }
 
+prompt() {
+    local var_name="$1"
+    local prompt_text="$2"
+    local default_value="$3"
+    local is_secret="$4"
+    local value
+    
+    if [ -n "$default_value" ]; then
+        prompt_text="$prompt_text [$default_value]"
+    fi
+    
+    echo -ne "${GREEN}→${NC} $prompt_text: "
+    
+    if [ "$is_secret" = "true" ]; then
+        read -s value
+        echo ""
+    else
+        read value
+    fi
+    
+    if [ -z "$value" ] && [ -n "$default_value" ]; then
+        value="$default_value"
+    fi
+    
+    eval "$var_name=\"$value\""
+}
+
 # ================================
 # Pre-flight Checks
 # ================================
@@ -112,6 +139,96 @@ echo "━━━━━━━━━━━━━━━━━━━━━━━━�
 echo "| Operating System  | $OS_TYPE $OS_VERSION"
 echo "| Install Date      | $DATE"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+# ================================
+# Interactive Configuration
+# ================================
+
+log_section "Configuration"
+
+echo "Please provide the following information:"
+echo ""
+
+# MongoDB URI
+if [ -z "${MONGODB_URI:-}" ]; then
+    echo -e "${YELLOW}MongoDB Connection${NC}"
+    echo "  For production: Use MongoDB Atlas (recommended)"
+    echo "  For testing: Leave empty to use local MongoDB container"
+    echo ""
+    echo -ne "${GREEN}→${NC} MongoDB URI (leave empty for local): "
+    read MONGODB_URI
+    echo ""
+fi
+
+# Domain
+if [ -z "${DOMAIN:-}" ]; then
+    echo -e "${YELLOW}Domain Configuration${NC}"
+    echo "  Enter your domain for HTTPS (e.g., cp.example.com)"
+    echo "  Leave empty to access via IP address (HTTP only)"
+    echo ""
+    echo -ne "${GREEN}→${NC} Domain (optional): "
+    read DOMAIN
+    echo ""
+fi
+
+# Admin credentials
+if [ -z "${ROOT_USER_EMAIL:-}" ]; then
+    echo -e "${YELLOW}Admin Account${NC}"
+    echo "  Create the initial administrator account"
+    echo ""
+    
+    echo -ne "${GREEN}→${NC} Admin email: "
+    read ROOT_USER_EMAIL
+    
+    while [ -z "$ROOT_USER_EMAIL" ]; do
+        echo -e "${RED}  Email is required${NC}"
+        echo -ne "${GREEN}→${NC} Admin email: "
+        read ROOT_USER_EMAIL
+    done
+    
+    echo -ne "${GREEN}→${NC} Admin password: "
+    read -s ROOT_USER_PASSWORD
+    echo ""
+    
+    while [ -z "$ROOT_USER_PASSWORD" ] || [ ${#ROOT_USER_PASSWORD} -lt 8 ]; do
+        echo -e "${RED}  Password must be at least 8 characters${NC}"
+        echo -ne "${GREEN}→${NC} Admin password: "
+        read -s ROOT_USER_PASSWORD
+        echo ""
+    done
+    
+    echo -ne "${GREEN}→${NC} Confirm password: "
+    read -s ROOT_USER_PASSWORD_CONFIRM
+    echo ""
+    
+    while [ "$ROOT_USER_PASSWORD" != "$ROOT_USER_PASSWORD_CONFIRM" ]; do
+        echo -e "${RED}  Passwords do not match${NC}"
+        echo -ne "${GREEN}→${NC} Admin password: "
+        read -s ROOT_USER_PASSWORD
+        echo ""
+        echo -ne "${GREEN}→${NC} Confirm password: "
+        read -s ROOT_USER_PASSWORD_CONFIRM
+        echo ""
+    done
+    
+    # Use email username as default username
+    ROOT_USERNAME=${ROOT_USER_EMAIL%%@*}
+    echo ""
+fi
+
+# Summary
+echo ""
+echo -e "${BLUE}━━━ Configuration Summary ━━━${NC}"
+echo -e "  MongoDB:  ${MONGODB_URI:-${YELLOW}Local container${NC}}"
+echo -e "  Domain:   ${DOMAIN:-${YELLOW}IP access (no HTTPS)${NC}}"
+echo -e "  Admin:    $ROOT_USER_EMAIL"
+echo ""
+echo -ne "${GREEN}→${NC} Proceed with installation? [Y/n]: "
+read CONFIRM
+if [[ "$CONFIRM" =~ ^[Nn] ]]; then
+    echo "Installation cancelled."
+    exit 0
+fi
 
 # ================================
 # Check Disk Space

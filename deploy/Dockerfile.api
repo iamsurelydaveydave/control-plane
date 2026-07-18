@@ -45,9 +45,6 @@ RUN yarn install --frozen-lockfile --production && \
 # Copy built files from builder
 COPY --from=builder /app/dist ./dist
 
-# Copy Ansible playbooks if they exist
-COPY --from=builder /app/ansible ./ansible 2>/dev/null || true
-
 # Create necessary directories with proper permissions
 RUN mkdir -p /app/logs /data/control-plane/ssh /data/control-plane/logs && \
     chown -R node:node /app /data/control-plane

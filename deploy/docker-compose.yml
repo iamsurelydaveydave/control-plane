@@ -15,8 +15,6 @@ services:
     restart: unless-stopped
     networks:
       - control-plane
-    ports:
-      - "127.0.0.1:5005:5005"
     environment:
       - NODE_ENV=production
       - PORT=5005
@@ -48,8 +46,6 @@ services:
     restart: unless-stopped
     networks:
       - control-plane
-    ports:
-      - "127.0.0.1:3000:3000"
     environment:
       - NODE_ENV=production
       - NUXT_HOST=0.0.0.0
@@ -67,23 +63,19 @@ services:
         condition: service_healthy
 
   # ================================
-  # Caddy (Reverse Proxy + TLS)
+  # Nginx (Reverse Proxy)
+  # Cloudflare handles SSL
   # ================================
   control-plane-proxy:
-    image: caddy:2-alpine
+    image: nginx:alpine
     container_name: control-plane-proxy
     restart: unless-stopped
     networks:
       - control-plane
     ports:
       - "80:80"
-      - "443:443"
-    environment:
-      - DOMAIN=${DOMAIN:-localhost}
     volumes:
-      - ./Caddyfile:/etc/caddy/Caddyfile:ro
-      - control-plane-caddy-data:/data
-      - control-plane-caddy-config:/config
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
     depends_on:
       - control-plane-web
       - control-plane-api
@@ -98,7 +90,3 @@ volumes:
     name: control-plane-ssh
   control-plane-logs:
     name: control-plane-logs
-  control-plane-caddy-data:
-    name: control-plane-caddy-data
-  control-plane-caddy-config:
-    name: control-plane-caddy-config

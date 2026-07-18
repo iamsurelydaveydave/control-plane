@@ -33,17 +33,7 @@ WORKDIR /app
 # Install runtime dependencies only
 RUN apk add --no-cache \
     openssh-client \
-    ansible \
-    sshpass \
-    python3 \
-    py3-pip \
-    git \
-    curl \
-    && pip3 install --break-system-packages pymongo docker
-
-# Create non-root user
-RUN addgroup -g 9999 controlplane && \
-    adduser -D -u 9999 -G controlplane controlplane
+    curl
 
 # Copy package files
 COPY package.json yarn.lock ./
@@ -55,12 +45,12 @@ RUN yarn install --frozen-lockfile --production && \
 # Copy built files from builder
 COPY --from=builder /app/dist ./dist
 
-# Copy Ansible playbooks
-COPY ansible ./ansible
+# Copy Ansible playbooks if they exist
+COPY --from=builder /app/ansible ./ansible 2>/dev/null || true
 
-# Create necessary directories
-RUN mkdir -p /data/control-plane/{ssh,logs,backups} && \
-    chown -R controlplane:controlplane /data/control-plane
+# Create necessary directories with proper permissions
+RUN mkdir -p /app/logs /data/control-plane/ssh /data/control-plane/logs && \
+    chown -R node:node /app /data/control-plane
 
 # Set environment
 ENV NODE_ENV=production
@@ -74,7 +64,7 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
     CMD curl -f http://localhost:5005/api/health || exit 1
 
 # Run as non-root user
-USER controlplane
+USER node
 
 # Start the application
 CMD ["node", "dist/server.js"]

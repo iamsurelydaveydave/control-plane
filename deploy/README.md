@@ -198,8 +198,8 @@ And a redirect from `https://get.controlplane.dev/install.sh` to the CDN.
 Images are built and pushed to GitHub Container Registry:
 
 ```
-ghcr.io/goweekdays/control-plane-api:latest
-ghcr.io/goweekdays/control-plane-web:latest
+ghcr.io/iamsurelydaveydave/control-plane-api:latest
+ghcr.io/iamsurelydaveydave/control-plane-web:latest
 ```
 
 ## Security Considerations

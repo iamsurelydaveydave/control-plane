@@ -106,7 +106,7 @@ EOF
 echo -e "${NC}"
 
 echo "Welcome to Control Plane Installer!"
-echo "Source: https://github.com/goweekdays/control-plane"
+echo "Source: https://github.com/iamsurelydaveydave/control-plane"
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo "| Operating System  | $OS_TYPE $OS_VERSION"
@@ -504,4 +504,4 @@ if [ -z "${MONGODB_URI:-}" ]; then
 fi
 
 echo "Documentation: https://docs.controlplane.dev"
-echo "Support: https://github.com/goweekdays/control-plane/issues"
+echo "Support: https://github.com/iamsurelydaveydave/control-plane/issues"

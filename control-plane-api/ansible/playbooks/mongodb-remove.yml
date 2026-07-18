@@ -1,0 +1,41 @@
+---
+# Remove MongoDB deployment
+# Usage: ansible-playbook playbooks/mongodb-remove.yml -i <inventory>
+- name: Remove MongoDB
+  hosts: mongodb
+  become: yes
+  gather_facts: yes
+  
+  vars:
+    mongodb_container_name: "{{ mongodb_container_name | default('mongodb') }}"
+    mongodb_data_dir: "{{ mongodb_data_dir | default('/opt/mongodb/data') }}"
+    mongodb_config_dir: "{{ mongodb_config_dir | default('/opt/mongodb/config') }}"
+    mongodb_log_dir: "{{ mongodb_log_dir | default('/opt/mongodb/logs') }}"
+    mongodb_keyfile_dir: "{{ mongodb_keyfile_dir | default('/opt/mongodb/keyfile') }}"
+    remove_data: "{{ remove_data | default(false) }}"
+  
+  tasks:
+    - name: Stop and remove MongoDB container
+      docker_container:
+        name: "{{ mongodb_container_name }}"
+        state: absent
+      ignore_errors: yes
+
+    - name: Remove MongoDB data (if requested)
+      file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - "{{ mongodb_data_dir }}"
+        - "{{ mongodb_config_dir }}"
+        - "{{ mongodb_log_dir }}"
+        - "{{ mongodb_keyfile_dir }}"
+      when: remove_data | bool
+
+    - name: Remove UFW rule for MongoDB
+      ufw:
+        rule: allow
+        port: "{{ mongodb_port | default(27017) }}"
+        proto: tcp
+        delete: yes
+      ignore_errors: yes

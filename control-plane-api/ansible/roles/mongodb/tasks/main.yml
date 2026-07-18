@@ -1,0 +1,9 @@
+---
+# MongoDB role - deploy MongoDB in Docker
+- name: Include standalone tasks
+  include_tasks: standalone.yml
+  when: mongodb_mode == "standalone"
+
+- name: Include replica set tasks
+  include_tasks: replicaset.yml
+  when: mongodb_mode == "replicaset"

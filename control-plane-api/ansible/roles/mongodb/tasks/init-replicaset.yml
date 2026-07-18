@@ -1,0 +1,79 @@
+---
+# Initialize MongoDB Replica Set (run on primary only)
+- name: Wait for all nodes to be reachable
+  wait_for:
+    host: "{{ hostvars[item]['ansible_host'] }}"
+    port: "{{ mongodb_port }}"
+    timeout: 120
+  loop: "{{ groups['mongodb'] }}"
+  when: groups['mongodb'] is defined
+
+- name: Check if replica set is already initialized
+  command: >
+    docker exec {{ mongodb_container_name }} mongosh 
+    --eval "rs.status().ok"
+  register: rs_status
+  ignore_errors: yes
+  changed_when: false
+
+- name: Initialize replica set
+  command: >
+    docker exec {{ mongodb_container_name }} mongosh --eval '
+    rs.initiate({
+      _id: "{{ mongodb_replicaset_name }}",
+      members: [
+        {% for host in groups["mongodb"] %}
+        {
+          _id: {{ loop.index0 }},
+          host: "{{ hostvars[host]["ansible_host"] }}:{{ mongodb_port }}",
+          priority: {% if hostvars[host]["mongodb_node_role"] == "primary" %}10{% elif hostvars[host]["mongodb_node_role"] == "arbiter" %}0{% else %}5{% endif %},
+          {% if hostvars[host]["mongodb_node_role"] == "arbiter" %}arbiterOnly: true{% endif %}
+        }{% if not loop.last %},{% endif %}
+        {% endfor %}
+      ]
+    })'
+  when: rs_status.rc != 0 or "not yet initialized" in rs_status.stderr | default('')
+  register: rs_init
+
+- name: Wait for replica set to stabilize
+  command: >
+    docker exec {{ mongodb_container_name }} mongosh --eval '
+    var status = rs.status();
+    while (status.members.filter(m => m.stateStr === "PRIMARY").length === 0) {
+      sleep(1000);
+      status = rs.status();
+    }
+    print("PRIMARY elected");
+    '
+  when: rs_init is changed
+  register: rs_wait
+  retries: 30
+  delay: 5
+  until: rs_wait.rc == 0
+
+- name: Create admin user on replica set
+  command: >
+    docker exec {{ mongodb_container_name }} mongosh --eval '
+    use admin;
+    if (db.getUser("{{ mongodb_admin_user }}") === null) {
+      db.createUser({
+        user: "{{ mongodb_admin_user }}",
+        pwd: "{{ mongodb_admin_password }}",
+        roles: [
+          { role: "root", db: "admin" },
+          { role: "userAdminAnyDatabase", db: "admin" },
+          { role: "dbAdminAnyDatabase", db: "admin" },
+          { role: "readWriteAnyDatabase", db: "admin" },
+          { role: "clusterAdmin", db: "admin" }
+        ]
+      });
+      print("Admin user created");
+    } else {
+      print("Admin user already exists");
+    }
+    '
+  when: rs_init is changed or rs_status.rc == 0
+  register: admin_user
+  retries: 5
+  delay: 5
+  until: admin_user.rc == 0

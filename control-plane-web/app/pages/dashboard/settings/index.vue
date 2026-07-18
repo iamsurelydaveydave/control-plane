@@ -1,0 +1,48 @@
+<template>
+  <HubLinks
+    title="Settings"
+    subtitle="Manage SSH keys, API tokens, and configuration."
+    :items="items"
+  />
+</template>
+
+<script setup lang="ts">
+definePageMeta({
+  layout: 'dashboard',
+  middleware: 'auth',
+  secured: true
+})
+
+const items = [
+  {
+    title: 'SSH Keys',
+    description: 'Manage SSH keys for server access.',
+    icon: 'i-lucide-key',
+    to: '/dashboard/settings/ssh-keys',
+    status: 'active' as const
+  },
+  {
+    title: 'API Tokens',
+    description: 'Manage API tokens for programmatic access.',
+    icon: 'i-lucide-code',
+    to: '/dashboard/settings/api-tokens',
+    status: 'active' as const
+  },
+  {
+    title: 'Account',
+    description: 'Manage your account and preferences.',
+    icon: 'i-lucide-user',
+    to: '/dashboard/settings/account',
+    status: 'active' as const
+  },
+  {
+    title: 'Appearance',
+    description: 'Customize theme and display settings.',
+    icon: 'i-lucide-palette',
+    to: '/dashboard/settings/appearance',
+    status: 'active' as const
+  }
+]
+
+useHead({ title: 'Settings · Control Plane' })
+</script>

@@ -1,0 +1,6 @@
+---
+- name: Restart MongoDB
+  docker_container:
+    name: "{{ mongodb_container_name }}"
+    state: started
+    restart: yes

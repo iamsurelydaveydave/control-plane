@@ -141,96 +141,6 @@ echo "| Install Date      | $DATE"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
 # ================================
-# Interactive Configuration
-# ================================
-
-log_section "Configuration"
-
-echo "Please provide the following information:"
-echo ""
-
-# MongoDB URI
-if [ -z "${MONGODB_URI:-}" ]; then
-    echo -e "${YELLOW}MongoDB Connection${NC}"
-    echo "  For production: Use MongoDB Atlas (recommended)"
-    echo "  For testing: Leave empty to use local MongoDB container"
-    echo ""
-    echo -ne "${GREEN}→${NC} MongoDB URI (leave empty for local): "
-    read MONGODB_URI
-    echo ""
-fi
-
-# Domain
-if [ -z "${DOMAIN:-}" ]; then
-    echo -e "${YELLOW}Domain Configuration${NC}"
-    echo "  Enter your domain for HTTPS (e.g., cp.example.com)"
-    echo "  Leave empty to access via IP address (HTTP only)"
-    echo ""
-    echo -ne "${GREEN}→${NC} Domain (optional): "
-    read DOMAIN
-    echo ""
-fi
-
-# Admin credentials
-if [ -z "${ROOT_USER_EMAIL:-}" ]; then
-    echo -e "${YELLOW}Admin Account${NC}"
-    echo "  Create the initial administrator account"
-    echo ""
-    
-    echo -ne "${GREEN}→${NC} Admin email: "
-    read ROOT_USER_EMAIL
-    
-    while [ -z "$ROOT_USER_EMAIL" ]; do
-        echo -e "${RED}  Email is required${NC}"
-        echo -ne "${GREEN}→${NC} Admin email: "
-        read ROOT_USER_EMAIL
-    done
-    
-    echo -ne "${GREEN}→${NC} Admin password: "
-    read -s ROOT_USER_PASSWORD
-    echo ""
-    
-    while [ -z "$ROOT_USER_PASSWORD" ] || [ ${#ROOT_USER_PASSWORD} -lt 8 ]; do
-        echo -e "${RED}  Password must be at least 8 characters${NC}"
-        echo -ne "${GREEN}→${NC} Admin password: "
-        read -s ROOT_USER_PASSWORD
-        echo ""
-    done
-    
-    echo -ne "${GREEN}→${NC} Confirm password: "
-    read -s ROOT_USER_PASSWORD_CONFIRM
-    echo ""
-    
-    while [ "$ROOT_USER_PASSWORD" != "$ROOT_USER_PASSWORD_CONFIRM" ]; do
-        echo -e "${RED}  Passwords do not match${NC}"
-        echo -ne "${GREEN}→${NC} Admin password: "
-        read -s ROOT_USER_PASSWORD
-        echo ""
-        echo -ne "${GREEN}→${NC} Confirm password: "
-        read -s ROOT_USER_PASSWORD_CONFIRM
-        echo ""
-    done
-    
-    # Use email username as default username
-    ROOT_USERNAME=${ROOT_USER_EMAIL%%@*}
-    echo ""
-fi
-
-# Summary
-echo ""
-echo -e "${BLUE}━━━ Configuration Summary ━━━${NC}"
-echo -e "  MongoDB:  ${MONGODB_URI:-${YELLOW}Local container${NC}}"
-echo -e "  Domain:   ${DOMAIN:-${YELLOW}IP access (no HTTPS)${NC}}"
-echo -e "  Admin:    $ROOT_USER_EMAIL"
-echo ""
-echo -ne "${GREEN}→${NC} Proceed with installation? [Y/n]: "
-read CONFIRM
-if [[ "$CONFIRM" =~ ^[Nn] ]]; then
-    echo "Installation cancelled."
-    exit 0
-fi
-
-# ================================
 # Check Disk Space
 # ================================
 
@@ -438,20 +348,13 @@ update_env "JWT_SECRET" "$(generate_secret)"
 update_env "SESSION_SECRET" "$(generate_secret)"
 update_env "REDIS_PASSWORD" "$(generate_secret)"
 
-# Check for MongoDB URI (required for production)
-if [ -n "${MONGODB_URI:-}" ]; then
-    update_env "MONGODB_URI" "$MONGODB_URI"
-    log_success "MongoDB URI configured (Atlas)"
-else
-    # Development mode: use local MongoDB
-    MONGO_ROOT_PASSWORD=$(generate_secret)
-    update_env "MONGO_ROOT_PASSWORD" "$MONGO_ROOT_PASSWORD"
-    update_env "MONGODB_URI" "mongodb://controlplane:${MONGO_ROOT_PASSWORD}@control-plane-mongodb:27017/control-plane?authSource=admin"
-    log_warn "No MONGODB_URI provided - using local MongoDB container"
-    log_warn "For production, set MONGODB_URI to a MongoDB Atlas connection string"
-fi
+# Always use local MongoDB (web UI will handle onboarding)
+MONGO_ROOT_PASSWORD=$(generate_secret)
+update_env "MONGO_ROOT_PASSWORD" "$MONGO_ROOT_PASSWORD"
+update_env "MONGODB_URI" "mongodb://controlplane:${MONGO_ROOT_PASSWORD}@control-plane-mongodb:27017/control-plane?authSource=admin"
+log_success "Local MongoDB configured"
 
-# Optional: Domain configuration
+# Optional: Domain configuration (can be set via env var)
 if [ -n "${DOMAIN:-}" ]; then
     update_env "DOMAIN" "$DOMAIN"
     update_env "COOKIE_DOMAIN" ".$DOMAIN"
@@ -459,14 +362,6 @@ if [ -n "${DOMAIN:-}" ]; then
     log_success "Domain configured: $DOMAIN"
 else
     log "No DOMAIN set - will use HTTP on public IP"
-fi
-
-# Admin user credentials (from interactive prompt)
-if [ -n "${ROOT_USER_EMAIL:-}" ] && [ -n "${ROOT_USER_PASSWORD:-}" ]; then
-    update_env "ROOT_USERNAME" "${ROOT_USERNAME:-admin}"
-    update_env "ROOT_USER_EMAIL" "$ROOT_USER_EMAIL"
-    update_env "ROOT_USER_PASSWORD" "$ROOT_USER_PASSWORD"
-    log_success "Admin credentials saved"
 fi
 
 # Auto-update setting

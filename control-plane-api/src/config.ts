@@ -28,3 +28,8 @@ export const BCRYPT_ROUNDS = Number(process.env.BCRYPT_ROUNDS || 12);
 // Cookie settings
 export const COOKIE_SAMESITE = (process.env.COOKIE_SAMESITE as "none" | "lax" | "strict") || "none";
 export const DOMAIN = (process.env.DOMAIN as string) || "localhost";
+
+// Initial admin user (from install script)
+export const ROOT_USERNAME = process.env.ROOT_USERNAME as string;
+export const ROOT_USER_EMAIL = process.env.ROOT_USER_EMAIL as string;
+export const ROOT_USER_PASSWORD = process.env.ROOT_USER_PASSWORD as string;

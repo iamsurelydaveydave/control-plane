@@ -1,4 +1,4 @@
-import { logger, useRedis } from "./utils";
+import { logger, useRedis, hashPassword } from "./utils";
 import {
   useUserRepo,
   useServerRepo,
@@ -14,6 +14,9 @@ import {
 import {
   REDIS_HOST,
   REDIS_PORT,
+  ROOT_USERNAME,
+  ROOT_USER_EMAIL,
+  ROOT_USER_PASSWORD,
 } from "./config";
 
 /**
@@ -90,8 +93,69 @@ export default async function setup() {
   // Create all indexes
   await createAllIndexes();
 
+  // Create initial admin user if configured
+  await createInitialAdminUser();
+
   logger.log({
     level: "info",
     message: "Setup complete",
   });
+}
+
+/**
+ * Create the initial admin user from environment variables.
+ * This is set by the install script during onboarding.
+ */
+async function createInitialAdminUser() {
+  if (!ROOT_USER_EMAIL || !ROOT_USER_PASSWORD) {
+    logger.log({
+      level: "debug",
+      message: "No initial admin credentials configured, skipping",
+    });
+    return;
+  }
+
+  const userRepo = useUserRepo();
+  
+  // Check if any users exist
+  const existingUsers = await userRepo.findAll({ limit: 1 });
+  if (existingUsers.length > 0) {
+    logger.log({
+      level: "debug",
+      message: "Users already exist, skipping initial admin creation",
+    });
+    return;
+  }
+
+  // Check if this email already exists
+  const existingUser = await userRepo.findByEmail(ROOT_USER_EMAIL);
+  if (existingUser) {
+    logger.log({
+      level: "debug",
+      message: "Admin user already exists, skipping",
+    });
+    return;
+  }
+
+  try {
+    const hashedPassword = await hashPassword(ROOT_USER_PASSWORD);
+    
+    await userRepo.create({
+      name: ROOT_USERNAME || "Admin",
+      email: ROOT_USER_EMAIL,
+      password: hashedPassword,
+      role: "admin",
+      status: "active",
+    });
+
+    logger.log({
+      level: "info",
+      message: `Initial admin user created: ${ROOT_USER_EMAIL}`,
+    });
+  } catch (error) {
+    logger.log({
+      level: "error",
+      message: `Failed to create initial admin user: ${error}`,
+    });
+  }
 }

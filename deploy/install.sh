@@ -461,12 +461,12 @@ else
     log "No DOMAIN set - will use HTTP on public IP"
 fi
 
-# Optional: Initial admin user
-if [ -n "${ROOT_USERNAME:-}" ] && [ -n "${ROOT_USER_EMAIL:-}" ] && [ -n "${ROOT_USER_PASSWORD:-}" ]; then
-    update_env "ROOT_USERNAME" "$ROOT_USERNAME"
+# Admin user credentials (from interactive prompt)
+if [ -n "${ROOT_USER_EMAIL:-}" ] && [ -n "${ROOT_USER_PASSWORD:-}" ]; then
+    update_env "ROOT_USERNAME" "${ROOT_USERNAME:-admin}"
     update_env "ROOT_USER_EMAIL" "$ROOT_USER_EMAIL"
     update_env "ROOT_USER_PASSWORD" "$ROOT_USER_PASSWORD"
-    log_success "Initial admin user configured"
+    log_success "Admin credentials saved"
 fi
 
 # Auto-update setting

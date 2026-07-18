@@ -118,8 +118,8 @@ async function createInitialAdminUser() {
   const userRepo = useUserRepo();
   
   // Check if any users exist
-  const existingUsers = await userRepo.findAll({ limit: 1 });
-  if (existingUsers.length > 0) {
+  const userCount = await userRepo.count();
+  if (userCount > 0) {
     logger.log({
       level: "debug",
       message: "Users already exist, skipping initial admin creation",
@@ -128,7 +128,7 @@ async function createInitialAdminUser() {
   }
 
   // Check if this email already exists
-  const existingUser = await userRepo.findByEmail(ROOT_USER_EMAIL);
+  const existingUser = await userRepo.getByEmail(ROOT_USER_EMAIL);
   if (existingUser) {
     logger.log({
       level: "debug",
@@ -140,12 +140,10 @@ async function createInitialAdminUser() {
   try {
     const hashedPassword = await hashPassword(ROOT_USER_PASSWORD);
     
-    await userRepo.create({
-      name: ROOT_USERNAME || "Admin",
+    await userRepo.add({
       email: ROOT_USER_EMAIL,
       password: hashedPassword,
       role: "admin",
-      status: "active",
     });
 
     logger.log({

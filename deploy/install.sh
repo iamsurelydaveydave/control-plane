@@ -141,6 +141,120 @@ echo "| Install Date      | $DATE"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
 # ================================
+# Interactive Configuration
+# ================================
+
+log_section "Configuration"
+
+echo "Please provide your database credentials."
+echo "You can get free MongoDB at: https://mongodb.com/atlas"
+echo "You can get free Redis at: https://upstash.com or https://redis.com"
+echo ""
+
+# MongoDB URI (required)
+if [ -z "${MONGODB_URI:-}" ]; then
+    echo -e "${YELLOW}MongoDB Connection (required)${NC}"
+    echo "  Example: mongodb+srv://user:pass@cluster.mongodb.net/control-plane"
+    echo ""
+    
+    while [ -z "${MONGODB_URI:-}" ]; do
+        echo -ne "${GREEN}→${NC} MongoDB URI: "
+        read MONGODB_URI
+        if [ -z "$MONGODB_URI" ]; then
+            echo -e "${RED}  MongoDB URI is required${NC}"
+        fi
+    done
+    echo ""
+fi
+
+# Redis URL (required)
+if [ -z "${REDIS_URL:-}" ]; then
+    echo -e "${YELLOW}Redis Connection (required)${NC}"
+    echo "  Example: redis://default:password@host:port"
+    echo "  Upstash: rediss://default:xxx@xxx.upstash.io:6379"
+    echo ""
+    
+    while [ -z "${REDIS_URL:-}" ]; do
+        echo -ne "${GREEN}→${NC} Redis URL: "
+        read REDIS_URL
+        if [ -z "$REDIS_URL" ]; then
+            echo -e "${RED}  Redis URL is required${NC}"
+        fi
+    done
+    echo ""
+fi
+
+# Domain (optional)
+if [ -z "${DOMAIN:-}" ]; then
+    echo -e "${YELLOW}Domain Configuration (optional)${NC}"
+    echo "  Enter your domain for HTTPS (e.g., cp.example.com)"
+    echo "  Leave empty to access via IP address (HTTP only)"
+    echo ""
+    echo -ne "${GREEN}→${NC} Domain: "
+    read DOMAIN
+    echo ""
+fi
+
+# Admin credentials
+if [ -z "${ROOT_USER_EMAIL:-}" ]; then
+    echo -e "${YELLOW}Admin Account${NC}"
+    echo "  Create the initial administrator account"
+    echo ""
+    
+    echo -ne "${GREEN}→${NC} Admin email: "
+    read ROOT_USER_EMAIL
+    
+    while [ -z "$ROOT_USER_EMAIL" ]; do
+        echo -e "${RED}  Email is required${NC}"
+        echo -ne "${GREEN}→${NC} Admin email: "
+        read ROOT_USER_EMAIL
+    done
+    
+    echo -ne "${GREEN}→${NC} Admin password: "
+    read -s ROOT_USER_PASSWORD
+    echo ""
+    
+    while [ -z "$ROOT_USER_PASSWORD" ] || [ ${#ROOT_USER_PASSWORD} -lt 8 ]; do
+        echo -e "${RED}  Password must be at least 8 characters${NC}"
+        echo -ne "${GREEN}→${NC} Admin password: "
+        read -s ROOT_USER_PASSWORD
+        echo ""
+    done
+    
+    echo -ne "${GREEN}→${NC} Confirm password: "
+    read -s ROOT_USER_PASSWORD_CONFIRM
+    echo ""
+    
+    while [ "$ROOT_USER_PASSWORD" != "$ROOT_USER_PASSWORD_CONFIRM" ]; do
+        echo -e "${RED}  Passwords do not match${NC}"
+        echo -ne "${GREEN}→${NC} Admin password: "
+        read -s ROOT_USER_PASSWORD
+        echo ""
+        echo -ne "${GREEN}→${NC} Confirm password: "
+        read -s ROOT_USER_PASSWORD_CONFIRM
+        echo ""
+    done
+    
+    ROOT_USERNAME=${ROOT_USER_EMAIL%%@*}
+    echo ""
+fi
+
+# Summary
+echo ""
+echo -e "${BLUE}━━━ Configuration Summary ━━━${NC}"
+echo -e "  MongoDB:  ${MONGODB_URI:0:30}..."
+echo -e "  Redis:    ${REDIS_URL:0:30}..."
+echo -e "  Domain:   ${DOMAIN:-${YELLOW}IP access only${NC}}"
+echo -e "  Admin:    $ROOT_USER_EMAIL"
+echo ""
+echo -ne "${GREEN}→${NC} Proceed with installation? [Y/n]: "
+read CONFIRM
+if [[ "$CONFIRM" =~ ^[Nn] ]]; then
+    echo "Installation cancelled."
+    exit 0
+fi
+
+# ================================
 # Check Disk Space
 # ================================
 
@@ -346,15 +460,16 @@ update_env "REGISTRY_URL" "$REGISTRY_URL"
 log "Generating secrets..."
 update_env "JWT_SECRET" "$(generate_secret)"
 update_env "SESSION_SECRET" "$(generate_secret)"
-update_env "REDIS_PASSWORD" "$(generate_secret)"
 
-# Always use local MongoDB (web UI will handle onboarding)
-MONGO_ROOT_PASSWORD=$(generate_secret)
-update_env "MONGO_ROOT_PASSWORD" "$MONGO_ROOT_PASSWORD"
-update_env "MONGODB_URI" "mongodb://controlplane:${MONGO_ROOT_PASSWORD}@control-plane-mongodb:27017/control-plane?authSource=admin"
-log_success "Local MongoDB configured"
+# MongoDB (user provided)
+update_env "MONGODB_URI" "$MONGODB_URI"
+log_success "MongoDB configured"
 
-# Optional: Domain configuration (can be set via env var)
+# Redis (user provided)
+update_env "REDIS_URL" "$REDIS_URL"
+log_success "Redis configured"
+
+# Optional: Domain configuration
 if [ -n "${DOMAIN:-}" ]; then
     update_env "DOMAIN" "$DOMAIN"
     update_env "COOKIE_DOMAIN" ".$DOMAIN"
@@ -362,6 +477,14 @@ if [ -n "${DOMAIN:-}" ]; then
     log_success "Domain configured: $DOMAIN"
 else
     log "No DOMAIN set - will use HTTP on public IP"
+fi
+
+# Admin credentials
+if [ -n "${ROOT_USER_EMAIL:-}" ] && [ -n "${ROOT_USER_PASSWORD:-}" ]; then
+    update_env "ROOT_USERNAME" "${ROOT_USERNAME:-admin}"
+    update_env "ROOT_USER_EMAIL" "$ROOT_USER_EMAIL"
+    update_env "ROOT_USER_PASSWORD" "$ROOT_USER_PASSWORD"
+    log_success "Admin credentials saved"
 fi
 
 # Auto-update setting
@@ -422,15 +545,8 @@ log "Pulling Docker images (this may take a while)..."
 $COMPOSE_CMD pull
 
 # Start services
-if [ -z "${MONGODB_URI:-}" ]; then
-    # Development mode: include local MongoDB
-    log "Starting services with local MongoDB..."
-    $COMPOSE_CMD -f docker-compose.yml -f docker-compose.dev.yml up -d
-else
-    # Production mode: Atlas MongoDB
-    log "Starting services with Atlas MongoDB..."
-    $COMPOSE_CMD up -d
-fi
+log "Starting services..."
+$COMPOSE_CMD up -d
 
 # Wait for services to be healthy
 log "Waiting for services to be healthy..."

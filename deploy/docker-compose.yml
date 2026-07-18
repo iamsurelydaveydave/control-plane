@@ -1,8 +1,7 @@
 # Control Plane - Docker Compose
-# Production deployment configuration
+# Production deployment with external MongoDB and Redis
 #
-# For development, use: docker-compose -f docker-compose.yml -f docker-compose.dev.yml up
-# For production, use:  docker-compose up -d
+# Usage: docker-compose up -d
 
 version: '3.8'
 
@@ -22,24 +21,23 @@ services:
       - NODE_ENV=production
       - PORT=5005
       - MONGODB_URI=${MONGODB_URI}
-      - REDIS_URL=${REDIS_URL:-redis://control-plane-redis:6379}
+      - REDIS_URL=${REDIS_URL}
       - JWT_SECRET=${JWT_SECRET}
       - SESSION_SECRET=${SESSION_SECRET}
       - COOKIE_DOMAIN=${COOKIE_DOMAIN:-}
-      - ALLOWED_ORIGINS=${ALLOWED_ORIGINS:-http://localhost:3000}
+      - ALLOWED_ORIGINS=${ALLOWED_ORIGINS:-}
+      - ROOT_USERNAME=${ROOT_USERNAME:-}
+      - ROOT_USER_EMAIL=${ROOT_USER_EMAIL:-}
+      - ROOT_USER_PASSWORD=${ROOT_USER_PASSWORD:-}
     volumes:
       - control-plane-ssh:/data/control-plane/ssh
       - control-plane-logs:/data/control-plane/logs
-      - control-plane-backups:/data/control-plane/backups
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:5005/api/health"]
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 10s
-    depends_on:
-      control-plane-redis:
-        condition: service_healthy
+      start_period: 15s
 
   # ================================
   # Control Plane Web (Nuxt)
@@ -63,29 +61,10 @@ services:
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 10s
+      start_period: 15s
     depends_on:
       control-plane-api:
         condition: service_healthy
-
-  # ================================
-  # Redis (Caching & Sessions)
-  # ================================
-  control-plane-redis:
-    image: redis:7-alpine
-    container_name: control-plane-redis
-    restart: unless-stopped
-    networks:
-      - control-plane
-    command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD:-}
-    volumes:
-      - control-plane-redis:/data
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 5s
 
   # ================================
   # Caddy (Reverse Proxy + TLS)
@@ -99,6 +78,8 @@ services:
     ports:
       - "80:80"
       - "443:443"
+    environment:
+      - DOMAIN=${DOMAIN:-localhost}
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - control-plane-caddy-data:/data
@@ -106,27 +87,6 @@ services:
     depends_on:
       - control-plane-web
       - control-plane-api
-
-# ================================
-# Local MongoDB (Development/Single-node only)
-# For production, use MongoDB Atlas and remove this service
-# ================================
-#  control-plane-mongodb:
-#    image: mongo:7
-#    container_name: control-plane-mongodb
-#    restart: unless-stopped
-#    networks:
-#      - control-plane
-#    environment:
-#      - MONGO_INITDB_ROOT_USERNAME=${MONGO_ROOT_USER:-controlplane}
-#      - MONGO_INITDB_ROOT_PASSWORD=${MONGO_ROOT_PASSWORD}
-#    volumes:
-#      - control-plane-mongodb:/data/db
-#    healthcheck:
-#      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
-#      interval: 30s
-#      timeout: 10s
-#      retries: 3
 
 networks:
   control-plane:
@@ -138,13 +98,7 @@ volumes:
     name: control-plane-ssh
   control-plane-logs:
     name: control-plane-logs
-  control-plane-backups:
-    name: control-plane-backups
-  control-plane-redis:
-    name: control-plane-redis
   control-plane-caddy-data:
     name: control-plane-caddy-data
   control-plane-caddy-config:
     name: control-plane-caddy-config
-  # control-plane-mongodb:
-  #   name: control-plane-mongodb

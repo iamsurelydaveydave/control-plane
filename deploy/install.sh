@@ -159,7 +159,7 @@ if [ -z "${MONGODB_URI:-}" ]; then
     
     while [ -z "${MONGODB_URI:-}" ]; do
         echo -ne "${GREEN}→${NC} MongoDB URI: "
-        read MONGODB_URI
+        read MONGODB_URI < /dev/tty
         if [ -z "$MONGODB_URI" ]; then
             echo -e "${RED}  MongoDB URI is required${NC}"
         fi
@@ -176,7 +176,7 @@ if [ -z "${REDIS_URL:-}" ]; then
     
     while [ -z "${REDIS_URL:-}" ]; do
         echo -ne "${GREEN}→${NC} Redis URL: "
-        read REDIS_URL
+        read REDIS_URL < /dev/tty
         if [ -z "$REDIS_URL" ]; then
             echo -e "${RED}  Redis URL is required${NC}"
         fi
@@ -191,7 +191,7 @@ if [ -z "${DOMAIN:-}" ]; then
     echo "  Leave empty to access via IP address (HTTP only)"
     echo ""
     echo -ne "${GREEN}→${NC} Domain: "
-    read DOMAIN
+    read DOMAIN < /dev/tty
     echo ""
 fi
 
@@ -202,36 +202,36 @@ if [ -z "${ROOT_USER_EMAIL:-}" ]; then
     echo ""
     
     echo -ne "${GREEN}→${NC} Admin email: "
-    read ROOT_USER_EMAIL
+    read ROOT_USER_EMAIL < /dev/tty
     
     while [ -z "$ROOT_USER_EMAIL" ]; do
         echo -e "${RED}  Email is required${NC}"
         echo -ne "${GREEN}→${NC} Admin email: "
-        read ROOT_USER_EMAIL
+        read ROOT_USER_EMAIL < /dev/tty
     done
     
     echo -ne "${GREEN}→${NC} Admin password: "
-    read -s ROOT_USER_PASSWORD
+    read -s ROOT_USER_PASSWORD < /dev/tty
     echo ""
     
     while [ -z "$ROOT_USER_PASSWORD" ] || [ ${#ROOT_USER_PASSWORD} -lt 8 ]; do
         echo -e "${RED}  Password must be at least 8 characters${NC}"
         echo -ne "${GREEN}→${NC} Admin password: "
-        read -s ROOT_USER_PASSWORD
+        read -s ROOT_USER_PASSWORD < /dev/tty
         echo ""
     done
     
     echo -ne "${GREEN}→${NC} Confirm password: "
-    read -s ROOT_USER_PASSWORD_CONFIRM
+    read -s ROOT_USER_PASSWORD_CONFIRM < /dev/tty
     echo ""
     
     while [ "$ROOT_USER_PASSWORD" != "$ROOT_USER_PASSWORD_CONFIRM" ]; do
         echo -e "${RED}  Passwords do not match${NC}"
         echo -ne "${GREEN}→${NC} Admin password: "
-        read -s ROOT_USER_PASSWORD
+        read -s ROOT_USER_PASSWORD < /dev/tty
         echo ""
         echo -ne "${GREEN}→${NC} Confirm password: "
-        read -s ROOT_USER_PASSWORD_CONFIRM
+        read -s ROOT_USER_PASSWORD_CONFIRM < /dev/tty
         echo ""
     done
     
@@ -239,16 +239,16 @@ if [ -z "${ROOT_USER_EMAIL:-}" ]; then
     echo ""
 fi
 
-# Summary
+# Confirmation
 echo ""
 echo -e "${BLUE}━━━ Configuration Summary ━━━${NC}"
-echo -e "  MongoDB:  ${MONGODB_URI:0:30}..."
-echo -e "  Redis:    ${REDIS_URL:0:30}..."
+echo -e "  MongoDB:  ${MONGODB_URI:0:50}..."
+echo -e "  Redis:    ${REDIS_URL:0:50}..."
 echo -e "  Domain:   ${DOMAIN:-${YELLOW}IP access only${NC}}"
 echo -e "  Admin:    $ROOT_USER_EMAIL"
 echo ""
 echo -ne "${GREEN}→${NC} Proceed with installation? [Y/n]: "
-read CONFIRM
+read CONFIRM < /dev/tty
 if [[ "$CONFIRM" =~ ^[Nn] ]]; then
     echo "Installation cancelled."
     exit 0

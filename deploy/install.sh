@@ -19,7 +19,7 @@ set -o pipefail
 # Configuration
 # ================================
 
-CDN="https://cdn.controlplane.dev"
+CDN="https://get.goweekdays.com"
 DATE=$(date +"%Y%m%d-%H%M%S")
 DATA_DIR="/data/control-plane"
 SOURCE_DIR="$DATA_DIR/source"

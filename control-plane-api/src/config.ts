@@ -30,7 +30,9 @@ export const BCRYPT_ROUNDS = Number(process.env.BCRYPT_ROUNDS || 12);
 
 // Cookie settings
 export const COOKIE_SAMESITE = (process.env.COOKIE_SAMESITE as "none" | "lax" | "strict") || "none";
-export const DOMAIN = (process.env.DOMAIN as string) || "localhost";
+// COOKIE_DOMAIN is the primary env var (set by install.sh as ".example.com");
+// DOMAIN is a fallback for backwards compatibility.
+export const DOMAIN = (process.env.COOKIE_DOMAIN || process.env.DOMAIN || "localhost") as string;
 
 // Initial admin user (from install script)
 export const ROOT_USERNAME = process.env.ROOT_USERNAME as string;

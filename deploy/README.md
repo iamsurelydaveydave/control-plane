@@ -163,6 +163,14 @@ docker compose restart
 
 ### Upgrade
 
+Run the install script again - it automatically detects an existing installation and upgrades:
+
+```bash
+curl -fsSL https://get.controlplane.dev/install.sh | bash
+```
+
+Or run the upgrade script directly:
+
 ```bash
 /data/control-plane/source/upgrade.sh [version]
 ```

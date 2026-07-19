@@ -2,6 +2,9 @@
 ## Control Plane Installation Script
 ## One-liner: curl -fsSL https://get.controlplane.dev/install.sh | bash
 ##
+## If Control Plane is already running, this script automatically
+## delegates to upgrade.sh to perform an in-place update.
+##
 ## Environment variables:
 ## MONGODB_URI          - MongoDB Atlas connection string (production)
 ## DOMAIN               - Domain for HTTPS (optional, uses IP if not set)
@@ -116,6 +119,27 @@ case "$OS_TYPE" in
         exit 1
         ;;
 esac
+
+# ================================
+# Check for Existing Installation
+# ================================
+
+# If Control Plane is already running, delegate to upgrade script
+if docker ps --format '{{.Names}}' 2>/dev/null | grep -q '^control-plane-api$'; then
+    log "Control Plane is already running - switching to upgrade mode"
+    
+    # Ensure upgrade script exists
+    if [ -f "$SOURCE_DIR/upgrade.sh" ]; then
+        exec "$SOURCE_DIR/upgrade.sh" "${VERSION:-latest}"
+    else
+        # Download upgrade script if missing
+        log "Downloading upgrade script..."
+        mkdir -p "$SOURCE_DIR"
+        curl -fsSL "$CDN/upgrade.sh" -o "$SOURCE_DIR/upgrade.sh"
+        chmod +x "$SOURCE_DIR/upgrade.sh"
+        exec "$SOURCE_DIR/upgrade.sh" "${VERSION:-latest}"
+    fi
+fi
 
 # ================================
 # Banner

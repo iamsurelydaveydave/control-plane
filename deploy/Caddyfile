@@ -1,6 +1,21 @@
 # Control Plane Caddyfile
 # Automatic HTTPS with Let's Encrypt
+# Dynamic routing via Admin API for deployed apps
 
+{
+    # Enable Admin API on all interfaces (internal network only)
+    admin 0.0.0.0:2019
+    
+    # Global options
+    email {$ACME_EMAIL:admin@example.com}
+    
+    # Logging
+    log {
+        level INFO
+    }
+}
+
+# Control Plane UI and API
 {$DOMAIN:localhost} {
     # API routes
     handle /api/* {
@@ -12,3 +27,15 @@
         reverse_proxy control-plane-web:3000
     }
 }
+
+# Dynamic routes for deployed apps are added via Admin API
+# Example: POST http://control-plane-proxy:2019/config/apps/http/servers/srv0/routes
+# {
+#   "@id": "app-123",
+#   "match": [{"host": ["myapp.example.com"]}],
+#   "handle": [{
+#     "handler": "reverse_proxy",
+#     "upstreams": [{"dial": "192.168.1.10:3001"}, {"dial": "192.168.1.11:3001"}],
+#     "load_balancing": {"selection_policy": {"policy": "round_robin"}}
+#   }]
+# }

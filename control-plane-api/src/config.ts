@@ -38,3 +38,7 @@ export const DOMAIN = (process.env.COOKIE_DOMAIN || process.env.DOMAIN || "local
 export const ROOT_USERNAME = process.env.ROOT_USERNAME as string;
 export const ROOT_USER_EMAIL = process.env.ROOT_USER_EMAIL as string;
 export const ROOT_USER_PASSWORD = process.env.ROOT_USER_PASSWORD as string;
+
+// Caddy reverse proxy
+export const CADDY_ADMIN_URL = (process.env.CADDY_ADMIN_URL || "http://localhost:2019") as string;
+export const CADDY_ENABLED = process.env.CADDY_ENABLED !== "false"; // Enabled by default

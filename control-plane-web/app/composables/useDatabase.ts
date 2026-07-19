@@ -61,6 +61,25 @@ export default function useDatabase() {
     })
   }
 
+  function addNode(databaseId: string, serverId: string, role: 'secondary' | 'arbiter') {
+    return useNuxtApp().$api<{ message: string }>(`/databases/${databaseId}/nodes`, {
+      method: 'POST',
+      body: { serverId, role }
+    })
+  }
+
+  function removeNode(databaseId: string, serverId: string) {
+    return useNuxtApp().$api<{ message: string }>(`/databases/${databaseId}/nodes/${serverId}`, {
+      method: 'DELETE'
+    })
+  }
+
+  function getHealth(id: string) {
+    return useNuxtApp().$api<{ status: string, members: Array<{ host: string, state: string, health: number }> }>(`/databases/${id}/health`, {
+      method: 'GET'
+    })
+  }
+
   return {
     database,
     getAll,
@@ -68,6 +87,9 @@ export default function useDatabase() {
     add,
     deleteById,
     reprovision,
-    getCredentials
+    getCredentials,
+    addNode,
+    removeNode,
+    getHealth
   }
 }

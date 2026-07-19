@@ -1,5 +1,5 @@
 /**
- * useApp — app resource composable following goweekdays-web pattern.
+ * useApp — app resource composable for Kamal-based deployment.
  *
  * Returns reactive state and API functions. No side effects on call.
  * API functions return raw promises — pages handle useLazyAsyncData wrapping.
@@ -8,10 +8,11 @@ export default function useApp() {
   const app = ref<TApp>({
     _id: '',
     name: '',
-    image: '',
-    status: 'unknown',
-    desiredReplicas: 1,
-    serverIds: []
+    source: { type: 'image' },
+    serverIds: [],
+    env: {},
+    secretNames: [],
+    status: 'pending'
   })
 
   function getAll(options: { page?: number, search?: string } = {}) {
@@ -47,9 +48,61 @@ export default function useApp() {
     })
   }
 
-  function deploy(id: string) {
+  function deploy(id: string, options?: { version?: string }) {
     return useNuxtApp().$api<{ message: string }>(`/apps/${id}/deploy`, {
+      method: 'POST',
+      body: options
+    })
+  }
+
+  function redeploy(id: string) {
+    return useNuxtApp().$api<{ message: string }>(`/apps/${id}/redeploy`, {
       method: 'POST'
+    })
+  }
+
+  function rollback(id: string, version?: string) {
+    return useNuxtApp().$api<{ message: string }>(`/apps/${id}/rollback`, {
+      method: 'POST',
+      body: version ? { version } : undefined
+    })
+  }
+
+  function stop(id: string) {
+    return useNuxtApp().$api<{ message: string }>(`/apps/${id}/stop`, {
+      method: 'POST'
+    })
+  }
+
+  function start(id: string) {
+    return useNuxtApp().$api<{ message: string }>(`/apps/${id}/start`, {
+      method: 'POST'
+    })
+  }
+
+  function restart(id: string) {
+    return useNuxtApp().$api<{ message: string }>(`/apps/${id}/restart`, {
+      method: 'POST'
+    })
+  }
+
+  function getLogs(id: string, lines?: number) {
+    return useNuxtApp().$api<{ logs: string }>(`/apps/${id}/logs`, {
+      method: 'GET',
+      query: lines ? { lines } : undefined
+    })
+  }
+
+  function getVersion(id: string) {
+    return useNuxtApp().$api<{ version: string, image?: string }>(`/apps/${id}/version`, {
+      method: 'GET'
+    })
+  }
+
+  function exec(id: string, command: string) {
+    return useNuxtApp().$api<{ output: string, exitCode: number }>(`/apps/${id}/exec`, {
+      method: 'POST',
+      body: { command }
     })
   }
 
@@ -60,6 +113,14 @@ export default function useApp() {
     add,
     updateById,
     deleteById,
-    deploy
+    deploy,
+    redeploy,
+    rollback,
+    stop,
+    start,
+    restart,
+    getLogs,
+    getVersion,
+    exec
   }
 }

@@ -17,6 +17,10 @@
 #   mongodb_primary
 #   mongodb_secondary
 #   mongodb_arbiter
+#
+# Extra vars:
+#   mongodb_keyfile_content: (optional) Pre-generated keyfile content for replica set auth.
+#                            If not provided, one will be generated.
 
 - name: Provision MongoDB Replica Set
   hosts: mongodb

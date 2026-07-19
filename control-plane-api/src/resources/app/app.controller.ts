@@ -1,10 +1,18 @@
 import { Request, Response, NextFunction } from "express";
 import { useAppRepo } from "./app.repository";
-import { schemaAppCreate, schemaAppUpdate, schemaAppScale, schemaAppDeploy } from "./app.model";
-import { BadRequestError } from "../../utils";
+import { useServerRepo } from "../server/server.repository";
+import { useKamalExecutor } from "../../services/kamal.executor";
+import { schemaAppCreate, schemaAppUpdate, schemaAppDeploy } from "./app.model";
+import { BadRequestError, NotFoundError } from "../../utils";
 
 export function useAppController() {
   const repo = useAppRepo();
+  const serverRepo = useServerRepo();
+  const kamal = useKamalExecutor();
+
+  // ---------------------------------------------------------------------------
+  // CRUD
+  // ---------------------------------------------------------------------------
 
   async function add(req: Request, res: Response, next: NextFunction) {
     try {
@@ -12,6 +20,15 @@ export function useAppController() {
       if (error) {
         next(new BadRequestError(error.message));
         return;
+      }
+
+      // Validate servers exist and are online
+      for (const serverId of value.serverIds) {
+        const server = await serverRepo.getById(serverId);
+        if (!server) {
+          next(new NotFoundError(`Server not found: ${serverId}`));
+          return;
+        }
       }
 
       const id = await repo.add(value);
@@ -27,11 +44,19 @@ export function useAppController() {
       const app = await repo.getById(id);
 
       if (!app) {
-        next(new BadRequestError("App not found"));
+        next(new NotFoundError("App not found"));
         return;
       }
 
-      res.json({ app });
+      // Mask registry password in response
+      const safeApp = {
+        ...app,
+        registry: app.registry
+          ? { ...app.registry, password: "****" }
+          : undefined,
+      };
+
+      res.json({ app: safeApp });
     } catch (error) {
       next(error);
     }
@@ -48,7 +73,15 @@ export function useAppController() {
         status: status as any,
       });
 
-      res.json(data);
+      // Mask registry passwords
+      const safeItems = data.items.map((app: any) => ({
+        ...app,
+        registry: app.registry
+          ? { ...app.registry, password: "****" }
+          : undefined,
+      }));
+
+      res.json({ ...data, items: safeItems });
     } catch (error) {
       next(error);
     }
@@ -73,6 +106,18 @@ export function useAppController() {
   async function deleteById(req: Request, res: Response, next: NextFunction) {
     try {
       const id = req.params.id as string;
+      
+      const app = await repo.getById(id);
+      if (!app) {
+        next(new NotFoundError("App not found"));
+        return;
+      }
+
+      // Stop the app if running
+      if (app.status === "running") {
+        await kamal.stop(id).catch(() => {});
+      }
+
       await repo.deleteById(id);
       res.json({ message: "App deleted" });
     } catch (error) {
@@ -80,17 +125,172 @@ export function useAppController() {
     }
   }
 
-  async function scale(req: Request, res: Response, next: NextFunction) {
+  // ---------------------------------------------------------------------------
+  // Deployment
+  // ---------------------------------------------------------------------------
+
+  async function deploy(req: Request, res: Response, next: NextFunction) {
     try {
       const id = req.params.id as string;
-      const { error, value } = schemaAppScale.validate(req.body);
+      const { error, value } = schemaAppDeploy.validate(req.body || {});
       if (error) {
         next(new BadRequestError(error.message));
         return;
       }
 
-      await repo.scale(id, value.desiredReplicas);
-      res.json({ message: "App scaled" });
+      const app = await repo.getById(id);
+      if (!app) {
+        next(new NotFoundError("App not found"));
+        return;
+      }
+
+      if (app.status === "deploying") {
+        next(new BadRequestError("Deployment already in progress"));
+        return;
+      }
+
+      const userId = req.cookies?.user;
+
+      // Start deployment in background
+      kamal
+        .deploy({
+          appId: id,
+          version: value.version,
+          force: value.force,
+          triggeredBy: userId,
+          onLog: (line) => {
+            console.log(`[Deploy ${app.name}] ${line}`);
+          },
+        })
+        .catch((err) => {
+          console.error(`Deployment failed for ${app.name}:`, err);
+        });
+
+      res.status(202).json({
+        message: "Deployment started",
+        status: "deploying",
+      });
+    } catch (error) {
+      next(error);
+    }
+  }
+
+  async function redeploy(req: Request, res: Response, next: NextFunction) {
+    try {
+      const id = req.params.id as string;
+      const app = await repo.getById(id);
+      
+      if (!app) {
+        next(new NotFoundError("App not found"));
+        return;
+      }
+
+      if (app.status === "deploying") {
+        next(new BadRequestError("Deployment already in progress"));
+        return;
+      }
+
+      const userId = req.cookies?.user;
+
+      kamal
+        .redeploy({
+          appId: id,
+          triggeredBy: userId,
+          onLog: (line) => {
+            console.log(`[Redeploy ${app.name}] ${line}`);
+          },
+        })
+        .catch((err) => {
+          console.error(`Redeployment failed for ${app.name}:`, err);
+        });
+
+      res.status(202).json({
+        message: "Redeployment started",
+        status: "deploying",
+      });
+    } catch (error) {
+      next(error);
+    }
+  }
+
+  async function rollback(req: Request, res: Response, next: NextFunction) {
+    try {
+      const id = req.params.id as string;
+      const version = req.params.version || req.body?.version;
+
+      const app = await repo.getById(id);
+      if (!app) {
+        next(new NotFoundError("App not found"));
+        return;
+      }
+
+      const userId = req.cookies?.user;
+
+      kamal
+        .rollback({
+          appId: id,
+          version,
+          triggeredBy: userId,
+          onLog: (line) => {
+            console.log(`[Rollback ${app.name}] ${line}`);
+          },
+        })
+        .catch((err) => {
+          console.error(`Rollback failed for ${app.name}:`, err);
+        });
+
+      res.status(202).json({
+        message: "Rollback started",
+        version: version || "previous",
+      });
+    } catch (error) {
+      next(error);
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Lifecycle
+  // ---------------------------------------------------------------------------
+
+  async function stop(req: Request, res: Response, next: NextFunction) {
+    try {
+      const id = req.params.id as string;
+      const app = await repo.getById(id);
+      
+      if (!app) {
+        next(new NotFoundError("App not found"));
+        return;
+      }
+
+      const result = await kamal.stop(id);
+      
+      res.json({
+        message: result.success ? "App stopped" : "Failed to stop app",
+        success: result.success,
+        error: result.success ? undefined : result.stderr,
+      });
+    } catch (error) {
+      next(error);
+    }
+  }
+
+  async function start(req: Request, res: Response, next: NextFunction) {
+    try {
+      const id = req.params.id as string;
+      const app = await repo.getById(id);
+      
+      if (!app) {
+        next(new NotFoundError("App not found"));
+        return;
+      }
+
+      const result = await kamal.start(id);
+      
+      res.json({
+        message: result.success ? "App started" : "Failed to start app",
+        success: result.success,
+        error: result.success ? undefined : result.stderr,
+      });
     } catch (error) {
       next(error);
     }
@@ -99,41 +299,87 @@ export function useAppController() {
   async function restart(req: Request, res: Response, next: NextFunction) {
     try {
       const id = req.params.id as string;
+      const userId = req.cookies?.user;
 
-      // TODO: Implement actual restart logic with Docker/Kamal
-      // For now, just update status
-      await repo.updateStatus(id, "deploying");
+      // Redeploy is effectively a restart in Kamal
+      kamal
+        .redeploy({
+          appId: id,
+          triggeredBy: userId,
+        })
+        .catch(() => {});
 
-      res.json({ message: "App restart initiated" });
+      res.status(202).json({ message: "Restart initiated" });
     } catch (error) {
       next(error);
     }
   }
 
-  async function deploy(req: Request, res: Response, next: NextFunction) {
+  // ---------------------------------------------------------------------------
+  // Inspection
+  // ---------------------------------------------------------------------------
+
+  async function getLogs(req: Request, res: Response, next: NextFunction) {
     try {
       const id = req.params.id as string;
-      const { error, value } = schemaAppDeploy.validate(req.body);
-      if (error) {
-        next(new BadRequestError(error.message));
+      const lines = req.query.lines ? Number(req.query.lines) : 100;
+
+      const app = await repo.getById(id);
+      if (!app) {
+        next(new NotFoundError("App not found"));
+        return;
+      }
+
+      const result = await kamal.getLogs(id, lines);
+      res.json(result);
+    } catch (error) {
+      next(error);
+    }
+  }
+
+  async function getVersion(req: Request, res: Response, next: NextFunction) {
+    try {
+      const id = req.params.id as string;
+      const app = await repo.getById(id);
+      
+      if (!app) {
+        next(new NotFoundError("App not found"));
+        return;
+      }
+
+      const version = await kamal.getVersion(id);
+      res.json({ version });
+    } catch (error) {
+      next(error);
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Execution
+  // ---------------------------------------------------------------------------
+
+  async function appExec(req: Request, res: Response, next: NextFunction) {
+    try {
+      const id = req.params.id as string;
+      const { command } = req.body;
+
+      if (!command) {
+        next(new BadRequestError("command is required"));
         return;
       }
 
       const app = await repo.getById(id);
       if (!app) {
-        next(new BadRequestError("App not found"));
+        next(new NotFoundError("App not found"));
         return;
       }
 
-      // Update image if provided
-      if (value.image) {
-        await repo.updateById(id, { image: value.image });
-      }
-
-      // TODO: Implement actual deploy logic with Docker/Kamal
-      await repo.updateStatus(id, "deploying");
-
-      res.json({ message: "Deployment initiated" });
+      const result = await kamal.appExec(id, command);
+      res.json({
+        success: result.success,
+        output: result.stdout,
+        error: result.stderr,
+      });
     } catch (error) {
       next(error);
     }
@@ -145,8 +391,14 @@ export function useAppController() {
     getAll,
     updateById,
     deleteById,
-    scale,
-    restart,
     deploy,
+    redeploy,
+    rollback,
+    stop,
+    start,
+    restart,
+    getLogs,
+    getVersion,
+    appExec,
   };
 }

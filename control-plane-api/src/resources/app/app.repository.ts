@@ -21,7 +21,7 @@ export function useAppRepo() {
         { key: { name: "text" } },
         { key: { name: 1 }, unique: true },
         { key: { status: 1 } },
-        { key: { domain: 1 }, sparse: true },
+        { key: { "proxy.host": 1 }, sparse: true },
         { key: { serverIds: 1 } },
       ]);
     } catch (error) {

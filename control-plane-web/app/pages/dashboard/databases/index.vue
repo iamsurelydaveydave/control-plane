@@ -38,7 +38,7 @@ const servers = ref<TServer[]>([])
 const columns = [
   { accessorKey: 'name', header: 'Name' },
   { accessorKey: 'type', header: 'Type' },
-  { accessorKey: 'version', header: 'Version' },
+  { accessorKey: 'nodes', header: 'Nodes' },
   { accessorKey: 'status', header: 'Status' },
   { id: 'actions', header: '' }
 ]
@@ -94,7 +94,7 @@ function setItem({
 }
 
 function handleRowClick(_e: Event, row: { original: TDatabase }) {
-  setItem({ value: row.original, mode: 'view', dialog: true })
+  navigateTo(`/dashboard/databases/${row.original._id}`)
 }
 
 function handleEdit(openDialog = false) {
@@ -301,7 +301,14 @@ useHead({ title: 'Databases · Control Plane' })
           </template>
 
           <template #type-cell="{ row }">
-            <span class="capitalize">{{ row.original.type }}</span>
+            <div class="flex items-center gap-1">
+              <span class="capitalize">{{ row.original.type }}</span>
+              <span class="text-muted text-xs">{{ row.original.version }}</span>
+            </div>
+          </template>
+
+          <template #nodes-cell="{ row }">
+            <span class="text-muted">{{ row.original.nodes?.length || 1 }} node{{ (row.original.nodes?.length || 1) > 1 ? 's' : '' }}</span>
           </template>
 
           <template #status-cell="{ row }">
@@ -323,7 +330,7 @@ useHead({ title: 'Databases · Control Plane' })
             <UDropdownMenu
               :items="[
                 [
-                  { label: 'View', icon: 'i-lucide-eye', onSelect: () => setItem({ value: row.original, mode: 'view', dialog: true }) },
+                  { label: 'View Details', icon: 'i-lucide-eye', onSelect: () => navigateTo(`/dashboard/databases/${row.original._id}`) },
                   { label: 'View Credentials', icon: 'i-lucide-key', onSelect: async () => { setItem({ value: row.original }); await handleViewCredentials() }, disabled: row.original.status !== 'running' },
                   { label: 'Reprovision', icon: 'i-lucide-refresh-cw', onSelect: async () => { setItem({ value: row.original }); await handleReprovision() } }
                 ],

@@ -27,6 +27,9 @@ export type TServer = {
   status: TServerStatus;
   resources?: TServerResources;
   tags: string[];
+  dockerInstalled?: boolean;
+  kamalProxyRunning?: boolean;
+  bootstrappedAt?: Date;
   createdAt?: Date;
   updatedAt?: Date;
   lastHealthCheck?: Date;

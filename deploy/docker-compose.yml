@@ -23,6 +23,9 @@ services:
       - ROOT_USERNAME=${ROOT_USERNAME:-}
       - ROOT_USER_EMAIL=${ROOT_USER_EMAIL:-}
       - ROOT_USER_PASSWORD=${ROOT_USER_PASSWORD:-}
+      # Caddy integration
+      - CADDY_ADMIN_URL=http://control-plane-proxy:2019
+      - CADDY_ENABLED=${CADDY_ENABLED:-true}
     volumes:
       - control-plane-ssh:/data/control-plane/ssh
       - control-plane-logs:/data/control-plane/logs
@@ -59,7 +62,7 @@ services:
         condition: service_healthy
 
   # ================================
-  # Caddy (Reverse Proxy + Auto SSL)
+  # Caddy (Reverse Proxy + Auto SSL + Dynamic Routing)
   # ================================
   control-plane-proxy:
     image: caddy:2-alpine
@@ -76,6 +79,8 @@ services:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - control-plane-caddy-data:/data
       - control-plane-caddy-config:/config
+    # Expose admin API on internal network only (not to host)
+    # API listens on 0.0.0.0:2019 inside container
     depends_on:
       - control-plane-web
       - control-plane-api

@@ -48,12 +48,34 @@ export default function useServer() {
     })
   }
 
+  function testConnection(params: { host: string, sshUser: string, sshPort: number, sshKeyId: string }) {
+    return useNuxtApp().$api<{ success: boolean, error?: string, serverInfo?: { os: string, hostname: string, uptime: string } }>('/servers/test-connection', {
+      method: 'POST',
+      body: params
+    })
+  }
+
+  function validate(id: string) {
+    return useNuxtApp().$api<{ success: boolean, error?: string, serverInfo?: { os: string, hostname: string, uptime: string } }>(`/servers/${id}/validate`, {
+      method: 'POST'
+    })
+  }
+
+  function checkHealth(id: string) {
+    return useNuxtApp().$api<{ success: boolean, error?: string, serverInfo?: { os: string, hostname: string, uptime: string }, resources?: { cpuCores: number, memoryMb: number, diskGb: number } }>(`/servers/${id}/check-health`, {
+      method: 'POST'
+    })
+  }
+
   return {
     server,
     getAll,
     getById,
     add,
     updateById,
-    deleteById
+    deleteById,
+    testConnection,
+    validate,
+    checkHealth
   }
 }

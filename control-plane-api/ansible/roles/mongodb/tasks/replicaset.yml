@@ -32,21 +32,31 @@
     owner: "999"
     group: "999"
 
-- name: Generate keyfile content (on primary only)
+# Prefer provided keyfile content, fall back to generating one if not provided
+- name: Generate keyfile content (on primary only, if not provided)
   shell: openssl rand -base64 756
-  register: keyfile_content
+  register: generated_keyfile
   run_once: true
   delegate_to: "{{ groups['mongodb_primary'][0] }}"
-  when: mongodb_node_role == "primary"
+  when:
+    - mongodb_node_role == "primary"
+    - mongodb_keyfile_content is not defined or mongodb_keyfile_content == ''
 
-- name: Set keyfile fact
+- name: Set keyfile fact from provided content
   set_fact:
-    mongodb_keyfile_content: "{{ hostvars[groups['mongodb_primary'][0]]['keyfile_content']['stdout'] }}"
-  when: keyfile_content is defined or hostvars[groups['mongodb_primary'][0]]['keyfile_content'] is defined
+    _mongodb_keyfile_content: "{{ mongodb_keyfile_content }}"
+  when: mongodb_keyfile_content is defined and mongodb_keyfile_content != ''
+
+- name: Set keyfile fact from generated content
+  set_fact:
+    _mongodb_keyfile_content: "{{ hostvars[groups['mongodb_primary'][0]]['generated_keyfile']['stdout'] }}"
+  when:
+    - mongodb_keyfile_content is not defined or mongodb_keyfile_content == ''
+    - hostvars[groups['mongodb_primary'][0]]['generated_keyfile'] is defined
 
 - name: Copy keyfile to all nodes
   copy:
-    content: "{{ mongodb_keyfile_content }}"
+    content: "{{ _mongodb_keyfile_content }}"
     dest: "{{ mongodb_keyfile_dir }}/mongodb-keyfile"
     mode: '0400'
     owner: "999"

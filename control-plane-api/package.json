@@ -7,7 +7,12 @@
     "dev": "nodemon --watch 'src/**/*.ts' --watch .env --exec ts-node --files ./src/server.ts",
     "build": "tsc",
     "start": "node ./dist/server.js",
-    "test": "NODE_ENV=development mocha --require ts-node/register --require tsconfig-paths/register --require ./test/support/root-hooks.ts 'test/**/*.spec.ts' --exit",
+    "test": "NODE_ENV=test mocha --require ts-node/register --require tsconfig-paths/register --require ./test/support/root-hooks.ts 'test/**/*.spec.ts' --exit",
+    "test:unit": "NODE_ENV=test mocha --require ts-node/register --require tsconfig-paths/register 'test/unit.spec.ts' --exit",
+    "test:watch": "NODE_ENV=test mocha --require ts-node/register --require tsconfig-paths/register --require ./test/support/root-hooks.ts 'test/**/*.spec.ts' --watch --watch-extensions ts",
+    "test:caddy": "NODE_ENV=test mocha --require ts-node/register --require tsconfig-paths/register --require ./test/support/root-hooks.ts 'test/caddy.service.spec.ts' --exit",
+    "test:docker": "NODE_ENV=test mocha --require ts-node/register --require tsconfig-paths/register --require ./test/support/root-hooks.ts 'test/docker.executor.spec.ts' --exit",
+    "test:app": "NODE_ENV=test mocha --require ts-node/register --require tsconfig-paths/register --require ./test/support/root-hooks.ts 'test/app.service.spec.ts' --exit",
     "lint": "eslint src/**/*.ts --fix"
   },
   "dependencies": {
@@ -22,6 +27,7 @@
     "jsonwebtoken": "^9.0.2",
     "mongodb": "^6.17.0",
     "node-cron": "^3.0.3",
+    "ssh2": "^1.16.0",
     "typescript": "^5.2.2",
     "winston": "^3.13.0"
   },
@@ -35,6 +41,7 @@
     "@types/mocha": "^10.0.7",
     "@types/node": "^20.0.0",
     "@types/node-cron": "^3.0.11",
+    "@types/ssh2": "^1.15.5",
     "@typescript-eslint/eslint-plugin": "^6.7.4",
     "@typescript-eslint/parser": "^6.7.4",
     "chai": "^4.3.10",

@@ -43,4 +43,7 @@ router.use("/ssh-keys", sshKeys);
 import apiTokens from "./api-tokens.route";
 router.use("/api-tokens", apiTokens);
 
+import secrets from "./secrets.route";
+router.use("/secrets", secrets);
+
 export default router;

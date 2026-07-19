@@ -1,0 +1,207 @@
+---
+# Add Node to Existing MongoDB Replica Set
+# This playbook:
+# 1. Sets up the new node with MongoDB and keyfile
+# 2. Adds the node to the existing replica set via rs.add()
+#
+# Inventory should define:
+#   [mongodb_primary]   - The current primary node
+#   [mongodb_new_node]  - The new node to add
+
+- name: Add Node - Phase 1 (Setup New Node)
+  hosts: mongodb_new_node
+  become: yes
+  gather_facts: yes
+  
+  vars:
+    mongodb_mode: replicaset
+    mongodb_version: "{{ mongodb_version | default('7.0') }}"
+    mongodb_port: "{{ mongodb_port | default(27017) }}"
+    mongodb_container_name: "{{ mongodb_container_name | default('mongodb') }}"
+    mongodb_data_dir: "{{ mongodb_data_dir | default('/opt/mongodb/data') }}"
+    mongodb_config_dir: "{{ mongodb_config_dir | default('/opt/mongodb/config') }}"
+    mongodb_log_dir: "{{ mongodb_log_dir | default('/opt/mongodb/logs') }}"
+    mongodb_keyfile_dir: "{{ mongodb_keyfile_dir | default('/opt/mongodb/keyfile') }}"
+    mongodb_replicaset_name: "{{ mongodb_replicaset_name | default('rs0') }}"
+    docker_network: "{{ docker_network | default('cp_databases') }}"
+  
+  pre_tasks:
+    - name: Validate required variables
+      assert:
+        that:
+          - mongodb_admin_user is defined
+          - mongodb_admin_password is defined
+          - mongodb_replicaset_name is defined
+          - mongodb_keyfile_content is defined
+          - new_node_role is defined
+        fail_msg: "Required variables must be defined"
+
+  roles:
+    - role: common
+      tags: [common, setup]
+    
+    - role: docker
+      tags: [docker, setup]
+
+  tasks:
+    - name: Create MongoDB data directory
+      file:
+        path: "{{ mongodb_data_dir }}"
+        state: directory
+        mode: '0755'
+        owner: "999"
+        group: "999"
+
+    - name: Create MongoDB config directory
+      file:
+        path: "{{ mongodb_config_dir }}"
+        state: directory
+        mode: '0755'
+
+    - name: Create MongoDB log directory
+      file:
+        path: "{{ mongodb_log_dir }}"
+        state: directory
+        mode: '0755'
+        owner: "999"
+        group: "999"
+
+    - name: Create MongoDB keyfile directory
+      file:
+        path: "{{ mongodb_keyfile_dir }}"
+        state: directory
+        mode: '0700'
+        owner: "999"
+        group: "999"
+
+    - name: Copy keyfile from existing cluster
+      copy:
+        content: "{{ mongodb_keyfile_content }}"
+        dest: "{{ mongodb_keyfile_dir }}/mongodb-keyfile"
+        mode: '0400'
+        owner: "999"
+        group: "999"
+
+    - name: Template MongoDB replica set configuration
+      template:
+        src: ../roles/mongodb/templates/mongod-replicaset.conf.j2
+        dest: "{{ mongodb_config_dir }}/mongod.conf"
+        mode: '0644'
+
+    - name: Allow MongoDB port in UFW
+      ufw:
+        rule: allow
+        port: "{{ mongodb_port }}"
+        proto: tcp
+        from_ip: "{{ item }}"
+      loop: "{{ mongodb_allowed_ips | default(['any']) }}"
+
+    - name: Pull MongoDB Docker image
+      docker_image:
+        name: "mongo:{{ mongodb_version }}"
+        source: pull
+
+    - name: Run MongoDB container
+      docker_container:
+        name: "{{ mongodb_container_name }}"
+        image: "mongo:{{ mongodb_version }}"
+        state: started
+        restart_policy: unless-stopped
+        ports:
+          - "{{ mongodb_bind_ip | default('0.0.0.0') }}:{{ mongodb_port }}:27017"
+        volumes:
+          - "{{ mongodb_data_dir }}:/data/db"
+          - "{{ mongodb_config_dir }}/mongod.conf:/etc/mongod.conf:ro"
+          - "{{ mongodb_keyfile_dir }}/mongodb-keyfile:/etc/mongodb-keyfile:ro"
+          - "{{ mongodb_log_dir }}:/var/log/mongodb"
+        command: ["mongod", "--config", "/etc/mongod.conf"]
+        networks:
+          - name: "{{ docker_network | default('cp_databases') }}"
+        healthcheck:
+          test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+          interval: 10s
+          timeout: 5s
+          retries: 5
+          start_period: 30s
+
+    - name: Wait for MongoDB to be ready
+      wait_for:
+        host: "127.0.0.1"
+        port: "{{ mongodb_port }}"
+        delay: 5
+        timeout: 60
+
+- name: Add Node - Phase 2 (Add to Replica Set)
+  hosts: mongodb_primary
+  become: yes
+  gather_facts: no
+  
+  vars:
+    mongodb_port: "{{ mongodb_port | default(27017) }}"
+    mongodb_container_name: "{{ mongodb_container_name | default('mongodb') }}"
+  
+  tasks:
+    - name: Wait for new node to be reachable
+      wait_for:
+        host: "{{ new_node_host }}"
+        port: "{{ new_node_port | default(mongodb_port) }}"
+        timeout: 120
+
+    - name: Add new node to replica set (secondary)
+      command: >
+        docker exec {{ mongodb_container_name }} mongosh 
+        --username "{{ mongodb_admin_user }}"
+        --password "{{ mongodb_admin_password }}"
+        --authenticationDatabase admin
+        --eval 'rs.add({ host: "{{ new_node_host }}:{{ new_node_port | default(mongodb_port) }}", priority: 5 })'
+      when: new_node_role == 'secondary'
+      register: rs_add_result
+
+    - name: Add new node to replica set (arbiter)
+      command: >
+        docker exec {{ mongodb_container_name }} mongosh 
+        --username "{{ mongodb_admin_user }}"
+        --password "{{ mongodb_admin_password }}"
+        --authenticationDatabase admin
+        --eval 'rs.addArb("{{ new_node_host }}:{{ new_node_port | default(mongodb_port) }}")'
+      when: new_node_role == 'arbiter'
+      register: rs_add_arbiter_result
+
+    - name: Wait for new node to sync
+      command: >
+        docker exec {{ mongodb_container_name }} mongosh 
+        --username "{{ mongodb_admin_user }}"
+        --password "{{ mongodb_admin_password }}"
+        --authenticationDatabase admin
+        --eval '
+        var status = rs.status();
+        var newMember = status.members.find(m => m.name === "{{ new_node_host }}:{{ new_node_port | default(mongodb_port) }}");
+        while (newMember && newMember.stateStr !== "SECONDARY" && newMember.stateStr !== "ARBITER") {
+          sleep(2000);
+          status = rs.status();
+          newMember = status.members.find(m => m.name === "{{ new_node_host }}:{{ new_node_port | default(mongodb_port) }}");
+        }
+        printjson(newMember);
+        '
+      register: sync_wait
+      retries: 60
+      delay: 5
+      until: sync_wait.rc == 0
+      when: new_node_role != 'arbiter'
+
+    - name: Display replica set status
+      command: >
+        docker exec {{ mongodb_container_name }} mongosh 
+        --username "{{ mongodb_admin_user }}"
+        --password "{{ mongodb_admin_password }}"
+        --authenticationDatabase admin
+        --eval "rs.status()"
+      register: rs_status_output
+
+    - name: Show final status
+      debug:
+        msg: |
+          Node added successfully!
+          
+          New node: {{ new_node_host }}:{{ new_node_port | default(mongodb_port) }}
+          Role: {{ new_node_role }}

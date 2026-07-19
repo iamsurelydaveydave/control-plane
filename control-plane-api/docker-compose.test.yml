@@ -1,0 +1,36 @@
+# Control Plane API - Test Environment
+# Run with: docker compose -f docker-compose.test.yml up -d
+
+services:
+  # MongoDB for tests
+  mongo-test:
+    image: mongo:7
+    container_name: cp-mongo-test
+    ports:
+      - "27018:27017"  # Use different port to avoid conflicts
+    environment:
+      - MONGO_INITDB_DATABASE=control_plane_test
+    volumes:
+      - mongo-test-data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # Redis for tests
+  redis-test:
+    image: redis:7-alpine
+    container_name: cp-redis-test
+    ports:
+      - "6380:6379"  # Use different port to avoid conflicts
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  mongo-test-data:
+    name: cp-mongo-test-data

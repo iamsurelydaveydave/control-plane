@@ -1,0 +1,128 @@
+---
+# Remove Node from MongoDB Replica Set
+# This playbook:
+# 1. Removes the node from the replica set via rs.remove() on the primary
+# 2. Stops and removes the MongoDB container on the removed node
+#
+# Inventory should define:
+#   [mongodb_primary]      - The current primary node
+#   [mongodb_remove_node]  - The node to remove
+
+- name: Remove Node - Phase 1 (Remove from Replica Set)
+  hosts: mongodb_primary
+  become: yes
+  gather_facts: no
+  
+  vars:
+    mongodb_port: "{{ mongodb_port | default(27017) }}"
+    mongodb_container_name: "{{ mongodb_container_name | default('mongodb') }}"
+  
+  tasks:
+    - name: Validate required variables
+      assert:
+        that:
+          - mongodb_admin_user is defined
+          - mongodb_admin_password is defined
+          - remove_node_host is defined
+        fail_msg: "Required variables must be defined"
+
+    - name: Remove node from replica set
+      command: >
+        docker exec {{ mongodb_container_name }} mongosh 
+        --username "{{ mongodb_admin_user }}"
+        --password "{{ mongodb_admin_password }}"
+        --authenticationDatabase admin
+        --eval 'rs.remove("{{ remove_node_host }}:{{ remove_node_port | default(mongodb_port) }}")'
+      register: rs_remove_result
+      failed_when: rs_remove_result.rc != 0 and "not found" not in rs_remove_result.stderr
+
+    - name: Wait for replica set to stabilize
+      command: >
+        docker exec {{ mongodb_container_name }} mongosh 
+        --username "{{ mongodb_admin_user }}"
+        --password "{{ mongodb_admin_password }}"
+        --authenticationDatabase admin
+        --eval '
+        var status = rs.status();
+        var removed = status.members.find(m => m.name === "{{ remove_node_host }}:{{ remove_node_port | default(mongodb_port) }}");
+        if (removed) {
+          print("Node still in replica set, waiting...");
+          quit(1);
+        }
+        print("Node removed successfully");
+        '
+      register: stabilize_wait
+      retries: 30
+      delay: 2
+      until: stabilize_wait.rc == 0
+
+    - name: Display replica set status
+      command: >
+        docker exec {{ mongodb_container_name }} mongosh 
+        --username "{{ mongodb_admin_user }}"
+        --password "{{ mongodb_admin_password }}"
+        --authenticationDatabase admin
+        --eval "rs.status()"
+      register: rs_status_output
+
+    - name: Show status
+      debug:
+        var: rs_status_output.stdout_lines
+
+- name: Remove Node - Phase 2 (Cleanup Removed Node)
+  hosts: mongodb_remove_node
+  become: yes
+  gather_facts: no
+  
+  vars:
+    mongodb_container_name: "{{ mongodb_container_name | default('mongodb') }}"
+    mongodb_data_dir: "{{ mongodb_data_dir | default('/opt/mongodb/data') }}"
+    mongodb_config_dir: "{{ mongodb_config_dir | default('/opt/mongodb/config') }}"
+    mongodb_log_dir: "{{ mongodb_log_dir | default('/opt/mongodb/logs') }}"
+    mongodb_keyfile_dir: "{{ mongodb_keyfile_dir | default('/opt/mongodb/keyfile') }}"
+  
+  tasks:
+    - name: Stop MongoDB container
+      docker_container:
+        name: "{{ mongodb_container_name }}"
+        state: stopped
+      ignore_errors: yes
+
+    - name: Remove MongoDB container
+      docker_container:
+        name: "{{ mongodb_container_name }}"
+        state: absent
+      ignore_errors: yes
+
+    - name: Remove data directory (if requested)
+      file:
+        path: "{{ mongodb_data_dir }}"
+        state: absent
+      when: remove_data | default(false) | bool
+
+    - name: Remove config directory
+      file:
+        path: "{{ mongodb_config_dir }}"
+        state: absent
+      when: remove_data | default(false) | bool
+
+    - name: Remove log directory
+      file:
+        path: "{{ mongodb_log_dir }}"
+        state: absent
+      when: remove_data | default(false) | bool
+
+    - name: Remove keyfile directory
+      file:
+        path: "{{ mongodb_keyfile_dir }}"
+        state: absent
+
+    - name: Display completion message
+      debug:
+        msg: |
+          Node {{ remove_node_host }} has been removed from the replica set.
+          {% if remove_data | default(false) | bool %}
+          Data directories have been cleaned up.
+          {% else %}
+          Data directories have been preserved. Set remove_data=true to delete them.
+          {% endif %}

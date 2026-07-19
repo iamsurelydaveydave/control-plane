@@ -1,5 +1,11 @@
 import { ObjectId } from "mongodb";
-import { modelDatabase, TDatabase, TDatabaseStatus } from "./database.model";
+import {
+  modelDatabase,
+  TDatabase,
+  TDatabaseNode,
+  TDatabaseNodeStatus,
+  TDatabaseStatus,
+} from "./database.model";
 import {
   BadRequestError,
   InternalServerError,
@@ -259,6 +265,114 @@ export function useDatabaseRepo() {
     }
   }
 
+  /**
+   * Add a node to an existing database
+   */
+  async function addNode(_id: string | ObjectId, node: TDatabaseNode) {
+    try {
+      _id = new ObjectId(_id);
+    } catch {
+      throw new BadRequestError("Invalid database ID");
+    }
+
+    // Convert serverId to ObjectId if needed
+    const nodeWithObjectId: TDatabaseNode = {
+      ...node,
+      serverId:
+        typeof node.serverId === "string" ? new ObjectId(node.serverId) : node.serverId,
+    };
+
+    try {
+      const result = await repo.collection.updateOne(
+        { _id },
+        {
+          $push: { nodes: nodeWithObjectId } as any,
+          $set: { updatedAt: new Date() },
+        }
+      );
+
+      if (result.matchedCount === 0) {
+        throw new NotFoundError("Database not found");
+      }
+
+      repo.delCachedData();
+      return result;
+    } catch (error) {
+      if (error instanceof NotFoundError) throw error;
+      throw new InternalServerError("Failed to add node to database");
+    }
+  }
+
+  /**
+   * Remove a node from an existing database
+   */
+  async function removeNode(_id: string | ObjectId, serverId: string | ObjectId) {
+    try {
+      _id = new ObjectId(_id);
+      serverId = new ObjectId(serverId);
+    } catch {
+      throw new BadRequestError("Invalid ID format");
+    }
+
+    try {
+      const result = await repo.collection.updateOne(
+        { _id },
+        {
+          $pull: { nodes: { serverId } } as any,
+          $set: { updatedAt: new Date() },
+        }
+      );
+
+      if (result.matchedCount === 0) {
+        throw new NotFoundError("Database not found");
+      }
+
+      repo.delCachedData();
+      return result;
+    } catch (error) {
+      if (error instanceof NotFoundError) throw error;
+      throw new InternalServerError("Failed to remove node from database");
+    }
+  }
+
+  /**
+   * Update the status of a specific node in a database
+   */
+  async function updateNodeStatus(
+    _id: string | ObjectId,
+    serverId: string | ObjectId,
+    status: TDatabaseNodeStatus
+  ) {
+    try {
+      _id = new ObjectId(_id);
+      serverId = new ObjectId(serverId);
+    } catch {
+      throw new BadRequestError("Invalid ID format");
+    }
+
+    try {
+      const result = await repo.collection.updateOne(
+        { _id, "nodes.serverId": serverId },
+        {
+          $set: {
+            "nodes.$.status": status,
+            updatedAt: new Date(),
+          },
+        }
+      );
+
+      if (result.matchedCount === 0) {
+        throw new NotFoundError("Database or node not found");
+      }
+
+      repo.delCachedData();
+      return result;
+    } catch (error) {
+      if (error instanceof NotFoundError) throw error;
+      throw new InternalServerError("Failed to update node status");
+    }
+  }
+
   return {
     createIndexes,
     add,
@@ -269,5 +383,8 @@ export function useDatabaseRepo() {
     updateBackupTime,
     deleteById,
     getByServerId,
+    addNode,
+    removeNode,
+    updateNodeStatus,
   };
 }

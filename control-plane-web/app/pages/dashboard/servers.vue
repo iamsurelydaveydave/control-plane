@@ -10,7 +10,7 @@ definePageMeta({
 })
 
 const toast = useToast()
-const { getAll, add, deleteById } = useServer()
+const { getAll, add, deleteById, testConnection } = useServer()
 const { getAll: getAllSSHKeys } = useSSHKey()
 
 // Fetch SSH keys for the dropdown
@@ -57,6 +57,8 @@ const statusColor: Record<string, 'success' | 'error' | 'warning' | 'neutral'> =
 // Add dialog
 const addOpen = ref(false)
 const adding = ref(false)
+const testing = ref(false)
+const connectionStatus = ref<{ success: boolean, error?: string, serverInfo?: { os: string, hostname: string, uptime: string } } | null>(null)
 const form = reactive({
   name: '',
   host: '',
@@ -73,7 +75,48 @@ function openAdd() {
     sshPort: 22,
     sshKeyId: defaultSSHKey.value?._id ?? ''
   })
+  connectionStatus.value = null
   addOpen.value = true
+}
+
+async function handleTestConnection() {
+  if (!form.host || !form.sshKeyId || testing.value) return
+  testing.value = true
+  connectionStatus.value = null
+  try {
+    const result = await testConnection({
+      host: form.host,
+      sshUser: form.sshUser,
+      sshPort: form.sshPort,
+      sshKeyId: form.sshKeyId
+    })
+    connectionStatus.value = result
+    if (result.success) {
+      toast.add({
+        title: 'Connection successful',
+        description: `Connected to ${result.serverInfo?.hostname}`,
+        color: 'success',
+        icon: 'i-lucide-check'
+      })
+    } else {
+      toast.add({
+        title: 'Connection failed',
+        description: result.error,
+        color: 'error',
+        icon: 'i-lucide-x'
+      })
+    }
+  } catch (e: unknown) {
+    const err = e as { data?: { message?: string } }
+    connectionStatus.value = { success: false, error: err?.data?.message || 'Connection test failed' }
+    toast.add({
+      title: 'Connection test failed',
+      description: err?.data?.message || 'Unknown error',
+      color: 'error'
+    })
+  } finally {
+    testing.value = false
+  }
 }
 
 async function submitAdd() {
@@ -337,6 +380,58 @@ useHead({ title: 'Servers · Control Plane' })
               <code class="block text-xs font-mono break-all bg-warning/10 p-2 rounded">
                 ssh {{ form.sshUser || 'root' }}@{{ form.host || 'YOUR_SERVER_IP' }} "mkdir -p ~/.ssh && echo '{{ selectedSSHKey.publicKey }}' >> ~/.ssh/authorized_keys"
               </code>
+            </template>
+          </UAlert>
+
+          <!-- Test connection button -->
+          <div v-if="form.host && form.sshKeyId" class="flex items-center gap-3">
+            <UButton
+              color="neutral"
+              variant="outline"
+              icon="i-lucide-plug"
+              :loading="testing"
+              @click="handleTestConnection"
+            >
+              Test Connection
+            </UButton>
+            <div v-if="connectionStatus" class="flex items-center gap-2">
+              <UIcon
+                :name="connectionStatus.success ? 'i-lucide-check-circle' : 'i-lucide-x-circle'"
+                :class="connectionStatus.success ? 'text-success' : 'text-error'"
+                class="size-5"
+              />
+              <span
+                :class="connectionStatus.success ? 'text-success' : 'text-error'"
+                class="text-sm"
+              >
+                {{ connectionStatus.success ? 'Connected' : connectionStatus.error }}
+              </span>
+            </div>
+          </div>
+
+          <!-- Connection info -->
+          <UAlert
+            v-if="connectionStatus?.success && connectionStatus.serverInfo"
+            color="success"
+            variant="soft"
+            icon="i-lucide-server"
+            title="Server information"
+          >
+            <template #description>
+              <dl class="grid grid-cols-3 gap-2 text-xs">
+                <div>
+                  <dt class="text-muted">Hostname</dt>
+                  <dd class="font-mono">{{ connectionStatus.serverInfo.hostname }}</dd>
+                </div>
+                <div>
+                  <dt class="text-muted">Uptime</dt>
+                  <dd class="font-mono">{{ connectionStatus.serverInfo.uptime }}</dd>
+                </div>
+                <div class="col-span-3">
+                  <dt class="text-muted">OS</dt>
+                  <dd class="font-mono truncate">{{ connectionStatus.serverInfo.os }}</dd>
+                </div>
+              </dl>
             </template>
           </UAlert>
 

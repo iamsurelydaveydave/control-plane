@@ -1,11 +1,14 @@
 import { Request, Response, NextFunction } from "express";
+import { ObjectId } from "mongodb";
 import { useDatabaseRepo } from "./database.repository";
-import { schemaDatabaseCreate, schemaDatabaseUpdate } from "./database.model";
-import { BadRequestError } from "../../utils";
+import { schemaDatabaseCreate, schemaDatabaseUpdate, databaseNodeRoles } from "./database.model";
+import { BadRequestError, NotFoundError } from "../../utils";
 import { useMongoDBProvisioner } from "../../services";
+import { useServerRepo } from "../server";
 
 export function useDatabaseController() {
   const repo = useDatabaseRepo();
+  const serverRepo = useServerRepo();
   const mongoProvisioner = useMongoDBProvisioner();
 
   async function add(req: Request, res: Response, next: NextFunction) {
@@ -309,6 +312,209 @@ export function useDatabaseController() {
     }
   }
 
+  /**
+   * Add a node to an existing database
+   * Body: { serverId: string, role: 'secondary' | 'arbiter' }
+   */
+  async function addNode(req: Request, res: Response, next: NextFunction) {
+    try {
+      const databaseId = req.params.id as string;
+      const { serverId, role } = req.body;
+
+      // Validate request body
+      if (!serverId) {
+        next(new BadRequestError("serverId is required"));
+        return;
+      }
+
+      if (!role || !['secondary', 'arbiter'].includes(role)) {
+        next(new BadRequestError("role must be 'secondary' or 'arbiter'"));
+        return;
+      }
+
+      // Get database
+      const database = await repo.getById(databaseId);
+      if (!database) {
+        next(new NotFoundError("Database not found"));
+        return;
+      }
+
+      if (database.type !== "mongodb") {
+        next(new BadRequestError("Adding nodes is only supported for MongoDB"));
+        return;
+      }
+
+      // Validate server exists
+      const server = await serverRepo.getById(serverId);
+      if (!server) {
+        next(new NotFoundError(`Server not found: ${serverId}`));
+        return;
+      }
+
+      // Check server is not already in this database
+      const serverAlreadyInDb = database.nodes.some(
+        (n) => n.serverId.toString() === serverId.toString()
+      );
+      if (serverAlreadyInDb) {
+        next(new BadRequestError("Server is already part of this database"));
+        return;
+      }
+
+      // Check server is online
+      if (server.status !== "online") {
+        next(new BadRequestError(`Server is not online (status: ${server.status})`));
+        return;
+      }
+
+      const userId = req.cookies?.user;
+
+      // Start provisioning in background, return 202
+      mongoProvisioner
+        .addNode({
+          databaseId,
+          serverId,
+          role,
+          triggeredBy: userId,
+          onLog: (line) => {
+            console.log(`[AddNode ${databaseId}] ${line}`);
+          },
+        })
+        .catch((err) => {
+          console.error(`Add node failed for ${databaseId}:`, err);
+        });
+
+      res.status(202).json({
+        message: "Node addition started",
+        databaseId,
+        serverId,
+        role,
+        status: "provisioning",
+      });
+    } catch (error) {
+      next(error);
+    }
+  }
+
+  /**
+   * Remove a node from an existing database
+   * Cannot remove primary or last node
+   */
+  async function removeNode(req: Request, res: Response, next: NextFunction) {
+    try {
+      const databaseId = req.params.id as string;
+      const serverId = req.params.serverId as string;
+
+      // Get database
+      const database = await repo.getById(databaseId);
+      if (!database) {
+        next(new NotFoundError("Database not found"));
+        return;
+      }
+
+      if (database.type !== "mongodb") {
+        next(new BadRequestError("Removing nodes is only supported for MongoDB"));
+        return;
+      }
+
+      // Find the node
+      const node = database.nodes.find(
+        (n) => n.serverId.toString() === serverId.toString()
+      );
+
+      if (!node) {
+        next(new NotFoundError("Node not found in this database"));
+        return;
+      }
+
+      // Cannot remove primary
+      if (node.role === "primary") {
+        next(new BadRequestError("Cannot remove the primary node. Step down the primary first."));
+        return;
+      }
+
+      // Cannot remove standalone
+      if (node.role === "standalone") {
+        next(new BadRequestError("Cannot remove a standalone node. Delete the database instead."));
+        return;
+      }
+
+      // Cannot remove the last node
+      if (database.nodes.length <= 1) {
+        next(new BadRequestError("Cannot remove the last node. Delete the database instead."));
+        return;
+      }
+
+      // Cannot remove if only one node would remain (replica set needs at least 2 voting members)
+      // Note: This is simplified - actual MongoDB rules are more complex
+      const votingMembers = database.nodes.filter((n) => n.role !== "arbiter");
+      if (votingMembers.length <= 2 && node.role !== "arbiter") {
+        next(new BadRequestError("Cannot remove this node - replica set would have insufficient members"));
+        return;
+      }
+
+      const userId = req.cookies?.user;
+
+      // Start removal in background, return 202
+      mongoProvisioner
+        .removeNode({
+          databaseId,
+          serverId,
+          triggeredBy: userId,
+          onLog: (line) => {
+            console.log(`[RemoveNode ${databaseId}] ${line}`);
+          },
+        })
+        .catch((err) => {
+          console.error(`Remove node failed for ${databaseId}:`, err);
+        });
+
+      res.status(202).json({
+        message: "Node removal started",
+        databaseId,
+        serverId,
+        status: "removing",
+      });
+    } catch (error) {
+      next(error);
+    }
+  }
+
+  /**
+   * Get health status of a database
+   */
+  async function getHealth(req: Request, res: Response, next: NextFunction) {
+    try {
+      const databaseId = req.params.id as string;
+
+      // Get database
+      const database = await repo.getById(databaseId);
+      if (!database) {
+        next(new NotFoundError("Database not found"));
+        return;
+      }
+
+      if (database.type !== "mongodb") {
+        next(new BadRequestError("Health check is only supported for MongoDB"));
+        return;
+      }
+
+      if (database.status !== "running") {
+        res.json({
+          status: "not_running",
+          databaseStatus: database.status,
+          members: [],
+        });
+        return;
+      }
+
+      const health = await mongoProvisioner.getHealth(databaseId);
+
+      res.json(health);
+    } catch (error) {
+      next(error);
+    }
+  }
+
   return {
     add,
     getById,
@@ -320,5 +526,8 @@ export function useDatabaseController() {
     backup,
     getCredentials,
     getLogs,
+    addNode,
+    removeNode,
+    getHealth,
   };
 }

@@ -94,9 +94,13 @@ GET    /api/apps                # List apps
 POST   /api/apps                # Create app
 GET    /api/apps/:id            # Get app
 PATCH  /api/apps/:id            # Update app
-DELETE /api/apps/:id            # Delete app
-POST   /api/apps/:id/deploy     # Deploy (deployments:write)
-POST   /api/apps/:id/restart    # Restart (deployments:write)
+DELETE /api/apps/:id            # Delete app (stops containers, removes routing)
+GET    /api/apps/:id/instances  # List instances with container status
+GET    /api/apps/:id/instances/:instanceId/logs  # Get container logs
+POST   /api/apps/:id/deploy     # Deploy (deploys containers, syncs routing)
+POST   /api/apps/:id/stop       # Stop (stops containers, removes routing)
+POST   /api/apps/:id/restart    # Restart (restarts containers)
+PATCH  /api/apps/:id/scale      # Scale (adds/removes containers, syncs routing)
 
 # Databases (requires databases:read/write scope)
 GET    /api/databases           # List databases
@@ -119,6 +123,11 @@ DELETE /api/api-tokens/:id      # Revoke token
 
 # Audit
 GET    /api/audit-logs          # Audit trail
+
+# Health
+GET    /api/health              # Basic health check
+GET    /api/health/detailed     # Detailed health (memory, CPU, Caddy status)
+GET    /api/health/caddy        # Caddy-specific health check
 ```
 
 ## Quick Start
@@ -133,6 +142,17 @@ yarn dev
 ## Testing
 
 ```bash
-yarn test                       # Run all tests
-MONGO_DB=control_plane_test yarn test  # Use test database
+yarn test:unit                  # Run unit tests only (53 tests, no DB required)
+yarn test                       # Run all tests (requires MongoDB + Redis)
+yarn test:watch                 # Run tests in watch mode
+yarn test:caddy                 # Run Caddy service tests only
+yarn test:docker                # Run Docker executor tests only
+yarn test:app                   # Run App service tests only
+
+# With Docker test environment
+./test.sh setup                 # Start MongoDB + Redis containers
+./test.sh all                   # Run all tests with auto-setup
+./test.sh teardown              # Stop test containers
 ```
+
+See `test/README.md` for detailed testing documentation.

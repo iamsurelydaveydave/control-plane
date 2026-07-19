@@ -15,6 +15,9 @@ const {
   backup,
   getCredentials,
   getLogs,
+  addNode,
+  removeNode,
+  getHealth,
 } = useDatabaseController();
 
 router.get("/", requireAuth, requireScope("databases:read"), getAll);
@@ -27,5 +30,10 @@ router.post("/:id/remove", requireAuth, requireScope("databases:write"), remove)
 router.post("/:id/backup", requireAuth, requireScope("databases:write"), backup);
 router.get("/:id/credentials", requireAuth, requireScope("databases:read"), getCredentials);
 router.get("/:id/logs", requireAuth, requireScope("databases:read"), getLogs);
+
+// Node management routes
+router.post("/:id/nodes", requireAuth, requireScope("databases:write"), addNode);
+router.delete("/:id/nodes/:serverId", requireAuth, requireScope("databases:write"), removeNode);
+router.get("/:id/health", requireAuth, requireScope("databases:read"), getHealth);
 
 export default router;

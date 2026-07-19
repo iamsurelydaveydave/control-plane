@@ -9,3 +9,4 @@ export * from "./audit-log";
 export * from "./settings";
 export * from "./ssh-key";
 export * from "./api-token";
+export * from "./secret";

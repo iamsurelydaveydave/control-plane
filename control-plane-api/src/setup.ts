@@ -11,12 +11,16 @@ import {
   useSSHKeyRepo,
   useAPITokenRepo,
 } from "./resources";
+import { useAppService } from "./resources/app/app.service";
+import { useCaddyService } from "./services/caddy.service";
 import {
   REDIS_HOST,
   REDIS_PORT,
   ROOT_USERNAME,
   ROOT_USER_EMAIL,
   ROOT_USER_PASSWORD,
+  CADDY_ENABLED,
+  CADDY_ADMIN_URL,
 } from "./config";
 
 /**
@@ -96,6 +100,9 @@ export default async function setup() {
   // Create initial admin user if configured
   await createInitialAdminUser();
 
+  // Initialize Caddy routing
+  await initCaddyRouting();
+
   logger.log({
     level: "info",
     message: "Setup complete",
@@ -154,6 +161,52 @@ async function createInitialAdminUser() {
     logger.log({
       level: "error",
       message: `Failed to create initial admin user: ${error}`,
+    });
+  }
+}
+
+/**
+ * Initialize Caddy reverse proxy routing.
+ * Rebuilds routes from database state on startup.
+ */
+async function initCaddyRouting() {
+  if (!CADDY_ENABLED) {
+    logger.log({
+      level: "info",
+      message: "Caddy integration disabled (CADDY_ENABLED=false)",
+    });
+    return;
+  }
+
+  logger.log({
+    level: "info",
+    message: `Initializing Caddy routing (${CADDY_ADMIN_URL})...`,
+  });
+
+  const caddyService = useCaddyService();
+
+  // Health check Caddy
+  const health = await caddyService.healthCheck();
+  if (!health.healthy) {
+    logger.log({
+      level: "warn",
+      message: `Caddy not reachable: ${health.error || "unknown error"}. Routing will be synced when Caddy becomes available.`,
+    });
+    return;
+  }
+
+  // Rebuild all routes from database
+  try {
+    const appService = useAppService();
+    await appService.rebuildAllRoutes();
+    logger.log({
+      level: "info",
+      message: "Caddy routing initialized",
+    });
+  } catch (error) {
+    logger.log({
+      level: "error",
+      message: `Failed to rebuild Caddy routes: ${error}`,
     });
   }
 }

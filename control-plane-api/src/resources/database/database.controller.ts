@@ -2,7 +2,7 @@ import { Request, Response, NextFunction } from "express";
 import { ObjectId } from "mongodb";
 import { useDatabaseRepo } from "./database.repository";
 import { schemaDatabaseCreate, schemaDatabaseUpdate, databaseNodeRoles } from "./database.model";
-import { BadRequestError, NotFoundError } from "../../utils";
+import { BadRequestError, NotFoundError, InternalServerError } from "../../utils";
 import { useMongoDBProvisioner } from "../../services";
 import { useServerRepo } from "../server";
 
@@ -26,7 +26,24 @@ export function useDatabaseController() {
       
       if (autoProvision && value.type === "mongodb") {
         const userId = req.cookies?.user;
-        
+
+        // Verify all target servers are ready for provisioning
+        for (const node of value.nodes ?? []) {
+          const server = await serverRepo.getById(node.serverId);
+          if (!server) {
+            next(new NotFoundError(`Server ${node.serverId} not found`));
+            return;
+          }
+          if (server.status !== "online") {
+            next(new BadRequestError(`Server "${server.name}" is not ready (status: ${server.status}). Complete server setup first.`));
+            return;
+          }
+          if (!server.dockerInstalled) {
+            next(new BadRequestError(`Server "${server.name}" does not have Docker installed. Complete server setup first.`));
+            return;
+          }
+        }
+
         // Don't await - let it run in background
         mongoProvisioner
           .provision({
@@ -129,6 +146,19 @@ export function useDatabaseController() {
         return;
       }
 
+      // Verify all node servers are ready
+      for (const node of database.nodes) {
+        const server = await serverRepo.getById(node.serverId.toString());
+        if (server && server.status !== "online") {
+          next(new BadRequestError(`Server "${server.name}" is not online (status: ${server.status}). Check server status before provisioning.`));
+          return;
+        }
+        if (server && !server.dockerInstalled) {
+          next(new BadRequestError(`Server "${server.name}" does not have Docker installed. Complete server setup first.`));
+          return;
+        }
+      }
+
       // Start provisioning
       const result = await mongoProvisioner.provision({
         databaseId: id,
@@ -170,6 +200,19 @@ export function useDatabaseController() {
       if (database.type !== "mongodb") {
         next(new BadRequestError("Only MongoDB provisioning is supported"));
         return;
+      }
+
+      // Verify all node servers are ready
+      for (const node of database.nodes) {
+        const server = await serverRepo.getById(node.serverId.toString());
+        if (server && server.status !== "online") {
+          next(new BadRequestError(`Server "${server.name}" is not online (status: ${server.status}). Check server status before provisioning.`));
+          return;
+        }
+        if (server && !server.dockerInstalled) {
+          next(new BadRequestError(`Server "${server.name}" does not have Docker installed. Complete server setup first.`));
+          return;
+        }
       }
 
       // Update status to provisioning
@@ -241,22 +284,63 @@ export function useDatabaseController() {
   async function backup(req: Request, res: Response, next: NextFunction) {
     try {
       const id = req.params.id as string;
+      const userId = req.cookies?.user;
       const database = await repo.getById(id);
 
-      if (!database) {
-        next(new BadRequestError("Database not found"));
-        return;
+      if (!database) { next(new NotFoundError("Database not found")); return; }
+      if (database.type !== "mongodb") { next(new BadRequestError("Backup only supported for MongoDB")); return; }
+
+      const result = await mongoProvisioner.backup({
+        databaseId: id,
+        triggeredBy: userId,
+      });
+
+      if (result.success) {
+        res.json({ message: "Backup completed", s3Key: result.s3Key });
+      } else {
+        next(new InternalServerError(result.error || "Backup failed"));
       }
+    } catch (error) {
+      next(error);
+    }
+  }
 
-      if (!database.backup?.enabled) {
-        next(new BadRequestError("Backups not enabled for this database"));
-        return;
+  async function restore(req: Request, res: Response, next: NextFunction) {
+    try {
+      const id = req.params.id as string;
+      const userId = req.cookies?.user;
+      const { s3Key } = req.body;
+
+      if (!s3Key) { next(new BadRequestError("s3Key is required")); return; }
+
+      const database = await repo.getById(id);
+      if (!database) { next(new NotFoundError("Database not found")); return; }
+      if (database.type !== "mongodb") { next(new BadRequestError("Restore only supported for MongoDB")); return; }
+      if (database.status !== "running") { next(new BadRequestError("Database must be running to restore")); return; }
+
+      const result = await mongoProvisioner.restore({
+        databaseId: id,
+        s3Key,
+        triggeredBy: userId,
+      });
+
+      if (result.success) {
+        res.json({ message: "Restore completed" });
+      } else {
+        next(new InternalServerError(result.error || "Restore failed"));
       }
+    } catch (error) {
+      next(error);
+    }
+  }
 
-      // TODO: Implement actual backup trigger logic
-      await repo.updateBackupTime(id);
-
-      res.json({ message: "Backup initiated" });
+  async function getBackupRecords(req: Request, res: Response, next: NextFunction) {
+    try {
+      const id = req.params.id as string;
+      const database = await repo.getById(id);
+      if (!database) { next(new NotFoundError("Database not found")); return; }
+      const records = await repo.getBackupRecords(id);
+      res.json({ records });
     } catch (error) {
       next(error);
     }
@@ -282,8 +366,70 @@ export function useDatabaseController() {
           adminUser: database.credentials.adminUser,
           adminPassword: database.credentials.adminPassword,
           connectionString: database.credentials.connectionString,
+          // Include SRV connection string when DNS is configured
+          srvConnectionString: database.dns?.enabled
+            ? database.dns.srvConnectionString
+            : undefined,
         },
       });
+    } catch (error) {
+      next(error);
+    }
+  }
+
+  /**
+   * POST /databases/:id/dns
+   * Trigger DNS record creation (or re-creation) for a running replica set.
+   * Requires DNS credentials to be saved in settings first.
+   */
+  async function configureDNS(req: Request, res: Response, next: NextFunction) {
+    try {
+      const id = req.params.id as string;
+      const database = await repo.getById(id);
+      if (!database) { next(new NotFoundError("Database not found")); return; }
+
+      const result = await mongoProvisioner.configureDNS(id);
+
+      if (!result) {
+        next(new BadRequestError(
+          "DNS provider not configured. Save Cloudflare credentials via PUT /api/settings/dns first."
+        ));
+        return;
+      }
+
+      res.json({
+        message: "DNS records created",
+        clusterHost: result.clusterHost,
+        nodeHosts: result.nodeHosts,
+        srvConnectionString: maskCredentials(result.srvConnectionString),
+        recordCount: result.records.length,
+      });
+    } catch (error) {
+      next(error);
+    }
+  }
+
+  /**
+   * DELETE /databases/:id/dns
+   * Remove DNS records and clear the dns field on the database.
+   */
+  async function removeDNS(req: Request, res: Response, next: NextFunction) {
+    try {
+      const id = req.params.id as string;
+      const database = await repo.getById(id);
+      if (!database) { next(new NotFoundError("Database not found")); return; }
+
+      if (!database.dns?.records?.length) {
+        res.json({ message: "No DNS records to remove" });
+        return;
+      }
+
+      const { useDNSService } = await import("../../services/dns.service");
+      const dns = useDNSService();
+      await dns.teardown(database.dns.records);
+      await repo.updateDNS(id, null);
+
+      res.json({ message: "DNS records removed", removed: database.dns.records.length });
     } catch (error) {
       next(error);
     }
@@ -363,6 +509,11 @@ export function useDatabaseController() {
       // Check server is online
       if (server.status !== "online") {
         next(new BadRequestError(`Server is not online (status: ${server.status})`));
+        return;
+      }
+
+      if (!server.dockerInstalled) {
+        next(new BadRequestError(`Server "${server.name}" does not have Docker installed. Complete server setup first.`));
         return;
       }
 
@@ -524,10 +675,19 @@ export function useDatabaseController() {
     reprovision,
     remove,
     backup,
+    restore,
+    getBackupRecords,
     getCredentials,
     getLogs,
     addNode,
     removeNode,
     getHealth,
+    configureDNS,
+    removeDNS,
   };
+}
+
+/** Mask the password inside a connection string for safe display. */
+function maskCredentials(s: string): string {
+  return s.replace(/:[^:@]+@/, ":****@");
 }

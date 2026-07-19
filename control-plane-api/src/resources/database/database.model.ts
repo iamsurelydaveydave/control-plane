@@ -30,7 +30,38 @@ export type TDatabaseBackup = {
   enabled: boolean;
   schedule: string;
   s3Bucket: string;
+  s3Region?: string;
   lastBackup?: Date;
+};
+
+/**
+ * DNS configuration stored on the database document once DNS records are
+ * provisioned. The `records` array holds every Cloudflare record ID so
+ * they can be deleted when the cluster is torn down.
+ */
+export type TDatabaseDNS = {
+  enabled: boolean;
+  provider: string;            // e.g. "cloudflare"
+  clusterHost: string;         // e.g. "mydb.example.com"
+  nodeHosts: string[];         // e.g. ["node1.mydb.example.com", …]
+  srvConnectionString: string; // mongodb+srv://admin:***@mydb.example.com/…
+  records: Array<{
+    id: string;                // provider record ID (for deletion)
+    type: string;              // "A" | "SRV" | "TXT"
+    name: string;              // full DNS name
+  }>;
+  configuredAt: Date;
+};
+
+export type TDatabaseBackupRecord = {
+  _id?: ObjectId;
+  s3Key: string;
+  s3Bucket: string;
+  s3Region: string;
+  sizeBytes?: number;
+  createdAt: Date;
+  status: "success" | "failed";
+  error?: string;
 };
 
 export type TDatabase = {
@@ -43,6 +74,8 @@ export type TDatabase = {
   credentials: TDatabaseCredentials;
   nodes: TDatabaseNode[];
   backup?: TDatabaseBackup;
+  backupRecords?: TDatabaseBackupRecord[];
+  dns?: TDatabaseDNS;
   createdAt?: Date;
   updatedAt?: Date;
 };

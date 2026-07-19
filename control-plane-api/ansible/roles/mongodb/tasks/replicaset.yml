@@ -112,7 +112,5 @@
     delay: 5
     timeout: 60
 
-# Initialize replica set (run only on primary)
-- name: Initialize replica set
-  include_tasks: init-replicaset.yml
-  when: mongodb_node_role == "primary"
+# Replica set initialisation is handled by Phase 2 of the calling playbook,
+# after ALL nodes have been provisioned. Do not initialise here.

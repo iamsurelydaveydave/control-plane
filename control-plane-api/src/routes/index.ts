@@ -46,4 +46,7 @@ router.use("/api-tokens", apiTokens);
 import secrets from "./secrets.route";
 router.use("/secrets", secrets);
 
+import settings from "./settings.route";
+router.use("/settings", settings);
+
 export default router;

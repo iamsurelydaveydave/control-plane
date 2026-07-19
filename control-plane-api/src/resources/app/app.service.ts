@@ -123,6 +123,24 @@ export function useAppService() {
       throw new NotFoundError("App not found");
     }
 
+    // Pre-flight: verify all target servers are ready before touching any state
+    for (const serverId of app.serverIds) {
+      const server = await serverRepo.getById(serverId);
+      if (!server) {
+        throw new NotFoundError(`Server ${serverId} not found`);
+      }
+      if (server.status !== "online") {
+        throw new BadRequestError(
+          `Server "${server.name}" is not ready for deployment (status: ${server.status}). Complete server setup first.`
+        );
+      }
+      if (!server.dockerInstalled) {
+        throw new BadRequestError(
+          `Server "${server.name}" does not have Docker installed. Complete server setup first.`
+        );
+      }
+    }
+
     // Update version/image if provided
     if (options.version && app.source.type === "image") {
       const newImage = app.source.image?.replace(/:.*$/, `:${options.version}`) || options.version;

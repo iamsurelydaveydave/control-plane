@@ -25,6 +25,21 @@ const schemaLogin = Joi.object({
   password: Joi.string().required(),
 });
 
+const schemaUpdateMe = Joi.object({
+  currentPassword: Joi.string().required(),
+  email: Joi.string().email().optional(),
+  newPassword: Joi.string().min(8).optional(),
+  confirmPassword: Joi.string().optional(),
+}).custom((value, helpers) => {
+  if (value.newPassword && value.newPassword !== value.confirmPassword) {
+    return helpers.error("any.invalid", { message: "Passwords do not match" });
+  }
+  if (!value.email && !value.newPassword) {
+    return helpers.error("any.invalid", { message: "Provide at least an email or new password" });
+  }
+  return value;
+});
+
 export function useAuthController() {
   const userService = useUserService();
   const sessionStore = useSessionStore();
@@ -119,6 +134,51 @@ export function useAuthController() {
     }
   }
 
+  async function updateMe(req: Request, res: Response, next: NextFunction) {
+    try {
+      const userId = req.cookies?.user;
+      if (!userId) {
+        next(new BadRequestError("Not authenticated"));
+        return;
+      }
+
+      const { error, value } = schemaUpdateMe.validate(req.body);
+      if (error) {
+        next(new BadRequestError(error.message));
+        return;
+      }
+
+      const user = await userService.getById(userId);
+      if (!user) {
+        next(new BadRequestError("User not found"));
+        return;
+      }
+
+      // Verify current password before allowing any change
+      const isValid = await comparePassword(value.currentPassword, user.password);
+      if (!isValid) {
+        next(new BadRequestError("Current password is incorrect"));
+        return;
+      }
+
+      await userService.updateProfile(userId, {
+        email: value.email,
+        newPassword: value.newPassword,
+      });
+
+      res.json({
+        message: "Profile updated successfully",
+        user: {
+          _id: user._id,
+          email: value.email ?? user.email,
+          role: user.role,
+        },
+      });
+    } catch (error) {
+      next(error);
+    }
+  }
+
   async function issueToken(req: Request, res: Response, next: NextFunction) {
     try {
       const userId = req.cookies?.user;
@@ -159,6 +219,7 @@ export function useAuthController() {
     login,
     logout,
     me,
+    updateMe,
     issueToken,
   };
 }

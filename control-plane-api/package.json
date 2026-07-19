@@ -13,6 +13,7 @@
     "test:caddy": "NODE_ENV=test mocha --require ts-node/register --require tsconfig-paths/register --require ./test/support/root-hooks.ts 'test/caddy.service.spec.ts' --exit",
     "test:docker": "NODE_ENV=test mocha --require ts-node/register --require tsconfig-paths/register --require ./test/support/root-hooks.ts 'test/docker.executor.spec.ts' --exit",
     "test:app": "NODE_ENV=test mocha --require ts-node/register --require tsconfig-paths/register --require ./test/support/root-hooks.ts 'test/app.service.spec.ts' --exit",
+    "test:database": "NODE_ENV=test mocha --require ts-node/register --require tsconfig-paths/register --require ./test/support/root-hooks.ts 'test/database.spec.ts' --exit",
     "lint": "eslint src/**/*.ts --fix"
   },
   "dependencies": {

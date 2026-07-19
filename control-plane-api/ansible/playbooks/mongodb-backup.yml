@@ -1,0 +1,99 @@
+---
+# MongoDB Backup to S3
+# Usage: ansible-playbook playbooks/mongodb-backup.yml -i <inventory> -e @vars.yml
+#
+# Required vars: mongodb_container_name, mongodb_admin_user, mongodb_admin_password,
+#                s3_bucket, s3_access_key, s3_secret_key, s3_region
+# Optional vars: mongodb_port (default 27017), backup_path (default /tmp/mongodb-backups)
+
+- name: Backup MongoDB to S3
+  hosts: mongodb_primary
+  become: yes
+  gather_facts: yes
+
+  vars:
+    mongodb_port: "{{ mongodb_port | default(27017) }}"
+    mongodb_container_name: "{{ mongodb_container_name | default('mongodb') }}"
+    backup_path: "{{ backup_path | default('/tmp/mongodb-backups') }}"
+    backup_name: "{{ backup_name | default('backup-' + ansible_date_time.iso8601_basic_short) }}"
+
+  pre_tasks:
+    - name: Validate required variables
+      assert:
+        that:
+          - mongodb_admin_user is defined
+          - mongodb_admin_password is defined
+          - mongodb_container_name is defined
+          - s3_bucket is defined
+          - s3_access_key is defined
+          - s3_secret_key is defined
+          - s3_region is defined
+        fail_msg: "Required backup variables must be defined"
+
+  tasks:
+    - name: Install AWS CLI (pip3)
+      pip:
+        name: awscli
+        state: present
+        executable: pip3
+
+    - name: Create backup directory on host
+      file:
+        path: "{{ backup_path }}/{{ backup_name }}"
+        state: directory
+        mode: '0755'
+
+    - name: Run mongodump inside container
+      command: >
+        docker exec {{ mongodb_container_name }} mongodump
+        --username "{{ mongodb_admin_user }}"
+        --password "{{ mongodb_admin_password }}"
+        --authenticationDatabase admin
+        --out /tmp/mongodump-{{ backup_name }}
+      register: mongodump_result
+
+    - name: Copy dump from container to host
+      command: >
+        docker cp {{ mongodb_container_name }}:/tmp/mongodump-{{ backup_name }}
+        {{ backup_path }}/{{ backup_name }}/dump
+      when: mongodump_result.rc == 0
+
+    - name: Clean up dump inside container
+      command: >
+        docker exec {{ mongodb_container_name }} rm -rf /tmp/mongodump-{{ backup_name }}
+      ignore_errors: yes
+
+    - name: Compress backup archive
+      archive:
+        path: "{{ backup_path }}/{{ backup_name }}/dump"
+        dest: "{{ backup_path }}/{{ backup_name }}.tar.gz"
+        format: gz
+      register: archive_result
+
+    - name: Upload to S3
+      command: >
+        aws s3 cp {{ backup_path }}/{{ backup_name }}.tar.gz
+        s3://{{ s3_bucket }}/{{ mongodb_container_name }}/{{ backup_name }}.tar.gz
+      environment:
+        AWS_ACCESS_KEY_ID: "{{ s3_access_key }}"
+        AWS_SECRET_ACCESS_KEY: "{{ s3_secret_key }}"
+        AWS_DEFAULT_REGION: "{{ s3_region }}"
+      register: s3_upload_result
+
+    - name: Clean up local backup files
+      file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - "{{ backup_path }}/{{ backup_name }}"
+        - "{{ backup_path }}/{{ backup_name }}.tar.gz"
+
+    - name: Set backup S3 path fact
+      set_fact:
+        backup_s3_key: "{{ mongodb_container_name }}/{{ backup_name }}.tar.gz"
+
+    - name: Display backup completion
+      debug:
+        msg: |
+          Backup completed successfully!
+          S3 path: s3://{{ s3_bucket }}/{{ backup_s3_key }}

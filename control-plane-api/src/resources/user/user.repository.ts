@@ -119,6 +119,28 @@ export function useUserRepo() {
     }
   }
 
+  async function updateEmail(_id: string | ObjectId, email: string) {
+    try {
+      _id = new ObjectId(_id);
+    } catch {
+      throw new BadRequestError("Invalid user ID");
+    }
+
+    try {
+      const result = await repo.collection.updateOne(
+        { _id },
+        { $set: { email, updatedAt: new Date() } }
+      );
+      repo.delCachedData();
+      return result;
+    } catch (error: any) {
+      if (error.message?.includes("duplicate")) {
+        throw new BadRequestError("Email already in use");
+      }
+      throw new InternalServerError("Failed to update email");
+    }
+  }
+
   async function count() {
     try {
       return await repo.collection.countDocuments();
@@ -133,6 +155,7 @@ export function useUserRepo() {
     getByEmail,
     getById,
     updatePassword,
+    updateEmail,
     count,
   };
 }

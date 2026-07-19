@@ -20,14 +20,17 @@
 #
 # Extra vars:
 #   mongodb_keyfile_content: (optional) Pre-generated keyfile content for replica set auth.
-#                            If not provided, one will be generated.
+#                            If not provided, one will be generated on the primary.
 
-- name: Provision MongoDB Replica Set
+# ---------------------------------------------------------------------------
+# Phase 1 — Provision each node (one at a time to avoid race conditions)
+# ---------------------------------------------------------------------------
+- name: Provision MongoDB Replica Set — Nodes
   hosts: mongodb
   become: yes
   gather_facts: yes
-  serial: 1  # Deploy one node at a time
-  
+  serial: 1
+
   vars:
     mongodb_mode: replicaset
     mongodb_version: "{{ mongodb_version | default('7.0') }}"
@@ -39,7 +42,7 @@
     mongodb_keyfile_dir: "{{ mongodb_keyfile_dir | default('/opt/mongodb/keyfile') }}"
     mongodb_replicaset_name: "{{ mongodb_replicaset_name | default('rs0') }}"
     docker_network: "{{ docker_network | default('cp_databases') }}"
-  
+
   pre_tasks:
     - name: Validate required variables
       assert:
@@ -49,35 +52,125 @@
           - mongodb_replicaset_name is defined
         fail_msg: "mongodb_admin_user, mongodb_admin_password, and mongodb_replicaset_name must be defined"
 
+    # Use inline ternary to avoid trailing-whitespace from >- block scalar folding
     - name: Set node role based on group membership
       set_fact:
-        mongodb_node_role: >-
-          {% if inventory_hostname in groups.get('mongodb_primary', []) %}primary
-          {% elif inventory_hostname in groups.get('mongodb_arbiter', []) %}arbiter
-          {% else %}secondary{% endif %}
+        mongodb_node_role: "{{ 'primary' if inventory_hostname in groups.get('mongodb_primary', []) else 'arbiter' if inventory_hostname in groups.get('mongodb_arbiter', []) else 'secondary' }}"
 
   roles:
     - role: common
       tags: [common, setup]
-    
+
     - role: docker
       tags: [docker, setup]
-    
+
     - role: mongodb
       tags: [mongodb, database]
 
+# ---------------------------------------------------------------------------
+# Phase 2 — Initialise the replica set on the primary
+#            Runs after ALL nodes are provisioned (not inside serial: 1)
+# ---------------------------------------------------------------------------
+- name: Provision MongoDB Replica Set — Initialise
+  hosts: mongodb_primary
+  become: yes
+  gather_facts: no
+  run_once: true
+
+  vars:
+    mongodb_port: "{{ mongodb_port | default(27017) }}"
+    mongodb_container_name: "{{ mongodb_container_name | default('mongodb') }}"
+    mongodb_replicaset_name: "{{ mongodb_replicaset_name | default('rs0') }}"
+
+  tasks:
+    - name: Wait for all nodes to be reachable on MongoDB port
+      wait_for:
+        host: "{{ hostvars[item]['ansible_host'] }}"
+        port: "{{ mongodb_port }}"
+        timeout: 120
+      loop: "{{ groups['mongodb'] }}"
+
+    - name: Check if replica set is already initialised
+      command: >
+        docker exec {{ mongodb_container_name }} mongosh
+        --eval "rs.status().ok"
+      register: rs_status
+      ignore_errors: yes
+      changed_when: false
+
+    - name: Initialise replica set
+      command: >
+        docker exec {{ mongodb_container_name }} mongosh --eval '
+        rs.initiate({
+          _id: "{{ mongodb_replicaset_name }}",
+          members: [
+            {% for host in groups["mongodb"] %}
+            {
+              _id: {{ loop.index0 }},
+              host: "{{ hostvars[host]["ansible_host"] }}:{{ mongodb_port }}",
+              priority: {% if hostvars[host]["mongodb_node_role"] == "primary" %}10{% elif hostvars[host]["mongodb_node_role"] == "arbiter" %}0{% else %}5{% endif %},
+              {% if hostvars[host]["mongodb_node_role"] == "arbiter" %}arbiterOnly: true,{% endif %}
+            }{% if not loop.last %},{% endif %}
+            {% endfor %}
+          ]
+        })'
+      when: rs_status.rc != 0
+      register: rs_init
+
+    - name: Wait for primary election
+      command: >
+        docker exec {{ mongodb_container_name }} mongosh --eval '
+        var status = rs.status();
+        while (status.members.filter(m => m.stateStr === "PRIMARY").length === 0) {
+          sleep(1000);
+          status = rs.status();
+        }
+        print("PRIMARY elected");
+        '
+      when: rs_init is changed
+      register: rs_wait
+      retries: 30
+      delay: 5
+      until: rs_wait.rc == 0
+
+    - name: Create admin user
+      command: >
+        docker exec {{ mongodb_container_name }} mongosh --eval '
+        use admin;
+        if (db.getUser("{{ mongodb_admin_user }}") === null) {
+          db.createUser({
+            user: "{{ mongodb_admin_user }}",
+            pwd: "{{ mongodb_admin_password }}",
+            roles: [
+              { role: "root", db: "admin" },
+              { role: "userAdminAnyDatabase", db: "admin" },
+              { role: "dbAdminAnyDatabase", db: "admin" },
+              { role: "readWriteAnyDatabase", db: "admin" },
+              { role: "clusterAdmin", db: "admin" }
+            ]
+          });
+          print("Admin user created");
+        } else {
+          print("Admin user already exists");
+        }
+        '
+      when: rs_init is changed
+      register: admin_user
+      retries: 5
+      delay: 5
+      until: admin_user.rc == 0
+
   post_tasks:
-    - name: Display connection information (primary only)
+    - name: Display connection information
       debug:
         msg: |
           MongoDB Replica Set provisioned successfully!
-          
+
           Replica Set Name: {{ mongodb_replicaset_name }}
-          
+
           Connection string:
           mongodb://{{ mongodb_admin_user }}:{{ mongodb_admin_password }}@{% for host in groups['mongodb'] %}{{ hostvars[host]['ansible_host'] }}:{{ mongodb_port }}{% if not loop.last %},{% endif %}{% endfor %}/admin?replicaSet={{ mongodb_replicaset_name }}
-          
+
           Connect with mongosh:
           mongosh "mongodb://{{ hostvars[groups['mongodb_primary'][0]]['ansible_host'] }}:{{ mongodb_port }}" --username {{ mongodb_admin_user }} --authenticationDatabase admin
-      when: mongodb_node_role == "primary"
       run_once: true

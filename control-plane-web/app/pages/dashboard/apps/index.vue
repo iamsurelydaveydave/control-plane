@@ -25,11 +25,14 @@ const page = ref(1)
 // Servers for the dropdown
 const { data: serversData } = useLazyAsyncData(
   'servers-dropdown',
-  () => getServers({ page: 1 }).catch(() => ({ items: [] as TServer[], pages: 0 }))
+  () => getServers({ page: 1 }).catch(() => ({ items: [] as TServer[], pages: 0 })),
+  { server: false }
 )
 const serverOptions = computed(() => {
   const servers = serversData.value?.items ?? []
-  return servers.map(s => ({ value: s._id, label: `${s.name} (${s.host})` }))
+  return servers
+    .filter(s => s.status === 'online' && s.dockerInstalled)
+    .map(s => ({ value: s._id, label: `${s.name} (${s.host})` }))
 })
 
 // Table columns
@@ -46,7 +49,7 @@ const columns = [
 const { data, status, refresh } = await useLazyAsyncData(
   'apps',
   () => getAll({ page: page.value, search: search.value }),
-  { immediate: true, watch: [page] }
+  { immediate: true, watch: [page], server: false }
 )
 
 const loading = computed(() => status.value === 'pending')
@@ -465,10 +468,12 @@ useHead({ title: 'Apps · Control Plane' })
                 v-if="!serverOptions.length"
                 class="text-xs text-muted"
               >
-                No servers available. <NuxtLink
+                No ready servers. Servers must be
+                <span class="font-medium text-highlighted">online with Docker installed</span>.
+                <NuxtLink
                   to="/dashboard/servers"
                   class="text-primary underline"
-                >Add one</NuxtLink> first.
+                >Set up a server</NuxtLink> first.
               </span>
             </template>
           </UFormField>

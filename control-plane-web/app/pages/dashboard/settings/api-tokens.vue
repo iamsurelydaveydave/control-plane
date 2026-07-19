@@ -273,7 +273,8 @@ const availableScopes = [
 
 const { data: apiTokens, refresh: refreshAPITokens, status: apiTokensStatus } = useLazyAsyncData(
   'api-tokens',
-  () => useNuxtApp().$api<{ items: TAPIToken[] }>('/api-tokens').catch(() => ({ items: [] }))
+  () => useNuxtApp().$api<{ items: TAPIToken[] }>('/api-tokens').catch(() => ({ items: [] })),
+  { server: false }
 )
 const apiTokensLoading = computed(() => apiTokensStatus.value === 'pending')
 const apiTokensList = computed(() => apiTokens.value?.items ?? [])

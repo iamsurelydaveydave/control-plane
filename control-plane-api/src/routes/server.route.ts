@@ -15,6 +15,11 @@ const {
   checkHealth,
   testConnection,
   bootstrap,
+  setup,
+  getSetupStatus,
+  setupStream,
+  getServerApps,
+  getServerDatabases,
 } = useServerController();
 
 // Test connection before adding (no server ID required)
@@ -33,7 +38,20 @@ router.post("/:id/validate", requireAuth, requireScope("servers:write"), validat
 // Check server health - tests SSH and gathers system resources
 router.post("/:id/check-health", requireAuth, requireScope("servers:write"), checkHealth);
 
-// Bootstrap server for Kamal deployments (Docker + kamal-proxy)
+// Bootstrap server for deployments (Docker setup)
 router.post("/:id/bootstrap", requireAuth, requireScope("servers:write"), bootstrap);
+
+// Setup server for deployments (async — returns immediately, runs in background)
+router.post("/:id/setup", requireAuth, requireScope("servers:write"), setup);
+
+// Get current setup status and step log
+router.get("/:id/setup-status", requireAuth, requireScope("servers:read"), getSetupStatus);
+
+// SSE stream for real-time setup progress
+router.get("/:id/setup-stream", requireAuth, requireScope("servers:read"), setupStream);
+
+// Resources hosted on this server
+router.get("/:id/apps", requireAuth, requireScope("servers:read"), getServerApps);
+router.get("/:id/databases", requireAuth, requireScope("servers:read"), getServerDatabases);
 
 export default router;

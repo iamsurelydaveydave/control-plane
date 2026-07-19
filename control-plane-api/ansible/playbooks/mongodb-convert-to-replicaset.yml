@@ -71,6 +71,7 @@
         name: "{{ mongodb_container_name }}"
         image: "mongo:{{ mongodb_version }}"
         state: started
+        recreate: yes       # force recreate so the new keyfile volume is picked up
         restart_policy: unless-stopped
         ports:
           - "{{ mongodb_bind_ip | default('0.0.0.0') }}:{{ mongodb_port }}:27017"
@@ -117,9 +118,7 @@
   pre_tasks:
     - name: Set node role based on group membership
       set_fact:
-        mongodb_node_role: >-
-          {% if inventory_hostname in groups.get('mongodb_arbiter', []) %}arbiter
-          {% else %}secondary{% endif %}
+        mongodb_node_role: "{{ 'arbiter' if inventory_hostname in groups.get('mongodb_arbiter', []) else 'secondary' }}"
   
   roles:
     - role: common
@@ -234,9 +233,15 @@
         timeout: 120
       loop: "{{ groups['mongodb_primary'] + groups.get('mongodb_secondary', []) + groups.get('mongodb_arbiter', []) }}"
 
+    # The standalone MongoDB already has an admin user in data/db,
+    # so the localhost exception is NOT available. Credentials are required.
     - name: Initialize replica set
       command: >
-        docker exec {{ mongodb_container_name }} mongosh --eval '
+        docker exec {{ mongodb_container_name }} mongosh
+        --username "{{ mongodb_admin_user }}"
+        --password "{{ mongodb_admin_password }}"
+        --authenticationDatabase admin
+        --eval '
         rs.initiate({
           _id: "{{ mongodb_replicaset_name }}",
           members: [
@@ -246,7 +251,7 @@
               _id: {{ loop.index0 }},
               host: "{{ hostvars[host]["ansible_host"] }}:{{ mongodb_port }}",
               priority: {% if host in groups["mongodb_primary"] %}10{% elif host in groups.get("mongodb_arbiter", []) %}0{% else %}5{% endif %},
-              {% if host in groups.get("mongodb_arbiter", []) %}arbiterOnly: true{% endif %}
+              {% if host in groups.get("mongodb_arbiter", []) %}arbiterOnly: true,{% endif %}
             }{% if not loop.last %},{% endif %}
             {% endfor %}
           ]
@@ -255,7 +260,11 @@
 
     - name: Wait for replica set to elect primary
       command: >
-        docker exec {{ mongodb_container_name }} mongosh --eval '
+        docker exec {{ mongodb_container_name }} mongosh
+        --username "{{ mongodb_admin_user }}"
+        --password "{{ mongodb_admin_password }}"
+        --authenticationDatabase admin
+        --eval '
         var status = rs.status();
         while (status.members.filter(m => m.stateStr === "PRIMARY").length === 0) {
           sleep(1000);

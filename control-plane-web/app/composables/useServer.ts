@@ -62,9 +62,39 @@ export default function useServer() {
   }
 
   function checkHealth(id: string) {
-    return useNuxtApp().$api<{ success: boolean, error?: string, serverInfo?: { os: string, hostname: string, uptime: string }, resources?: { cpuCores: number, memoryMb: number, diskGb: number } }>(`/servers/${id}/check-health`, {
+    return useNuxtApp().$api<{
+      success: boolean
+      error?: string
+      serverInfo?: { os: string, hostname: string, uptime: string }
+      resources?: TServerResources
+      healthChecks: THealthCheck[]
+    }>(`/servers/${id}/check-health`, {
       method: 'POST'
     })
+  }
+
+  /** Kick off async server setup (Docker + firewall + system info). Returns immediately. */
+  function setupServer(id: string) {
+    return useNuxtApp().$api<{ message: string, setupStatus: string }>(`/servers/${id}/setup`, {
+      method: 'POST'
+    })
+  }
+
+  /** Poll for setup progress — returns step log and current status. */
+  function getSetupStatus(id: string) {
+    return useNuxtApp().$api<TSetupStatusResponse>(`/servers/${id}/setup-status`, {
+      method: 'GET'
+    })
+  }
+
+  /** List apps deployed to this server. */
+  function getServerApps(id: string) {
+    return useNuxtApp().$api<{ items: TApp[], total: number }>(`/servers/${id}/apps`, { method: 'GET' })
+  }
+
+  /** List databases hosted on this server. */
+  function getServerDatabases(id: string) {
+    return useNuxtApp().$api<{ items: TDatabase[], total: number }>(`/servers/${id}/databases`, { method: 'GET' })
   }
 
   return {
@@ -76,6 +106,10 @@ export default function useServer() {
     deleteById,
     testConnection,
     validate,
-    checkHealth
+    checkHealth,
+    setupServer,
+    getSetupStatus,
+    getServerApps,
+    getServerDatabases
   }
 }

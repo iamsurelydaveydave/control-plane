@@ -4,6 +4,16 @@ declare type TDatabaseNode = {
   status: 'running' | 'stopped' | 'syncing' | 'unhealthy'
 }
 
+declare type TDatabaseDNS = {
+  enabled: boolean
+  provider: string
+  clusterHost: string
+  nodeHosts: string[]
+  srvConnectionString: string
+  records: Array<{ id: string; type: string; name: string }>
+  configuredAt: string
+}
+
 declare type TDatabase = {
   _id: string
   name: string
@@ -11,7 +21,8 @@ declare type TDatabase = {
   version: string
   status: string
   nodes?: TDatabaseNode[]
-  config?: Record<string, any>
+  config?: Record<string, unknown>
+  dns?: TDatabaseDNS
 }
 
 declare type TDatabaseForm = {
@@ -27,6 +38,7 @@ declare type TDatabaseCredentials = {
   adminUser: string
   adminPassword: string
   connectionString: string
+  srvConnectionString?: string  // mongodb+srv:// — present when DNS is configured
 }
 
 declare type TDatabaseHealth = {

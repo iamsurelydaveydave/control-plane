@@ -1,0 +1,21 @@
+---
+# Ansible collection requirements for the Control Plane provisioner.
+#
+# Install before running any playbook:
+#   ansible-galaxy collection install -r ansible/requirements.yml
+#
+# The collections below are pinned to minimum versions that are known-good.
+# Update if newer features are needed.
+
+collections:
+  # docker_container, docker_image, docker_network modules
+  - name: community.docker
+    version: ">=3.4.0"
+
+  # ufw module (firewall rules)
+  - name: community.general
+    version: ">=8.0.0"
+
+  # systemd, timezone modules
+  - name: ansible.posix
+    version: ">=1.5.0"

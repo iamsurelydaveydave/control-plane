@@ -1,8 +1,4 @@
 <script setup lang="ts">
-/**
- * Servers page — manage server infrastructure.
- * Follows goweekdays-web pattern from apps/deploy/pages/[org]/nodes/index.vue
- */
 definePageMeta({
   layout: 'dashboard',
   middleware: 'auth',
@@ -10,13 +6,15 @@ definePageMeta({
 })
 
 const toast = useToast()
-const { getAll, add, deleteById, testConnection } = useServer()
+const { getAll, add, setupServer, testConnection } = useServer()
 const { getAll: getAllSSHKeys } = useSSHKey()
 
-// Fetch SSH keys for the dropdown
+// ── SSH key helpers ──────────────────────────────────────────────────────────
+
 const { data: sshKeysData } = useLazyAsyncData(
   'ssh-keys-dropdown',
-  () => getAllSSHKeys().catch(() => ({ items: [] }))
+  () => getAllSSHKeys().catch(() => ({ items: [] })),
+  { server: false }
 )
 const sshKeyOptions = computed(() => {
   const keys = sshKeysData.value?.items ?? []
@@ -26,23 +24,13 @@ const defaultSSHKey = computed(() => {
   const keys = sshKeysData.value?.items ?? []
   return keys.find(k => k.isDefault)
 })
-const selectedSSHKey = computed(() => {
-  const keys = sshKeysData.value?.items ?? []
-  return keys.find(k => k._id === form.sshKeyId)
-})
 
-// Helper to get SSH key name by ID for server list display
-function getSSHKeyName(sshKeyId?: string) {
-  if (!sshKeyId) return null
-  const keys = sshKeysData.value?.items ?? []
-  const key = keys.find(k => k._id === sshKeyId)
-  return key?.name ?? null
-}
+// ── Server list ──────────────────────────────────────────────────────────────
 
-// Data fetching
 const { data: servers, refresh, status } = useLazyAsyncData(
   'servers',
-  () => getAll({ page: 1 }).catch(() => ({ items: [], pages: 0 }))
+  () => getAll({ page: 1 }).catch(() => ({ items: [], pages: 0 })),
+  { server: false }
 )
 const loading = computed(() => status.value === 'pending')
 const items = computed(() => servers.value?.items ?? [])
@@ -54,11 +42,79 @@ const statusColor: Record<string, 'success' | 'error' | 'warning' | 'neutral'> =
   unknown: 'neutral'
 }
 
-// Add dialog
+// ── SSE: real-time setup progress for provisioning servers ──────────────────
+
+const sseConnections = new Map<string, EventSource>()
+
+function connectServerSSE(server: TServer) {
+  if (sseConnections.has(server._id)) return
+  const es = new EventSource(`/api/servers/${server._id}/setup-stream`)
+
+  es.addEventListener('update', (e: MessageEvent) => {
+    const update = JSON.parse(e.data)
+    const idx = servers.value?.items.findIndex(s => s._id === server._id) ?? -1
+    if (idx !== -1 && servers.value?.items) {
+      Object.assign(servers.value.items[idx], update)
+    }
+  })
+
+  es.addEventListener('done', () => {
+    es.close()
+    sseConnections.delete(server._id)
+  })
+
+  es.onerror = () => {
+    es.close()
+    sseConnections.delete(server._id)
+  }
+
+  sseConnections.set(server._id, es)
+}
+
+watch(items, (newItems) => {
+  newItems.forEach(s => {
+    if ((s.setupStatus === 'running' || s.status === 'provisioning') && !sseConnections.has(s._id)) {
+      connectServerSSE(s)
+    }
+  })
+}, { immediate: true })
+
+onUnmounted(() => {
+  sseConnections.forEach(es => es.close())
+  sseConnections.clear()
+})
+
+// ── Retry setup from list ────────────────────────────────────────────────────
+
+const retryingId = ref<string | null>(null)
+
+async function handleRetrySetup(server: TServer, event: Event) {
+  event.preventDefault()
+  if (retryingId.value) return
+  retryingId.value = server._id
+  try {
+    const { setupServer } = useServer()
+    await setupServer(server._id)
+    connectServerSSE(server)
+  } catch (e: unknown) {
+    const err = e as { data?: { message?: string } }
+    toast.add({ title: err?.data?.message || 'Failed to start setup', color: 'error' })
+  } finally {
+    retryingId.value = null
+  }
+}
+
+// ── Add server dialog ────────────────────────────────────────────────────────
+
 const addOpen = ref(false)
 const adding = ref(false)
 const testing = ref(false)
-const connectionStatus = ref<{ success: boolean, error?: string, serverInfo?: { os: string, hostname: string, uptime: string } } | null>(null)
+const connectionStatus = ref<{
+  success: boolean
+  error?: string
+  serverInfo?: { os: string, hostname: string, uptime: string }
+} | null>(null)
+
 const form = reactive({
   name: '',
   host: '',
@@ -92,95 +148,58 @@ async function handleTestConnection() {
     })
     connectionStatus.value = result
     if (result.success) {
-      toast.add({
-        title: 'Connection successful',
-        description: `Connected to ${result.serverInfo?.hostname}`,
-        color: 'success',
-        icon: 'i-lucide-check'
-      })
+      toast.add({ title: 'Connection successful', description: `Connected to ${result.serverInfo?.hostname}`, color: 'success', icon: 'i-lucide-check' })
     } else {
-      toast.add({
-        title: 'Connection failed',
-        description: result.error,
-        color: 'error',
-        icon: 'i-lucide-x'
-      })
+      toast.add({ title: 'Connection failed', description: result.error, color: 'error', icon: 'i-lucide-x' })
     }
   } catch (e: unknown) {
     const err = e as { data?: { message?: string } }
     connectionStatus.value = { success: false, error: err?.data?.message || 'Connection test failed' }
-    toast.add({
-      title: 'Connection test failed',
-      description: err?.data?.message || 'Unknown error',
-      color: 'error'
-    })
+    toast.add({ title: 'Connection test failed', description: err?.data?.message || 'Unknown error', color: 'error' })
   } finally {
     testing.value = false
   }
 }
 
 async function submitAdd() {
-  if (!form.name || !form.host || adding.value) return
+  if (!form.name || !form.host || !form.sshKeyId || adding.value) return
   adding.value = true
   try {
-    const payload: TServerForm = {
+    const { serverId } = await add({
       name: form.name,
       host: form.host,
       sshUser: form.sshUser,
       sshPort: form.sshPort,
-      sshKeyId: form.sshKeyId || undefined
-    }
-    await add(payload)
-    toast.add({
-      title: `${form.name} added successfully`,
-      color: 'success',
-      icon: 'i-lucide-check'
+      sshKeyId: form.sshKeyId
     })
+    // Kick off setup immediately (fire-and-forget — detail page polls progress)
+    setupServer(serverId).catch(() => {})
     addOpen.value = false
-    await refresh()
+    await navigateTo(`/dashboard/servers/${serverId}`)
   } catch (e: unknown) {
     const err = e as { data?: { message?: string } }
-    toast.add({
-      title: err?.data?.message || 'Failed to add server',
-      color: 'error'
-    })
+    toast.add({ title: err?.data?.message || 'Failed to add server', color: 'error' })
   } finally {
     adding.value = false
   }
 }
 
-// Delete dialog
-const deleteOpen = ref(false)
-const deleting = ref(false)
-const deleteTarget = ref<TServer | null>(null)
-
-function openDelete(server: TServer) {
-  deleteTarget.value = server
-  deleteOpen.value = true
+function maskHost(host: string): string {
+  if (/^\d+\.\d+\.\d+\.\d+$/.test(host)) {
+    const [a, b] = host.split('.')
+    return `${a}.${b}.*.*`
+  }
+  const dot = host.indexOf('.')
+  if (dot !== -1) return `***${host.slice(dot)}`
+  return host.slice(0, 3) + '***'
 }
 
-async function submitDelete() {
-  if (!deleteTarget.value || deleting.value) return
-  deleting.value = true
-  try {
-    await deleteById(deleteTarget.value._id)
-    toast.add({
-      title: `${deleteTarget.value.name} deleted`,
-      color: 'success',
-      icon: 'i-lucide-check'
-    })
-    deleteOpen.value = false
-    deleteTarget.value = null
-    await refresh()
-  } catch (e: unknown) {
-    const err = e as { data?: { message?: string } }
-    toast.add({
-      title: err?.data?.message || 'Failed to delete server',
-      color: 'error'
-    })
-  } finally {
-    deleting.value = false
-  }
+const copiedHostId = ref<string | null>(null)
+async function copyHost(server: TServer, event: Event) {
+  event.preventDefault()
+  await navigator.clipboard.writeText(server.host)
+  copiedHostId.value = server._id
+  setTimeout(() => { copiedHostId.value = null }, 2000)
 }
 
 useHead({ title: 'Servers · Control Plane' })
@@ -188,6 +207,7 @@ useHead({ title: 'Servers · Control Plane' })
 
 <template>
   <div class="space-y-4">
+    <!-- Header -->
     <div class="flex items-center justify-between">
       <div>
         <h1 class="text-2xl font-bold text-highlighted">
@@ -205,7 +225,7 @@ useHead({ title: 'Servers · Control Plane' })
       </UButton>
     </div>
 
-    <!-- Loading state -->
+    <!-- Loading skeleton -->
     <div
       v-if="loading"
       class="space-y-2"
@@ -246,59 +266,71 @@ useHead({ title: 'Servers · Control Plane' })
       v-else
       class="space-y-2"
     >
-      <div
+      <NuxtLink
         v-for="server in items"
         :key="server._id"
-        class="flex items-center justify-between rounded-xl border border-default bg-elevated/50 px-4 py-3.5 hover:bg-elevated transition-colors group"
+        :to="`/dashboard/servers/${server._id}`"
+        class="flex items-center justify-between rounded-xl border border-default bg-elevated/50 px-4 py-3.5 hover:bg-elevated transition-colors"
       >
-        <div class="flex items-center gap-3">
+        <div class="flex items-center gap-3 min-w-0">
           <div class="flex size-8 shrink-0 items-center justify-center rounded-lg bg-elevated border border-default">
             <UIcon
-              name="i-lucide-server"
-              class="size-4 text-muted"
+              :name="server.status === 'provisioning' ? 'i-lucide-loader' : 'i-lucide-server'"
+              :class="['size-4', server.status === 'provisioning' ? 'text-warning animate-spin' : 'text-muted']"
             />
           </div>
-          <div>
-            <div class="flex items-center gap-2">
-              <span class="font-medium text-highlighted">
-                {{ server.name }}
-              </span>
+          <div class="min-w-0">
+            <div class="flex items-center gap-2 flex-wrap">
+              <span class="font-medium text-highlighted">{{ server.name }}</span>
               <UBadge
                 :color="statusColor[server.status] || 'neutral'"
                 variant="soft"
                 size="xs"
               >
-                {{ server.status }}
+                {{ server.status === 'provisioning' ? 'setting up…' : server.status }}
               </UBadge>
             </div>
-            <p class="text-xs text-muted mt-0.5">
-              {{ server.host }}
+            <div class="flex items-center gap-1 mt-0.5">
+              <span class="text-xs text-muted font-mono">{{ maskHost(server.host) }}</span>
+              <button
+                class="text-muted hover:text-highlighted transition-colors p-0.5 rounded"
+                :title="copiedHostId === server._id ? 'Copied!' : 'Copy IP'"
+                @click.prevent="copyHost(server, $event)"
+              >
+                <UIcon
+                  :name="copiedHostId === server._id ? 'i-lucide-check' : 'i-lucide-copy'"
+                  :class="['size-3', copiedHostId === server._id ? 'text-success' : '']"
+                />
+              </button>
               <template v-if="server.sshUser">
-                · {{ server.sshUser }}@{{ server.sshPort || 22 }}
+                <span class="text-xs text-muted">· {{ server.sshUser }}@{{ server.sshPort || 22 }}</span>
               </template>
-              <template v-if="getSSHKeyName(server.sshKeyId)">
-                · <UIcon
-                  name="i-lucide-key"
-                  class="inline-block size-3"
-                /> {{ getSSHKeyName(server.sshKeyId) }}
+              <template v-if="server.resources">
+                <span class="text-xs text-muted">
+                  · {{ server.resources.cpuCores }} vCPU
+                  · {{ Math.round(server.resources.memoryMb / 1024) }} GB RAM
+                  · {{ server.resources.diskGb }} GB disk
+                </span>
               </template>
-            </p>
+            </div>
           </div>
         </div>
-
-        <UDropdownMenu
-          :items="[
-            [{ label: 'Delete', icon: 'i-lucide-trash', color: 'error' as const, onSelect: () => openDelete(server) }]
-          ]"
-        >
-          <UButton
-            icon="i-lucide-ellipsis"
-            color="neutral"
-            variant="ghost"
-            size="sm"
-          />
-        </UDropdownMenu>
-      </div>
+        <!-- Retry button for failed setups -- stops link navigation -->
+        <UButton
+          v-if="server.setupStatus === 'failed'"
+          size="xs"
+          color="error"
+          variant="soft"
+          icon="i-lucide-refresh-cw"
+          :loading="retryingId === server._id"
+          title="Retry setup"
+          @click="handleRetrySetup(server, $event)"
+        />
+        <UIcon
+          name="i-lucide-chevron-right"
+          class="size-4 text-muted shrink-0"
+        />
+      </NuxtLink>
     </div>
 
     <!-- Add server modal -->
@@ -353,7 +385,8 @@ useHead({ title: 'Servers · Control Plane' })
             <template #hint>
               <span class="text-xs text-muted">
                 <template v-if="!sshKeyOptions.length">
-                  No SSH keys available. <NuxtLink
+                  No SSH keys available.
+                  <NuxtLink
                     to="/dashboard/settings/ssh-keys"
                     class="text-primary underline"
                   >Create one</NuxtLink> first.
@@ -365,26 +398,11 @@ useHead({ title: 'Servers · Control Plane' })
             </template>
           </UFormField>
 
-          <!-- SSH key copy instructions -->
-          <UAlert
-            v-if="selectedSSHKey"
-            color="warning"
-            variant="soft"
-            icon="i-lucide-key"
-            title="Copy SSH key to server"
+          <!-- Test connection -->
+          <div
+            v-if="form.host && form.sshKeyId"
+            class="flex items-center gap-3"
           >
-            <template #description>
-              <p class="mb-2">
-                Run this command to authorize the selected key on your server:
-              </p>
-              <code class="block text-xs font-mono break-all bg-warning/10 p-2 rounded">
-                ssh {{ form.sshUser || 'root' }}@{{ form.host || 'YOUR_SERVER_IP' }} "mkdir -p ~/.ssh && echo '{{ selectedSSHKey.publicKey }}' >> ~/.ssh/authorized_keys"
-              </code>
-            </template>
-          </UAlert>
-
-          <!-- Test connection button -->
-          <div v-if="form.host && form.sshKeyId" class="flex items-center gap-3">
             <UButton
               color="neutral"
               variant="outline"
@@ -394,7 +412,10 @@ useHead({ title: 'Servers · Control Plane' })
             >
               Test Connection
             </UButton>
-            <div v-if="connectionStatus" class="flex items-center gap-2">
+            <div
+              v-if="connectionStatus"
+              class="flex items-center gap-2"
+            >
               <UIcon
                 :name="connectionStatus.success ? 'i-lucide-check-circle' : 'i-lucide-x-circle'"
                 :class="connectionStatus.success ? 'text-success' : 'text-error'"
@@ -443,13 +464,11 @@ useHead({ title: 'Servers · Control Plane' })
             title="No SSH keys available"
           >
             <template #description>
-              <p>
-                You need to create an SSH key before adding a server.
-                <NuxtLink
-                  to="/dashboard/settings/ssh-keys"
-                  class="underline font-medium"
-                >Go to SSH Keys</NuxtLink>
-              </p>
+              You need to create an SSH key before adding a server.
+              <NuxtLink
+                to="/dashboard/settings/ssh-keys"
+                class="underline font-medium"
+              >Go to SSH Keys</NuxtLink>
             </template>
           </UAlert>
         </div>
@@ -465,51 +484,10 @@ useHead({ title: 'Servers · Control Plane' })
         <UButton
           :loading="adding"
           :disabled="!form.name || !form.host || !form.sshKeyId"
-          icon="i-lucide-plus"
+          icon="i-lucide-server"
           @click="submitAdd"
         >
-          Add Server
-        </UButton>
-      </template>
-    </UModal>
-
-    <!-- Delete confirmation modal -->
-    <UModal
-      v-model:open="deleteOpen"
-      title="Delete Server"
-    >
-      <template #body>
-        <div class="flex items-start gap-4">
-          <div class="flex size-10 shrink-0 items-center justify-center rounded-full bg-error/10">
-            <UIcon
-              name="i-lucide-alert-triangle"
-              class="size-5 text-error"
-            />
-          </div>
-          <div>
-            <p class="text-muted">
-              Are you sure you want to delete
-              <span class="font-medium text-highlighted">{{ deleteTarget?.name }}</span>?
-              This action cannot be undone.
-            </p>
-          </div>
-        </div>
-      </template>
-      <template #footer>
-        <UButton
-          color="neutral"
-          variant="ghost"
-          @click="deleteOpen = false"
-        >
-          Cancel
-        </UButton>
-        <UButton
-          color="error"
-          :loading="deleting"
-          icon="i-lucide-trash"
-          @click="submitDelete"
-        >
-          Delete Server
+          Add & Setup Server
         </UButton>
       </template>
     </UModal>

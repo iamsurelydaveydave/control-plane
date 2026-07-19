@@ -23,7 +23,7 @@ const { data: statsData, status } = await useLazyAsyncData(
     ])
     return { servers, apps, databases }
   },
-  { immediate: true }
+  { immediate: true, server: false }
 )
 
 const loading = computed(() => status.value === 'pending')

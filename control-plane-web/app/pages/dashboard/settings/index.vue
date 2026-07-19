@@ -29,6 +29,13 @@ const items = [
     status: 'active' as const
   },
   {
+    title: 'DNS',
+    description: 'Connect Cloudflare to get mongodb+srv:// URLs for replica sets.',
+    icon: 'i-lucide-globe',
+    to: '/dashboard/settings/dns',
+    status: 'active' as const
+  },
+  {
     title: 'Account',
     description: 'Manage your account and preferences.',
     icon: 'i-lucide-user',

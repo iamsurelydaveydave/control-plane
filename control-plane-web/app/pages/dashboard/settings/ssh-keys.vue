@@ -312,7 +312,8 @@ type TSSHKeyPublic = {
 
 const { data: sshKeys, refresh: refreshSSHKeys, status: sshKeysStatus } = useLazyAsyncData(
   'ssh-keys',
-  () => useNuxtApp().$api<{ items: TSSHKeyPublic[] }>('/ssh-keys').catch(() => ({ items: [] }))
+  () => useNuxtApp().$api<{ items: TSSHKeyPublic[] }>('/ssh-keys').catch(() => ({ items: [] })),
+  { server: false }
 )
 const sshKeysLoading = computed(() => sshKeysStatus.value === 'pending')
 const sshKeysList = computed(() => sshKeys.value?.items ?? [])

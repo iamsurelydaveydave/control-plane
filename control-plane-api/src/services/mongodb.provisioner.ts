@@ -1,9 +1,15 @@
 import crypto from "crypto";
+import * as fs from "fs";
+import * as path from "path";
+import * as os from "os";
 import { ObjectId } from "mongodb";
 import { useAnsibleExecutor } from "./ansible.executor";
 import { useServerRepo } from "../resources/server";
 import { useDatabaseRepo, TDatabase, TDatabaseNode } from "../resources/database";
 import { useDeploymentRepo } from "../resources/deployment";
+import { useSSHKeyService } from "../resources/ssh-key";
+import { useSettingsRepo } from "../resources/settings";
+import { useDNSService, TDNSReplicaSetResult } from "./dns.service";
 import { logger, InternalServerError, BadRequestError, NotFoundError } from "../utils";
 
 export type TMongoDBProvisionOptions = {
@@ -43,6 +49,19 @@ export type TProvisionResult = {
   logs: string[];
 };
 
+export type TBackupOptions = {
+  databaseId: string;
+  triggeredBy: string;
+  onLog?: (line: string) => void;
+};
+
+export type TRestoreOptions = {
+  databaseId: string;
+  s3Key: string;
+  triggeredBy: string;
+  onLog?: (line: string) => void;
+};
+
 /**
  * MongoDB Provisioning Service
  * Orchestrates MongoDB deployment via Ansible
@@ -52,13 +71,31 @@ export function useMongoDBProvisioner() {
   const serverRepo = useServerRepo();
   const databaseRepo = useDatabaseRepo();
   const deploymentRepo = useDeploymentRepo();
+  const sshKeyService = useSSHKeyService();
 
   /**
-   * Provision a MongoDB instance (standalone or replica set)
+   * Resolve the SSH private key for a set of servers and write it to a temp
+   * file. Checks `server.sshKeyId` on the first server, then falls back to
+   * the installation-wide default key. Returns the temp-file path, or null if
+   * no key is registered (Ansible will rely on the system SSH agent).
    */
+  async function resolveSSHKeyFile(
+    servers: Array<{ server: any }>
+  ): Promise<string | null> {
+    for (const { server } of servers) {
+      if (server.sshKeyId) {
+        const key = await sshKeyService.getFullById(String(server.sshKeyId));
+        if (key?.privateKey) return writeKeyFile(key.privateKey);
+      }
+    }
+    const defaultKey = await sshKeyService.getDefaultFull();
+    if (defaultKey?.privateKey) return writeKeyFile(defaultKey.privateKey);
+    return null;
+  }
   async function provision(options: TMongoDBProvisionOptions): Promise<TProvisionResult> {
     const { databaseId, triggeredBy, onLog } = options;
     const logs: string[] = [];
+    let sshKeyFile: string | null = null;
 
     const log = (line: string) => {
       logs.push(line);
@@ -100,6 +137,14 @@ export function useMongoDBProvisioner() {
 
       log(`Servers: ${servers.map((s) => s.server.host).join(", ")}`);
 
+      // Resolve SSH key for Ansible
+      sshKeyFile = await resolveSSHKeyFile(servers);
+      if (sshKeyFile) {
+        log("SSH key resolved for Ansible");
+      } else {
+        log("No SSH key registered — Ansible will use system SSH agent");
+      }
+
       // Update database status to provisioning
       await databaseRepo.updateStatus(databaseId, "provisioning");
 
@@ -119,9 +164,9 @@ export function useMongoDBProvisioner() {
       // Build inventory
       let inventoryContent: string;
       if (isReplicaSet) {
-        inventoryContent = buildReplicaSetInventory(servers, database);
+        inventoryContent = buildReplicaSetInventory(servers, database, sshKeyFile ?? undefined);
       } else {
-        inventoryContent = buildStandaloneInventory(servers[0], database);
+        inventoryContent = buildStandaloneInventory(servers[0], database, sshKeyFile ?? undefined);
       }
 
       log("Generated inventory:");
@@ -196,6 +241,44 @@ export function useMongoDBProvisioner() {
         log("MongoDB provisioning completed successfully!");
         log(`Connection string: ${maskPassword(connectionString)}`);
 
+        // ---------------------------------------------------------------
+        // Optional: set up DNS records if provider is configured
+        // DNS failure is non-fatal — we still return success so the
+        // database is accessible via the IP connection string.
+        // ---------------------------------------------------------------
+        if (isReplicaSet) {
+          try {
+            const dns = useDNSService();
+            const replicaSetName = database.config.replicaSetName || `rs_${database.name.replace(/[^a-zA-Z0-9_-]/g, "_")}`;
+            const dnsResult = await dns.setupReplicaSet({
+              databaseName: database.name,
+              nodes: servers.map((s) => ({
+                host: s.server.host,
+                port: database.config.port || 27017,
+              })),
+              adminUser: database.credentials.adminUser,
+              adminPassword: database.credentials.adminPassword,
+              replicaSetName,
+            });
+
+            if (dnsResult) {
+              await databaseRepo.updateDNS(databaseId, {
+                enabled: true,
+                provider: "cloudflare",
+                clusterHost: dnsResult.clusterHost,
+                nodeHosts: dnsResult.nodeHosts,
+                srvConnectionString: dnsResult.srvConnectionString,
+                records: dnsResult.records,
+                configuredAt: new Date(),
+              });
+              log(`DNS configured: ${dnsResult.clusterHost}`);
+              log(`SRV connection string: ${maskPassword(dnsResult.srvConnectionString)}`);
+            }
+          } catch (dnsErr: any) {
+            log(`[DNS] Setup skipped or failed (non-fatal): ${dnsErr.message}`);
+          }
+        }
+
         return {
           success: true,
           connectionString,
@@ -225,6 +308,8 @@ export function useMongoDBProvisioner() {
         error: error.message,
         logs,
       };
+    } finally {
+      cleanupKeyFile(sshKeyFile);
     }
   }
 
@@ -237,6 +322,7 @@ export function useMongoDBProvisioner() {
     onLog?: (line: string) => void
   ): Promise<TProvisionResult> {
     const logs: string[] = [];
+    let sshKeyFile: string | null = null;
 
     const log = (line: string) => {
       logs.push(line);
@@ -263,8 +349,10 @@ export function useMongoDBProvisioner() {
         })
       );
 
+      sshKeyFile = await resolveSSHKeyFile(servers);
+
       // Build inventory
-      const inventoryContent = buildRemoveInventory(servers, database);
+      const inventoryContent = buildRemoveInventory(servers, database, sshKeyFile ?? undefined);
       const inventoryPath = await ansible.writeInventoryFile(inventoryContent);
 
       // Execute remove playbook
@@ -273,7 +361,7 @@ export function useMongoDBProvisioner() {
           playbook: "mongodb-remove.yml",
           inventory: inventoryPath,
           extraVars: {
-            mongodb_container_name: `mongodb_${database.name}`,
+            mongodb_container_name: `mongodb_${database.name.replace(/[^a-zA-Z0-9_-]/g, "_")}`,
             remove_data: removeData,
           },
           verbose: true,
@@ -294,6 +382,19 @@ export function useMongoDBProvisioner() {
         });
 
         log("MongoDB removal completed successfully!");
+
+        // Tear down DNS records if any were configured
+        try {
+          const freshDb = await databaseRepo.getById(databaseId);
+          if (freshDb?.dns?.records?.length) {
+            const dns = useDNSService();
+            await dns.teardown(freshDb.dns.records);
+            await databaseRepo.updateDNS(databaseId, null);
+            log("DNS records removed");
+          }
+        } catch (dnsErr: any) {
+          log(`[DNS] Teardown failed (non-fatal): ${dnsErr.message}`);
+        }
       }
 
       return {
@@ -308,6 +409,8 @@ export function useMongoDBProvisioner() {
         error: error.message,
         logs,
       };
+    } finally {
+      cleanupKeyFile(sshKeyFile);
     }
   }
 
@@ -319,6 +422,7 @@ export function useMongoDBProvisioner() {
   async function addNode(options: TAddNodeOptions): Promise<TProvisionResult> {
     const { databaseId, serverId, role, triggeredBy, onLog } = options;
     const logs: string[] = [];
+    let sshKeyFile: string | null = null;
 
     const log = (line: string) => {
       logs.push(line);
@@ -368,6 +472,12 @@ export function useMongoDBProvisioner() {
         })
       );
 
+      // Resolve SSH key for Ansible
+      sshKeyFile = await resolveSSHKeyFile([
+        ...existingServers,
+        { server: newServer, node: { serverId: new ObjectId(serverId), role, status: "syncing" } as TDatabaseNode },
+      ]);
+
       // Create deployment record
       const deploymentId = await deploymentRepo.add({
         appId: new ObjectId(databaseId),
@@ -399,7 +509,8 @@ export function useMongoDBProvisioner() {
         const conversionInventory = buildConversionInventory(
           existingServers[0],
           { server: newServer, node: { serverId: new ObjectId(serverId), role, status: "syncing" } },
-          database
+          database,
+          sshKeyFile ?? undefined
         );
 
         const conversionInventoryPath = await ansible.writeInventoryFile(conversionInventory);
@@ -461,7 +572,8 @@ export function useMongoDBProvisioner() {
         const addNodeInventory = buildAddNodeInventory(
           existingServers,
           { server: newServer, node: { serverId: new ObjectId(serverId), role, status: "syncing" } },
-          database
+          database,
+          sshKeyFile ?? undefined
         );
 
         const addNodeInventoryPath = await ansible.writeInventoryFile(addNodeInventory);
@@ -567,6 +679,8 @@ export function useMongoDBProvisioner() {
         error: error.message,
         logs,
       };
+    } finally {
+      cleanupKeyFile(sshKeyFile);
     }
   }
 
@@ -576,6 +690,7 @@ export function useMongoDBProvisioner() {
   async function removeNodeFromCluster(options: TRemoveNodeOptions): Promise<TProvisionResult> {
     const { databaseId, serverId, triggeredBy, onLog } = options;
     const logs: string[] = [];
+    let sshKeyFile: string | null = null;
 
     const log = (line: string) => {
       logs.push(line);
@@ -629,6 +744,12 @@ export function useMongoDBProvisioner() {
       log(`Removing node from MongoDB deployment: ${database.name}`);
       log(`Removing server: ${removingServer.host}`);
 
+      // Resolve SSH key for Ansible
+      sshKeyFile = await resolveSSHKeyFile([
+        { server: primaryServer },
+        { server: removingServer },
+      ]);
+
       // Create deployment record
       const deploymentId = await deploymentRepo.add({
         appId: new ObjectId(databaseId),
@@ -642,7 +763,8 @@ export function useMongoDBProvisioner() {
       const inventoryContent = buildRemoveNodeInventory(
         { server: primaryServer, node: primaryNode },
         { server: removingServer, node: nodeToRemove },
-        database
+        database,
+        sshKeyFile ?? undefined
       );
 
       const inventoryPath = await ansible.writeInventoryFile(inventoryContent);
@@ -717,12 +839,14 @@ export function useMongoDBProvisioner() {
         error: error.message,
         logs,
       };
+    } finally {
+      cleanupKeyFile(sshKeyFile);
     }
   }
 
   /**
-   * Get health status of a MongoDB deployment
-   * SSHs into primary/standalone node and runs rs.status() or db.adminCommand('ping')
+   * Get health status of a MongoDB deployment.
+   * SSHs into the primary/standalone node and runs rs.status() or db.adminCommand('ping').
    */
   async function getHealth(databaseId: string): Promise<THealthCheckResult> {
     const database = await databaseRepo.getById(databaseId);
@@ -768,19 +892,29 @@ export function useMongoDBProvisioner() {
     // Execute via SSH to the server
     const { spawn } = await import("child_process");
 
-    return new Promise((resolve, reject) => {
-      const sshCommand = [
+    // Resolve SSH key for this server
+    const sshKeyFile = await resolveSSHKeyFile([{ server }]);
+
+    const cleanup = () => cleanupKeyFile(sshKeyFile);
+
+    return new Promise((resolve) => {
+      const sshArgs = [
         "-o", "StrictHostKeyChecking=no",
         "-o", "ConnectTimeout=10",
         "-p", String(server.sshPort || 22),
+      ];
+      if (sshKeyFile) {
+        sshArgs.push("-i", sshKeyFile);
+      }
+      sshArgs.push(
         `${server.sshUser}@${server.host}`,
         `docker exec ${containerName} mongosh -u "${adminUser}" -p "${adminPassword}" --authenticationDatabase admin --quiet --eval "JSON.stringify(${mongoCommand})"`
-      ];
+      );
 
       let stdout = "";
       let stderr = "";
 
-      const proc = spawn("ssh", sshCommand);
+      const proc = spawn("ssh", sshArgs);
 
       proc.stdout?.on("data", (data: Buffer) => {
         stdout += data.toString();
@@ -796,7 +930,7 @@ export function useMongoDBProvisioner() {
             level: "error",
             message: `Health check failed: ${stderr}`,
           });
-
+          cleanup();
           // Return unhealthy status
           resolve({
             status: "unhealthy",
@@ -864,6 +998,8 @@ export function useMongoDBProvisioner() {
               health: 0,
             })),
           });
+        } finally {
+          cleanup();
         }
       });
 
@@ -872,7 +1008,7 @@ export function useMongoDBProvisioner() {
           level: "error",
           message: `Health check SSH error: ${err.message}`,
         });
-
+        cleanup();
         resolve({
           status: "error",
           members: [{
@@ -885,14 +1021,331 @@ export function useMongoDBProvisioner() {
     });
   }
 
+  /**
+   * Backup a MongoDB deployment to S3
+   */
+  async function backup(options: TBackupOptions): Promise<TProvisionResult & { s3Key?: string }> {
+    const { databaseId, triggeredBy, onLog } = options;
+    const logs: string[] = [];
+    let sshKeyFile: string | null = null;
+
+    const log = (line: string) => {
+      logs.push(line);
+      if (onLog) onLog(line);
+      logger.log({ level: "info", message: `[MongoDB Backup] ${line}` });
+    };
+
+    try {
+      const database = await databaseRepo.getById(databaseId);
+      if (!database) throw new NotFoundError("Database not found");
+
+      log(`Starting backup for: ${database.name}`);
+
+      // Fetch S3 credentials from settings
+      const settingsRepo = useSettingsRepo();
+      const [s3AccessKeyId, s3SecretAccessKey, s3Region, s3DefaultBucket] = await Promise.all([
+        settingsRepo.get("s3.accessKeyId"),
+        settingsRepo.get("s3.secretAccessKey"),
+        settingsRepo.get("s3.region"),
+        settingsRepo.get("s3.defaultBucket"),
+      ]);
+
+      if (!s3AccessKeyId || !s3SecretAccessKey || !s3Region) {
+        throw new BadRequestError("S3 credentials not configured");
+      }
+
+      const bucket = database.backup?.s3Bucket || s3DefaultBucket;
+      if (!bucket) {
+        throw new BadRequestError("S3 bucket not configured");
+      }
+
+      // Resolve servers
+      const servers = await Promise.all(
+        database.nodes.map(async (node) => {
+          const server = await serverRepo.getById(node.serverId);
+          if (!server) throw new NotFoundError(`Server not found: ${node.serverId}`);
+          return { server, node };
+        })
+      );
+
+      sshKeyFile = await resolveSSHKeyFile(servers);
+
+      // Find primary (or standalone) node — backup always runs on primary
+      const primaryServerData = servers.find(
+        (s) => s.node.role === "primary" || s.node.role === "standalone"
+      );
+      if (!primaryServerData) {
+        throw new BadRequestError("No primary node found for backup");
+      }
+
+      const inventoryContent = buildBackupInventory(primaryServerData, sshKeyFile ?? undefined);
+      const inventoryPath = await ansible.writeInventoryFile(inventoryContent);
+
+      const safeName = database.name.replace(/[^a-zA-Z0-9_-]/g, "_");
+      const backupName = `backup-${new Date().toISOString().replace(/[:.]/g, "-")}`;
+
+      const extraVars = {
+        mongodb_container_name: `mongodb_${safeName}`,
+        mongodb_admin_user: database.credentials.adminUser,
+        mongodb_admin_password: database.credentials.adminPassword,
+        mongodb_port: database.config.port || 27017,
+        s3_bucket: bucket,
+        s3_access_key: s3AccessKeyId,
+        s3_secret_key: s3SecretAccessKey,
+        s3_region: s3Region,
+        backup_name: backupName,
+      };
+
+      log("Starting Ansible backup playbook...");
+
+      const result = await ansible.execPlaybook(
+        {
+          playbook: "mongodb-backup.yml",
+          inventory: inventoryPath,
+          extraVars,
+          verbose: true,
+        },
+        log
+      );
+
+      if (result.success) {
+        const s3Key = `mongodb_${safeName}/${backupName}.tar.gz`;
+
+        await databaseRepo.addBackupRecord(databaseId, {
+          s3Key,
+          s3Bucket: bucket,
+          s3Region,
+          createdAt: new Date(),
+          status: "success",
+        });
+
+        log(`Backup completed! S3 key: ${s3Key}`);
+        return { success: true, s3Key, logs };
+      } else {
+        await databaseRepo.addBackupRecord(databaseId, {
+          s3Key: "",
+          s3Bucket: bucket,
+          s3Region,
+          createdAt: new Date(),
+          status: "failed",
+          error: result.stderr || "Ansible playbook failed",
+        });
+
+        return {
+          success: false,
+          error: result.stderr || "Backup playbook failed",
+          logs,
+        };
+      }
+    } catch (error: any) {
+      log(`Error: ${error.message}`);
+      return { success: false, error: error.message, logs };
+    } finally {
+      cleanupKeyFile(sshKeyFile);
+    }
+  }
+
+  /**
+   * Restore a MongoDB deployment from an S3 backup
+   */
+  async function restore(options: TRestoreOptions): Promise<TProvisionResult> {
+    const { databaseId, s3Key, triggeredBy, onLog } = options;
+    const logs: string[] = [];
+    let sshKeyFile: string | null = null;
+
+    const log = (line: string) => {
+      logs.push(line);
+      if (onLog) onLog(line);
+      logger.log({ level: "info", message: `[MongoDB Restore] ${line}` });
+    };
+
+    try {
+      const database = await databaseRepo.getById(databaseId);
+      if (!database) throw new NotFoundError("Database not found");
+
+      log(`Starting restore for: ${database.name} from ${s3Key}`);
+
+      // Fetch S3 credentials from settings
+      const settingsRepo = useSettingsRepo();
+      const [s3AccessKeyId, s3SecretAccessKey, s3Region, s3DefaultBucket] = await Promise.all([
+        settingsRepo.get("s3.accessKeyId"),
+        settingsRepo.get("s3.secretAccessKey"),
+        settingsRepo.get("s3.region"),
+        settingsRepo.get("s3.defaultBucket"),
+      ]);
+
+      if (!s3AccessKeyId || !s3SecretAccessKey || !s3Region) {
+        throw new BadRequestError("S3 credentials not configured");
+      }
+
+      const bucket = database.backup?.s3Bucket || s3DefaultBucket;
+      if (!bucket) {
+        throw new BadRequestError("S3 bucket not configured");
+      }
+
+      // Resolve servers
+      const servers = await Promise.all(
+        database.nodes.map(async (node) => {
+          const server = await serverRepo.getById(node.serverId);
+          if (!server) throw new NotFoundError(`Server not found: ${node.serverId}`);
+          return { server, node };
+        })
+      );
+
+      sshKeyFile = await resolveSSHKeyFile(servers);
+
+      // Restore always runs on the primary node
+      const primaryServerData = servers.find(
+        (s) => s.node.role === "primary" || s.node.role === "standalone"
+      );
+      if (!primaryServerData) {
+        throw new BadRequestError("No primary node found for restore");
+      }
+
+      const inventoryContent = buildBackupInventory(primaryServerData, sshKeyFile ?? undefined);
+      const inventoryPath = await ansible.writeInventoryFile(inventoryContent);
+
+      const safeName = database.name.replace(/[^a-zA-Z0-9_-]/g, "_");
+
+      const extraVars = {
+        mongodb_container_name: `mongodb_${safeName}`,
+        mongodb_admin_user: database.credentials.adminUser,
+        mongodb_admin_password: database.credentials.adminPassword,
+        mongodb_port: database.config.port || 27017,
+        s3_bucket: bucket,
+        s3_access_key: s3AccessKeyId,
+        s3_secret_key: s3SecretAccessKey,
+        s3_region: s3Region,
+        s3_key: s3Key,
+      };
+
+      log("Starting Ansible restore playbook...");
+
+      const result = await ansible.execPlaybook(
+        {
+          playbook: "mongodb-restore.yml",
+          inventory: inventoryPath,
+          extraVars,
+          verbose: true,
+        },
+        log
+      );
+
+      if (result.success) {
+        log("Restore completed successfully!");
+        return { success: true, logs };
+      } else {
+        return {
+          success: false,
+          error: result.stderr || "Restore playbook failed",
+          logs,
+        };
+      }
+    } catch (error: any) {
+      log(`Error: ${error.message}`);
+      return { success: false, error: error.message, logs };
+    } finally {
+      cleanupKeyFile(sshKeyFile);
+    }
+  }
+
+  /**
+   * Configure (or re-configure) DNS records for an existing running database.
+   * Useful when DNS was not set up at provision time (e.g. Cloudflare was
+   * configured later) or when re-pointing DNS after an IP change.
+   *
+   * Tears down old records first if any exist, then creates fresh ones.
+   */
+  async function configureDNS(databaseId: string): Promise<TDNSReplicaSetResult | null> {
+    const database = await databaseRepo.getById(databaseId);
+    if (!database) throw new NotFoundError("Database not found");
+    if (database.type !== "mongodb") throw new BadRequestError("DNS only supported for MongoDB");
+    if (database.status !== "running") throw new BadRequestError("Database must be running to configure DNS");
+    if (database.nodes.length < 2) throw new BadRequestError("DNS SRV requires a replica set (2+ nodes)");
+
+    // Tear down existing DNS records first
+    if (database.dns?.records?.length) {
+      try {
+        const dns = useDNSService();
+        await dns.teardown(database.dns.records);
+        await databaseRepo.updateDNS(databaseId, null);
+      } catch (err: any) {
+        logger.log({ level: "warn", message: `[DNS] Pre-configure teardown: ${err.message}` });
+      }
+    }
+
+    // Resolve servers
+    const servers = await Promise.all(
+      database.nodes.map(async (node) => {
+        const server = await serverRepo.getById(node.serverId);
+        if (!server) throw new NotFoundError(`Server not found: ${node.serverId}`);
+        return { server, node };
+      })
+    );
+
+    const replicaSetName =
+      database.config.replicaSetName ||
+      `rs_${database.name.replace(/[^a-zA-Z0-9_-]/g, "_")}`;
+
+    const dns = useDNSService();
+    const result = await dns.setupReplicaSet({
+      databaseName: database.name,
+      nodes: servers.map((s) => ({
+        host: s.server.host,
+        port: database.config.port || 27017,
+      })),
+      adminUser: database.credentials.adminUser,
+      adminPassword: database.credentials.adminPassword,
+      replicaSetName,
+    });
+
+    if (result) {
+      await databaseRepo.updateDNS(databaseId, {
+        enabled: true,
+        provider: "cloudflare",
+        clusterHost: result.clusterHost,
+        nodeHosts: result.nodeHosts,
+        srvConnectionString: result.srvConnectionString,
+        records: result.records,
+        configuredAt: new Date(),
+      });
+    }
+
+    return result;
+  }
+
   return {
     provision,
     remove,
     addNode,
     removeNode: removeNodeFromCluster,
     getHealth,
+    backup,
+    restore,
+    configureDNS,
   };
 }
+
+  // ---------------------------------------------------------------------------
+  // SSH key helpers
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Write a private key string to a temp file (mode 0600) and return its path.
+   * Caller is responsible for cleanup via cleanupKeyFile().
+   */
+  function writeKeyFile(privateKey: string): string {
+    const tmpPath = path.join(os.tmpdir(), `cp_sshkey_${Date.now()}_${Math.random().toString(36).slice(2)}`);
+    fs.writeFileSync(tmpPath, privateKey, { mode: 0o600 });
+    return tmpPath;
+  }
+
+  /** Delete a temp key file, ignoring errors (already cleaned up, etc.). */
+  function cleanupKeyFile(keyFile: string | null): void {
+    if (keyFile) {
+      try { fs.unlinkSync(keyFile); } catch { /* ignore */ }
+    }
+  }
 
 /**
  * Convert MongoDB replica set state number to string
@@ -915,24 +1368,56 @@ function getStateString(state: number): string {
 
 // Helper functions
 
+function addCommonVars(lines: string[], sshKeyFile?: string): void {
+  lines.push("[all:vars]");
+  lines.push("ansible_python_interpreter=/usr/bin/python3");
+  if (sshKeyFile) {
+    lines.push(`ansible_ssh_private_key_file=${sshKeyFile}`);
+  }
+}
+
 function buildStandaloneInventory(
   serverData: { server: any; node: TDatabaseNode },
-  database: TDatabase
+  database: TDatabase,
+  sshKeyFile?: string
 ): string {
   const { server, node } = serverData;
   const hostname = server.host.replace(/\./g, "_");
 
-  return `[mongodb]
-${hostname} ansible_host=${server.host} ansible_user=${server.sshUser} ansible_port=${server.sshPort} mongodb_node_role=${node.role}
+  const lines = [
+    "[mongodb]",
+    `${hostname} ansible_host=${server.host} ansible_user=${server.sshUser} ansible_port=${server.sshPort} mongodb_node_role=${node.role}`,
+    "",
+  ];
+  addCommonVars(lines, sshKeyFile);
+  return lines.join("\n");
+}
 
-[all:vars]
-ansible_python_interpreter=/usr/bin/python3
-`;
+/**
+ * Build a primary-only inventory for backup and restore playbooks.
+ * Uses [mongodb_primary] group so the playbook's `hosts: mongodb_primary` resolves.
+ * Works for both standalone (single node) and replica set databases.
+ */
+function buildBackupInventory(
+  serverData: { server: any; node: TDatabaseNode },
+  sshKeyFile?: string
+): string {
+  const { server, node } = serverData;
+  const hostname = server.host.replace(/\./g, "_");
+
+  const lines = [
+    "[mongodb_primary]",
+    `${hostname} ansible_host=${server.host} ansible_user=${server.sshUser} ansible_port=${server.sshPort} mongodb_node_role=${node.role}`,
+    "",
+  ];
+  addCommonVars(lines, sshKeyFile);
+  return lines.join("\n");
 }
 
 function buildReplicaSetInventory(
   servers: Array<{ server: any; node: TDatabaseNode }>,
-  database: TDatabase
+  database: TDatabase,
+  sshKeyFile?: string
 ): string {
   const lines: string[] = [];
 
@@ -983,8 +1468,7 @@ function buildReplicaSetInventory(
   lines.push("");
 
   // Common vars
-  lines.push("[all:vars]");
-  lines.push("ansible_python_interpreter=/usr/bin/python3");
+  addCommonVars(lines, sshKeyFile);
 
   return lines.join("\n");
 }
@@ -992,7 +1476,8 @@ function buildReplicaSetInventory(
 function buildConversionInventory(
   primary: { server: any; node: TDatabaseNode },
   secondary: { server: any; node: TDatabaseNode },
-  database: TDatabase
+  database: TDatabase,
+  sshKeyFile?: string
 ): string {
   const lines: string[] = [];
 
@@ -1027,31 +1512,32 @@ function buildConversionInventory(
   lines.push("");
 
   // Common vars
-  lines.push("[all:vars]");
-  lines.push("ansible_python_interpreter=/usr/bin/python3");
+  addCommonVars(lines, sshKeyFile);
 
   return lines.join("\n");
 }
 
 function buildConversionExtraVars(database: TDatabase): Record<string, any> {
+  const safeName = database.name.replace(/[^a-zA-Z0-9_-]/g, "_");
   return {
     mongodb_version: database.version || "7.0",
     mongodb_admin_user: database.credentials.adminUser,
     mongodb_admin_password: database.credentials.adminPassword,
-    mongodb_container_name: `mongodb_${database.name}`,
+    mongodb_container_name: `mongodb_${safeName}`,
     mongodb_port: database.config.port || 27017,
-    mongodb_data_dir: database.config.dataDir || "/opt/mongodb/data",
-    mongodb_config_dir: database.config.configDir || "/opt/mongodb/config",
-    mongodb_log_dir: database.config.logDir || "/opt/mongodb/logs",
-    mongodb_replicaset_name: database.config.replicaSetName || `rs_${database.name}`,
-    mongodb_keyfile_dir: database.config.keyfileDir || "/opt/mongodb/keyfile",
+    mongodb_data_dir: database.config.dataDir || `/opt/mongodb/${safeName}/data`,
+    mongodb_config_dir: database.config.configDir || `/opt/mongodb/${safeName}/config`,
+    mongodb_log_dir: database.config.logDir || `/opt/mongodb/${safeName}/logs`,
+    mongodb_replicaset_name: database.config.replicaSetName || `rs_${safeName}`,
+    mongodb_keyfile_dir: database.config.keyfileDir || `/opt/mongodb/${safeName}/keyfile`,
   };
 }
 
 function buildAddNodeInventory(
   existingServers: Array<{ server: any; node: TDatabaseNode }>,
   newNode: { server: any; node: TDatabaseNode },
-  database: TDatabase
+  database: TDatabase,
+  sshKeyFile?: string
 ): string {
   const lines: string[] = [];
 
@@ -1119,8 +1605,7 @@ function buildAddNodeInventory(
   lines.push("");
 
   // Common vars
-  lines.push("[all:vars]");
-  lines.push("ansible_python_interpreter=/usr/bin/python3");
+  addCommonVars(lines, sshKeyFile);
 
   return lines.join("\n");
 }
@@ -1128,7 +1613,8 @@ function buildAddNodeInventory(
 function buildRemoveNodeInventory(
   primary: { server: any; node: TDatabaseNode },
   nodeToRemove: { server: any; node: TDatabaseNode },
-  database: TDatabase
+  database: TDatabase,
+  sshKeyFile?: string
 ): string {
   const lines: string[] = [];
 
@@ -1155,15 +1641,15 @@ function buildRemoveNodeInventory(
   lines.push("");
 
   // Common vars
-  lines.push("[all:vars]");
-  lines.push("ansible_python_interpreter=/usr/bin/python3");
+  addCommonVars(lines, sshKeyFile);
 
   return lines.join("\n");
 }
 
 function buildRemoveInventory(
   servers: Array<{ server: any; node: TDatabaseNode }>,
-  database: TDatabase
+  database: TDatabase,
+  sshKeyFile?: string
 ): string {
   const lines: string[] = ["[mongodb]"];
 
@@ -1175,27 +1661,30 @@ function buildRemoveInventory(
   }
 
   lines.push("");
-  lines.push("[all:vars]");
-  lines.push("ansible_python_interpreter=/usr/bin/python3");
+  addCommonVars(lines, sshKeyFile);
 
   return lines.join("\n");
 }
 
 function buildExtraVars(database: TDatabase, isReplicaSet: boolean): Record<string, any> {
+  // Use database-name-scoped paths so multiple databases on the same server
+  // don't collide. Names are sanitised to valid filesystem characters.
+  const safeName = database.name.replace(/[^a-zA-Z0-9_-]/g, "_");
+
   const vars: Record<string, any> = {
     mongodb_version: database.version || "7.0",
     mongodb_admin_user: database.credentials.adminUser,
     mongodb_admin_password: database.credentials.adminPassword,
-    mongodb_container_name: `mongodb_${database.name}`,
+    mongodb_container_name: `mongodb_${safeName}`,
     mongodb_port: database.config.port || 27017,
-    mongodb_data_dir: database.config.dataDir || "/opt/mongodb/data",
-    mongodb_config_dir: database.config.configDir || "/opt/mongodb/config",
-    mongodb_log_dir: database.config.logDir || "/opt/mongodb/logs",
+    mongodb_data_dir: database.config.dataDir || `/opt/mongodb/${safeName}/data`,
+    mongodb_config_dir: database.config.configDir || `/opt/mongodb/${safeName}/config`,
+    mongodb_log_dir: database.config.logDir || `/opt/mongodb/${safeName}/logs`,
   };
 
   if (isReplicaSet) {
-    vars.mongodb_replicaset_name = database.config.replicaSetName || `rs_${database.name}`;
-    vars.mongodb_keyfile_dir = database.config.keyfileDir || "/opt/mongodb/keyfile";
+    vars.mongodb_replicaset_name = database.config.replicaSetName || `rs_${safeName}`;
+    vars.mongodb_keyfile_dir = database.config.keyfileDir || `/opt/mongodb/${safeName}/keyfile`;
   }
 
   // Optional config

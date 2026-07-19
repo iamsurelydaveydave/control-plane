@@ -17,9 +17,23 @@ export function useUserService() {
     return null;
   }
 
+  async function updateProfile(
+    userId: string,
+    updates: { email?: string; newPassword?: string }
+  ) {
+    if (updates.email) {
+      await repo.updateEmail(userId, updates.email);
+    }
+    if (updates.newPassword) {
+      const hashed = await hashPassword(updates.newPassword);
+      await repo.updatePassword(userId, hashed);
+    }
+  }
+
   return {
     createUser,
     ensureDefaultAdmin,
+    updateProfile,
     getByEmail: repo.getByEmail,
     getById: repo.getById,
   };

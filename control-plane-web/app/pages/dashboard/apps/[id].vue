@@ -31,7 +31,7 @@ const { getAll: getServers } = useServer()
 const { data: appData, status, refresh } = await useLazyAsyncData(
   `app-${appId}`,
   () => getById(appId),
-  { immediate: true }
+  { immediate: true, server: false }
 )
 const app = computed(() => appData.value?.app)
 const loading = computed(() => status.value === 'pending')
@@ -39,7 +39,8 @@ const loading = computed(() => status.value === 'pending')
 // Fetch servers for display
 const { data: serversData } = await useLazyAsyncData(
   'servers-for-app',
-  () => getServers({ page: 1 }).catch(() => ({ items: [] as TServer[], pages: 0 }))
+  () => getServers({ page: 1 }).catch(() => ({ items: [] as TServer[], pages: 0 })),
+  { server: false }
 )
 
 function getServerName(serverId: string) {

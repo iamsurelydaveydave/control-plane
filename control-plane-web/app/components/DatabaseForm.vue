@@ -131,28 +131,29 @@ function generatePassword() {
             v-else
             class="text-xs text-error"
           >
-            No servers available. <NuxtLink
+            No ready servers. Servers must be <span class="font-medium">online with Docker installed</span>.
+            <NuxtLink
               to="/dashboard/servers"
               class="underline font-medium"
-            >Add a server</NuxtLink> first.
+            >Set up a server</NuxtLink> first.
           </span>
         </template>
       </UFormField>
 
       <UAlert
         v-if="mode === 'add' && !serverItems.length"
-        color="error"
+        color="warning"
         variant="soft"
-        icon="i-lucide-alert-triangle"
-        title="No servers available"
+        icon="i-lucide-server"
+        title="No ready servers"
       >
         <template #description>
           <p>
-            You need to add a server before creating a database.
+            Servers must be <span class="font-medium">online with Docker installed</span> before a database can be provisioned.
             <NuxtLink
               to="/dashboard/servers"
               class="underline font-medium"
-            >Go to Servers</NuxtLink>
+            >Set up a server</NuxtLink> first.
           </p>
         </template>
       </UAlert>

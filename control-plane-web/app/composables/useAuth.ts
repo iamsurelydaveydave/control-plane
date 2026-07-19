@@ -96,11 +96,29 @@ export default function useAuth() {
     }
   }
 
+  async function updateProfile(payload: {
+    currentPassword: string
+    email?: string
+    newPassword?: string
+    confirmPassword?: string
+  }) {
+    const data = await useNuxtApp().$api<{ message: string, user: TUser }>('/auth/me', {
+      method: 'PATCH',
+      body: payload
+    })
+    // Reflect email change in local state immediately
+    if (data.user && currentUser.value) {
+      currentUser.value = { ...currentUser.value, ...data.user }
+    }
+    return data
+  }
+
   return {
     currentUser,
     loggedInUser,
     login,
     logout,
+    updateProfile,
     validateSession
   }
 }

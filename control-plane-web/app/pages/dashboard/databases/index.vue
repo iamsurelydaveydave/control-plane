@@ -47,18 +47,20 @@ const columns = [
 const { data, status, refresh } = await useLazyAsyncData(
   'databases',
   () => getAll({ page: page.value, search: search.value }),
-  { immediate: true, watch: [page] }
+  { immediate: true, watch: [page], server: false }
 )
 
 const loading = computed(() => status.value === 'pending')
 const items = computed(() => data.value?.items ?? [])
 const _pages = computed(() => data.value?.pages ?? 1)
 
-// Fetch servers for the dropdown
+// Fetch servers for the dropdown — only include servers that are ready for provisioning
 async function fetchServers() {
   try {
     const result = await getServers()
-    servers.value = result.items || []
+    servers.value = (result.items || []).filter(
+      (s: TServer) => s.status === 'online' && s.dockerInstalled
+    )
   } catch {
     servers.value = []
   }

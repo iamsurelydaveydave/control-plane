@@ -20,7 +20,9 @@ const {
   addNode,
   removeNode,
   reprovision,
-  deleteById
+  deleteById,
+  configureDNS,
+  removeDNS,
 } = useDatabase()
 const { getAll: getServers } = useServer()
 
@@ -28,7 +30,7 @@ const { getAll: getServers } = useServer()
 const { data: databaseData, status, refresh } = await useLazyAsyncData(
   `database-${databaseId}`,
   () => getById(databaseId),
-  { immediate: true }
+  { immediate: true, server: false }
 )
 const database = computed(() => databaseData.value?.database)
 const loading = computed(() => status.value === 'pending')
@@ -36,7 +38,8 @@ const loading = computed(() => status.value === 'pending')
 // Fetch servers for add node dropdown
 const { data: serversData } = await useLazyAsyncData(
   'servers-for-nodes',
-  () => getServers({ page: 1 }).catch(() => ({ items: [] }))
+  () => getServers({ page: 1 }).catch(() => ({ items: [] })),
+  { server: false }
 )
 const availableServers = computed(() => {
   const allServers = serversData.value?.items ?? []
@@ -266,6 +269,48 @@ watch(() => database.value?.status, (newStatus) => {
 })
 
 useHead({ title: computed(() => database.value ? `${database.value.name} · Databases` : 'Database') })
+
+// DNS
+const dnsLoading = ref(false)
+
+async function handleConfigureDNS() {
+  if (dnsLoading.value) return
+  dnsLoading.value = true
+  try {
+    const result = await configureDNS(databaseId)
+    toast.add({
+      title: 'DNS configured',
+      description: `${result.clusterHost} — ${result.recordCount} records created`,
+      color: 'success',
+      icon: 'i-lucide-globe',
+    })
+    await refresh()
+  } catch (e: unknown) {
+    const err = e as { data?: { message?: string } }
+    toast.add({
+      title: 'DNS setup failed',
+      description: err?.data?.message || 'Check that Cloudflare credentials are saved in Settings',
+      color: 'error',
+    })
+  } finally {
+    dnsLoading.value = false
+  }
+}
+
+async function handleRemoveDNS() {
+  if (dnsLoading.value) return
+  dnsLoading.value = true
+  try {
+    await removeDNS(databaseId)
+    toast.add({ title: 'DNS records removed', color: 'success', icon: 'i-lucide-check' })
+    await refresh()
+  } catch (e: unknown) {
+    const err = e as { data?: { message?: string } }
+    toast.add({ title: 'Failed to remove DNS', description: err?.data?.message, color: 'error' })
+  } finally {
+    dnsLoading.value = false
+  }
+}
 </script>
 
 <template>
@@ -296,10 +341,16 @@ useHead({ title: computed(() => database.value ? `${database.value.name} · Data
             <span v-if="database.nodes?.length"> · {{ database.nodes.length }} node{{ database.nodes.length > 1 ? 's' : '' }}</span>
           </p>
         </div>
-        <USkeleton v-else class="h-12 w-48" />
+        <USkeleton
+          v-else
+          class="h-12 w-48"
+        />
       </div>
 
-      <div v-if="database" class="flex items-center gap-2">
+      <div
+        v-if="database"
+        class="flex items-center gap-2"
+      >
         <UButton
           icon="i-lucide-key"
           color="neutral"
@@ -331,13 +382,19 @@ useHead({ title: computed(() => database.value ? `${database.value.name} · Data
     </div>
 
     <!-- Loading -->
-    <div v-if="loading" class="space-y-4">
+    <div
+      v-if="loading"
+      class="space-y-4"
+    >
       <USkeleton class="h-32 rounded-xl" />
       <USkeleton class="h-48 rounded-xl" />
     </div>
 
     <!-- Content -->
-    <div v-else-if="database" class="space-y-6">
+    <div
+      v-else-if="database"
+      class="space-y-6"
+    >
       <!-- Health Overview -->
       <div class="rounded-xl border border-default bg-elevated/50 p-6">
         <div class="flex items-center justify-between mb-4">
@@ -355,25 +412,43 @@ useHead({ title: computed(() => database.value ? `${database.value.name} · Data
           />
         </div>
 
-        <div v-if="database.status !== 'running'" class="text-center py-8">
-          <UIcon name="i-lucide-clock" class="size-8 text-muted mx-auto mb-2" />
+        <div
+          v-if="database.status !== 'running'"
+          class="text-center py-8"
+        >
+          <UIcon
+            name="i-lucide-clock"
+            class="size-8 text-muted mx-auto mb-2"
+          />
           <p class="text-muted">
             Health check available when database is running
           </p>
         </div>
 
-        <div v-else-if="healthLoading" class="flex items-center justify-center py-8">
-          <UIcon name="i-lucide-loader-2" class="size-6 animate-spin text-muted" />
+        <div
+          v-else-if="healthLoading"
+          class="flex items-center justify-center py-8"
+        >
+          <UIcon
+            name="i-lucide-loader-2"
+            class="size-6 animate-spin text-muted"
+          />
         </div>
 
-        <div v-else-if="health" class="space-y-3">
+        <div
+          v-else-if="health"
+          class="space-y-3"
+        >
           <div class="flex items-center gap-2">
             <UIcon
               :name="health.status === 'healthy' ? 'i-lucide-check-circle' : 'i-lucide-alert-circle'"
               :class="health.status === 'healthy' ? 'text-success' : 'text-error'"
               class="size-5"
             />
-            <span class="font-medium" :class="health.status === 'healthy' ? 'text-success' : 'text-error'">
+            <span
+              class="font-medium"
+              :class="health.status === 'healthy' ? 'text-success' : 'text-error'"
+            >
               {{ health.status === 'healthy' ? 'Healthy' : 'Unhealthy' }}
             </span>
           </div>
@@ -398,7 +473,10 @@ useHead({ title: computed(() => database.value ? `${database.value.name} · Data
           </div>
         </div>
 
-        <div v-else class="text-center py-8">
+        <div
+          v-else
+          class="text-center py-8"
+        >
           <p class="text-muted">
             Click refresh to check health
           </p>
@@ -421,14 +499,23 @@ useHead({ title: computed(() => database.value ? `${database.value.name} · Data
           </UButton>
         </div>
 
-        <div v-if="!database.nodes?.length" class="text-center py-8">
-          <UIcon name="i-lucide-server" class="size-8 text-muted mx-auto mb-2" />
+        <div
+          v-if="!database.nodes?.length"
+          class="text-center py-8"
+        >
+          <UIcon
+            name="i-lucide-server"
+            class="size-8 text-muted mx-auto mb-2"
+          />
           <p class="text-muted">
             No nodes configured
           </p>
         </div>
 
-        <div v-else class="space-y-2">
+        <div
+          v-else
+          class="space-y-2"
+        >
           <div
             v-for="node in database.nodes"
             :key="node.serverId"
@@ -446,7 +533,11 @@ useHead({ title: computed(() => database.value ? `${database.value.name} · Data
                   <span class="font-medium text-highlighted">
                     {{ getServerName(node.serverId) }}
                   </span>
-                  <UBadge color="neutral" variant="outline" size="xs">
+                  <UBadge
+                    color="neutral"
+                    variant="outline"
+                    size="xs"
+                  >
                     {{ node.role }}
                   </UBadge>
                   <UBadge
@@ -494,27 +585,150 @@ useHead({ title: computed(() => database.value ? `${database.value.name} · Data
         <div class="space-y-3">
           <div>
             <label class="text-xs text-muted uppercase tracking-wide">Type</label>
-            <p class="font-medium capitalize">{{ database.type }}</p>
+            <p class="font-medium capitalize">
+              {{ database.type }}
+            </p>
           </div>
           <div>
             <label class="text-xs text-muted uppercase tracking-wide">Version</label>
-            <p class="font-medium">{{ database.version }}</p>
+            <p class="font-medium">
+              {{ database.version }}
+            </p>
           </div>
           <div v-if="database.config?.replicaSetName">
             <label class="text-xs text-muted uppercase tracking-wide">Replica Set Name</label>
-            <p class="font-mono">{{ database.config.replicaSetName }}</p>
+            <p class="font-mono">
+              {{ database.config.replicaSetName }}
+            </p>
           </div>
           <div v-if="database.config?.port">
             <label class="text-xs text-muted uppercase tracking-wide">Port</label>
-            <p class="font-mono">{{ database.config.port }}</p>
+            <p class="font-mono">
+              {{ database.config.port }}
+            </p>
           </div>
+        </div>
+      </div>
+
+      <!-- DNS / SRV -->
+      <div class="rounded-xl border border-default bg-elevated/50 p-6">
+        <div class="flex items-center justify-between mb-4">
+          <div>
+            <h2 class="text-lg font-semibold text-highlighted">
+              DNS &amp; Connection URL
+            </h2>
+            <p class="text-sm text-muted mt-0.5">
+              Expose via a single <code>mongodb+srv://</code> URL using Cloudflare DNS
+            </p>
+          </div>
+          <div class="flex items-center gap-2">
+            <UButton
+              v-if="database.dns?.enabled"
+              icon="i-lucide-trash"
+              color="error"
+              variant="ghost"
+              size="sm"
+              :loading="dnsLoading"
+              @click="handleRemoveDNS"
+            />
+            <UButton
+              :icon="database.dns?.enabled ? 'i-lucide-refresh-cw' : 'i-lucide-globe'"
+              :color="database.dns?.enabled ? 'neutral' : 'primary'"
+              variant="outline"
+              size="sm"
+              :loading="dnsLoading"
+              :disabled="database.status !== 'running' || (database.nodes?.length ?? 0) < 2"
+              @click="handleConfigureDNS"
+            >
+              {{ database.dns?.enabled ? 'Re-configure DNS' : 'Configure DNS' }}
+            </UButton>
+          </div>
+        </div>
+
+        <!-- DNS active -->
+        <div
+          v-if="database.dns?.enabled"
+          class="space-y-4"
+        >
+          <UAlert
+            color="success"
+            variant="soft"
+            icon="i-lucide-check-circle"
+            :title="`DNS active: ${database.dns.clusterHost}`"
+            :description="`${database.dns.records.length} records in ${database.dns.provider}`"
+          />
+
+          <div>
+            <label class="text-xs text-muted uppercase tracking-wide">SRV Connection String</label>
+            <div class="flex gap-2 mt-1">
+              <UInput
+                :model-value="database.dns.srvConnectionString.replace(/:([^:@]+)@/, ':****@')"
+                readonly
+                class="flex-1 font-mono text-xs"
+              />
+              <UButton
+                icon="i-lucide-copy"
+                color="neutral"
+                variant="outline"
+                @click="copyToClipboard(database.dns.srvConnectionString)"
+              />
+            </div>
+            <p class="text-xs text-muted mt-1">
+              Use this URL in your app’s <code>MONGO_URI</code> env variable.
+              The password is masked here — use Credentials to reveal it.
+            </p>
+          </div>
+
+          <div>
+            <label class="text-xs text-muted uppercase tracking-wide">Node Hostnames</label>
+            <ul class="mt-1 space-y-1">
+              <li
+                v-for="(host, i) in database.dns.nodeHosts"
+                :key="host"
+                class="text-sm font-mono text-muted"
+              >
+                node{{ i + 1 }}: {{ host }}
+              </li>
+            </ul>
+          </div>
+        </div>
+
+        <!-- DNS not configured -->
+        <div
+          v-else
+          class="text-center py-6"
+        >
+          <UIcon
+            name="i-lucide-globe"
+            class="size-8 text-muted mx-auto mb-2"
+          />
+          <p class="text-sm text-muted">
+            Click <strong>Configure DNS</strong> to create Cloudflare records and get a
+            <code>mongodb+srv://</code> connection URL.
+          </p>
+          <p class="text-xs text-muted mt-1">
+            Requires a Cloudflare API token &amp; Zone ID saved in
+            <UButton
+              variant="link"
+              size="xs"
+              to="/dashboard/settings"
+            >
+              Settings
+            </UButton>.
+          </p>
         </div>
       </div>
     </div>
 
     <!-- Not found -->
-    <div v-else class="text-center py-12">
-      <UIcon name="i-lucide-database" class="size-12 text-muted mx-auto mb-4" />
+    <div
+      v-else
+      class="text-center py-12"
+    >
+      <UIcon
+        name="i-lucide-database"
+        class="size-12 text-muted mx-auto mb-4"
+      />
       <h2 class="text-lg font-semibold text-highlighted">
         Database not found
       </h2>
@@ -531,15 +745,27 @@ useHead({ title: computed(() => database.value ? `${database.value.name} · Data
     </div>
 
     <!-- Credentials Modal -->
-    <UModal v-model:open="credentialsOpen" class="max-w-md">
+    <UModal
+      v-model:open="credentialsOpen"
+      class="max-w-md"
+    >
       <template #header>
-        <h3 class="text-lg font-semibold">Database Credentials</h3>
+        <h3 class="text-lg font-semibold">
+          Database Credentials
+        </h3>
       </template>
       <template #body>
-        <div v-if="credentials" class="p-6 space-y-4">
+        <div
+          v-if="credentials"
+          class="p-6 space-y-4"
+        >
           <UFormField label="Admin User">
             <div class="flex gap-2">
-              <UInput :model-value="credentials.adminUser" readonly class="flex-1" />
+              <UInput
+                :model-value="credentials.adminUser"
+                readonly
+                class="flex-1"
+              />
               <UButton
                 icon="i-lucide-copy"
                 color="neutral"
@@ -551,7 +777,12 @@ useHead({ title: computed(() => database.value ? `${database.value.name} · Data
 
           <UFormField label="Admin Password">
             <div class="flex gap-2">
-              <UInput :model-value="credentials.adminPassword" type="password" readonly class="flex-1" />
+              <UInput
+                :model-value="credentials.adminPassword"
+                type="password"
+                readonly
+                class="flex-1"
+              />
               <UButton
                 icon="i-lucide-copy"
                 color="neutral"
@@ -563,7 +794,11 @@ useHead({ title: computed(() => database.value ? `${database.value.name} · Data
 
           <UFormField label="Connection String">
             <div class="flex gap-2">
-              <UInput :model-value="credentials.connectionString" readonly class="flex-1 font-mono text-xs" />
+              <UInput
+                :model-value="credentials.connectionString"
+                readonly
+                class="flex-1 font-mono text-xs"
+              />
               <UButton
                 icon="i-lucide-copy"
                 color="neutral"
@@ -581,16 +816,26 @@ useHead({ title: computed(() => database.value ? `${database.value.name} · Data
           />
 
           <div class="flex justify-end pt-2 border-t border-default">
-            <UButton label="Close" color="neutral" variant="outline" @click="credentialsOpen = false" />
+            <UButton
+              label="Close"
+              color="neutral"
+              variant="outline"
+              @click="credentialsOpen = false"
+            />
           </div>
         </div>
       </template>
     </UModal>
 
     <!-- Add Node Modal -->
-    <UModal v-model:open="addNodeOpen" class="max-w-md">
+    <UModal
+      v-model:open="addNodeOpen"
+      class="max-w-md"
+    >
       <template #header>
-        <h3 class="text-lg font-semibold">Add Node</h3>
+        <h3 class="text-lg font-semibold">
+          Add Node
+        </h3>
       </template>
       <template #body>
         <div class="p-6 space-y-4">
@@ -631,7 +876,11 @@ useHead({ title: computed(() => database.value ? `${database.value.name} · Data
         </div>
       </template>
       <template #footer>
-        <UButton color="neutral" variant="ghost" @click="addNodeOpen = false">
+        <UButton
+          color="neutral"
+          variant="ghost"
+          @click="addNodeOpen = false"
+        >
           Cancel
         </UButton>
         <UButton
@@ -646,15 +895,23 @@ useHead({ title: computed(() => database.value ? `${database.value.name} · Data
     </UModal>
 
     <!-- Remove Node Modal -->
-    <UModal v-model:open="removeNodeOpen" class="max-w-sm">
+    <UModal
+      v-model:open="removeNodeOpen"
+      class="max-w-sm"
+    >
       <template #header>
-        <h3 class="text-lg font-semibold">Remove Node</h3>
+        <h3 class="text-lg font-semibold">
+          Remove Node
+        </h3>
       </template>
       <template #body>
         <div class="p-6">
           <div class="flex items-start gap-4">
             <div class="flex size-10 shrink-0 items-center justify-center rounded-full bg-error/10">
-              <UIcon name="i-lucide-alert-triangle" class="size-5 text-error" />
+              <UIcon
+                name="i-lucide-alert-triangle"
+                class="size-5 text-error"
+              />
             </div>
             <div>
               <p class="text-muted">
@@ -670,7 +927,11 @@ useHead({ title: computed(() => database.value ? `${database.value.name} · Data
         </div>
       </template>
       <template #footer>
-        <UButton color="neutral" variant="ghost" @click="removeNodeOpen = false">
+        <UButton
+          color="neutral"
+          variant="ghost"
+          @click="removeNodeOpen = false"
+        >
           Cancel
         </UButton>
         <UButton
@@ -685,15 +946,23 @@ useHead({ title: computed(() => database.value ? `${database.value.name} · Data
     </UModal>
 
     <!-- Delete Modal -->
-    <UModal v-model:open="deleteOpen" class="max-w-sm">
+    <UModal
+      v-model:open="deleteOpen"
+      class="max-w-sm"
+    >
       <template #header>
-        <h3 class="text-lg font-semibold">Delete Database</h3>
+        <h3 class="text-lg font-semibold">
+          Delete Database
+        </h3>
       </template>
       <template #body>
         <div class="p-6">
           <div class="flex items-start gap-4">
             <div class="flex size-10 shrink-0 items-center justify-center rounded-full bg-error/10">
-              <UIcon name="i-lucide-alert-triangle" class="size-5 text-error" />
+              <UIcon
+                name="i-lucide-alert-triangle"
+                class="size-5 text-error"
+              />
             </div>
             <div>
               <p class="text-muted">
@@ -708,7 +977,11 @@ useHead({ title: computed(() => database.value ? `${database.value.name} · Data
         </div>
       </template>
       <template #footer>
-        <UButton color="neutral" variant="ghost" @click="deleteOpen = false">
+        <UButton
+          color="neutral"
+          variant="ghost"
+          @click="deleteOpen = false"
+        >
           Cancel
         </UButton>
         <UButton

@@ -80,6 +80,22 @@ export default function useDatabase() {
     })
   }
 
+  function configureDNS(id: string) {
+    return useNuxtApp().$api<{
+      message: string
+      clusterHost: string
+      nodeHosts: string[]
+      srvConnectionString: string
+      recordCount: number
+    }>(`/databases/${id}/dns`, { method: 'POST' })
+  }
+
+  function removeDNS(id: string) {
+    return useNuxtApp().$api<{ message: string, removed?: number }>(`/databases/${id}/dns`, {
+      method: 'DELETE'
+    })
+  }
+
   return {
     database,
     getAll,
@@ -90,6 +106,8 @@ export default function useDatabase() {
     getCredentials,
     addNode,
     removeNode,
-    getHealth
+    getHealth,
+    configureDNS,
+    removeDNS,
   }
 }

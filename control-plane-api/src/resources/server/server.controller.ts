@@ -2,10 +2,13 @@ import { Request, Response, NextFunction } from "express";
 import { Client, ConnectConfig } from "ssh2";
 import Joi from "joi";
 import { useServerRepo } from "./server.repository";
-import { TServer, schemaServerCreate, schemaServerUpdate } from "./server.model";
+import { TServer, THealthCheck, schemaServerCreate, schemaServerUpdate } from "./server.model";
 import { BadRequestError, NotFoundError, logger } from "../../utils";
 import { useSSHKeyRepo } from "../ssh-key/ssh-key.repository";
 import { useSSHService } from "../../services";
+import { useServerService, getSetupEmitter } from "./server.service";
+import { useAppRepo } from "../app/app.repository";
+import { useDatabaseRepo } from "../database/database.repository";
 
 // Validation schema for test-connection endpoint
 const schemaTestConnection = Joi.object({
@@ -19,6 +22,9 @@ export function useServerController() {
   const repo = useServerRepo();
   const sshKeyRepo = useSSHKeyRepo();
   const sshService = useSSHService();
+  const serverService = useServerService();
+  const appRepo = useAppRepo();
+  const databaseRepo = useDatabaseRepo();
 
   async function add(req: Request, res: Response, next: NextFunction) {
     try {
@@ -119,6 +125,23 @@ export function useServerController() {
   async function deleteById(req: Request, res: Response, next: NextFunction) {
     try {
       const id = req.params.id as string;
+
+      const appCount = await appRepo.countByServerId(id);
+      if (appCount > 0) {
+        next(new BadRequestError(
+          `Cannot delete server with ${appCount} deployed app${appCount === 1 ? "" : "s"}. Remove or reassign apps first.`
+        ));
+        return;
+      }
+
+      const dbCount = await databaseRepo.countByServerId(id);
+      if (dbCount > 0) {
+        next(new BadRequestError(
+          `Cannot delete server with ${dbCount} database${dbCount === 1 ? "" : "s"}. Remove databases first.`
+        ));
+        return;
+      }
+
       await repo.deleteById(id);
       res.json({ message: "Server deleted" });
     } catch (error) {
@@ -235,7 +258,8 @@ export function useServerController() {
         return;
       }
 
-      // Get system resources via SSH
+      const checkStartTime = Date.now();
+
       const result = await sshService.getSystemResources({
         host: server.host,
         port: server.sshPort,
@@ -243,29 +267,38 @@ export function useServerController() {
         privateKey: sshKey.privateKey,
       });
 
+      const durationMs = Date.now() - checkStartTime;
+
+      const newCheck: THealthCheck = {
+        timestamp: new Date(),
+        status: result.success ? "online" : "offline",
+        resources: result.success && result.resources ? result.resources : undefined,
+        serverInfo: result.success ? result.serverInfo : undefined,
+        error: result.success ? undefined : result.error,
+        durationMs,
+      };
+
+      const healthChecks = [newCheck, ...(server.healthChecks ?? [])].slice(0, 20);
+
       if (!result.success) {
-        // Update status to offline on failed connection
         await repo.updateById(id, {
           status: "offline",
           lastHealthCheck: new Date(),
+          healthChecks,
         });
 
         res.json({
           success: false,
           error: result.error,
-          server: {
-            ...server,
-            status: "offline",
-            lastHealthCheck: new Date(),
-          },
+          healthChecks,
         });
         return;
       }
 
-      // Update server with status, resources, and health check timestamp
-      const updateData: Partial<typeof server> = {
+      const updateData: Partial<TServer> = {
         status: "online",
         lastHealthCheck: new Date(),
+        healthChecks,
       };
 
       if (result.resources) {
@@ -278,14 +311,11 @@ export function useServerController() {
 
       await repo.updateById(id, updateData);
 
-      // Get updated server
-      const updatedServer = await repo.getById(id);
-
       res.json({
         success: true,
         serverInfo: result.serverInfo,
         resources: result.resources,
-        server: updatedServer,
+        healthChecks,
       });
     } catch (error) {
       next(error);
@@ -339,8 +369,12 @@ export function useServerController() {
   }
 
   /**
-   * Bootstrap a server for Kamal deployments
-   * Installs Docker, starts kamal-proxy, and configures firewall
+   * Bootstrap a server for deployments
+   * Installs Docker and configures firewall
+   * 
+   * Note: This is a simplified bootstrap that only sets up Docker.
+   * Caddy runs on the control plane host as the centralized reverse proxy,
+   * so we don't need kamal-proxy on each server.
    */
   async function bootstrap(req: Request, res: Response, next: NextFunction) {
     try {
@@ -368,7 +402,6 @@ export function useServerController() {
       const conn = new Client();
       const SSH_TIMEOUT_MS = 30000;
       const INSTALL_TIMEOUT_MS = 300000; // 5 min for Docker install
-      const PULL_TIMEOUT_MS = 120000; // 2 min for image pull
 
       function execCommand(
         connection: Client,
@@ -450,6 +483,7 @@ export function useServerController() {
         name: string;
         status: string;
         output?: string;
+        duration?: number;
       };
 
       const steps: TBootstrapStep[] = [];
@@ -457,6 +491,7 @@ export function useServerController() {
       try {
         // Step 1: Check if Docker is installed
         logger.log({ level: "info", message: `Bootstrapping server ${server.host}: checking Docker` });
+        const dockerStartTime = Date.now();
         const dockerCheck = await execCommand(conn, "docker --version");
 
         if (dockerCheck.code !== 0) {
@@ -474,90 +509,269 @@ export function useServerController() {
             return;
           }
 
-          steps.push({ name: "docker", status: "installed", output: "Docker installed via official script" });
+          steps.push({ 
+            name: "docker", 
+            status: "installed", 
+            output: "Docker installed via official script",
+            duration: Date.now() - dockerStartTime,
+          });
         } else {
-          steps.push({ name: "docker", status: "installed", output: dockerCheck.stdout });
+          steps.push({ 
+            name: "docker", 
+            status: "already_installed", 
+            output: dockerCheck.stdout,
+            duration: Date.now() - dockerStartTime,
+          });
         }
 
         // Step 2: Ensure Docker is enabled and running
+        const serviceStartTime = Date.now();
         await execCommand(conn, "systemctl enable docker && systemctl start docker");
+        steps.push({
+          name: "docker_service",
+          status: "running",
+          output: "Docker service enabled and started",
+          duration: Date.now() - serviceStartTime,
+        });
 
-        // Step 3: Pull kamal-proxy image
-        logger.log({ level: "info", message: `Pulling kamal-proxy on ${server.host}` });
-        const pullResult = await execCommand(
-          conn,
-          "docker pull basecamp/kamal-proxy:latest",
-          PULL_TIMEOUT_MS
-        );
-
-        if (pullResult.code !== 0) {
-          conn.end();
-          next(new BadRequestError(`Failed to pull kamal-proxy: ${pullResult.stderr}`));
-          return;
-        }
-
-        // Step 4: Check if kamal-proxy container exists and is running
-        const psResult = await execCommand(
-          conn,
-          "docker ps -a --filter name=kamal-proxy --format '{{.Status}}'"
-        );
-
-        const isRunning = psResult.stdout.toLowerCase().includes("up");
-
-        if (!isRunning) {
-          // Remove existing stopped container if any
-          await execCommand(conn, "docker rm -f kamal-proxy 2>/dev/null || true");
-
-          // Start kamal-proxy
-          logger.log({ level: "info", message: `Starting kamal-proxy on ${server.host}` });
-          const runResult = await execCommand(
-            conn,
-            "docker run -d --name kamal-proxy --restart unless-stopped --network host -v kamal-proxy-config:/home/kamal-proxy/.config/kamal-proxy basecamp/kamal-proxy:latest"
-          );
-
-          if (runResult.code !== 0) {
-            conn.end();
-            next(new BadRequestError(`Failed to start kamal-proxy: ${runResult.stderr}`));
-            return;
-          }
-
-          steps.push({ name: "kamal-proxy", status: "running", output: "Started kamal-proxy container" });
-        } else {
-          steps.push({ name: "kamal-proxy", status: "running", output: "kamal-proxy already running" });
-        }
-
-        // Step 5: Configure firewall (UFW) — open ports 80 and 443 if UFW is active
+        // Step 3: Configure firewall (UFW) — open common ports if UFW is active
+        const firewallStartTime = Date.now();
         const ufwStatus = await execCommand(conn, "ufw status 2>/dev/null || echo inactive");
         const ufwActive = ufwStatus.stdout.includes("Status: active");
 
         if (ufwActive) {
-          await execCommand(conn, "ufw allow 80/tcp && ufw allow 443/tcp");
-          steps.push({ name: "firewall", status: "configured", output: "Opened ports 80 and 443 in UFW" });
+          // Open ports 22 (SSH), 80 (HTTP), 443 (HTTPS), and 3000-3100 (app ports)
+          await execCommand(conn, "ufw allow 22/tcp");
+          await execCommand(conn, "ufw allow 80/tcp");
+          await execCommand(conn, "ufw allow 443/tcp");
+          await execCommand(conn, "ufw allow 3000:3100/tcp"); // App port range
+          steps.push({ 
+            name: "firewall", 
+            status: "configured", 
+            output: "Opened ports 22, 80, 443, and 3000-3100 in UFW",
+            duration: Date.now() - firewallStartTime,
+          });
         } else {
-          steps.push({ name: "firewall", status: "configured", output: "UFW not active, no changes needed" });
+          steps.push({ 
+            name: "firewall", 
+            status: "skipped", 
+            output: "UFW not active, no changes needed",
+            duration: Date.now() - firewallStartTime,
+          });
         }
+
+        // Step 4: Gather system info
+        const infoStartTime = Date.now();
+        const [cpuResult, memResult, diskResult] = await Promise.all([
+          execCommand(conn, "nproc"),
+          execCommand(conn, "free -m | awk '/^Mem:/ {print $2}'"),
+          execCommand(conn, "df -BG / | awk 'NR==2 {gsub(/G/,\"\"); print $2}'"),
+        ]);
+
+        const resources = {
+          cpuCores: parseInt(cpuResult.stdout, 10) || undefined,
+          memoryMb: parseInt(memResult.stdout, 10) || undefined,
+          diskGb: parseInt(diskResult.stdout, 10) || undefined,
+        };
+
+        steps.push({
+          name: "system_info",
+          status: "gathered",
+          output: `CPU: ${resources.cpuCores} cores, RAM: ${resources.memoryMb}MB, Disk: ${resources.diskGb}GB`,
+          duration: Date.now() - infoStartTime,
+        });
 
         conn.end();
 
         // Update server record
         await repo.updateById(id, {
           dockerInstalled: true,
-          kamalProxyRunning: true,
           bootstrappedAt: new Date(),
           status: "online",
+          lastHealthCheck: new Date(),
+          resources,
         });
 
         logger.log({ level: "info", message: `Server ${server.host} bootstrapped successfully` });
 
+        const totalDuration = steps.reduce((sum, s) => sum + (s.duration || 0), 0);
+
         res.json({
           success: true,
           steps,
+          totalDuration,
+          server: {
+            id,
+            host: server.host,
+            status: "online",
+            dockerInstalled: true,
+            resources,
+          },
         });
       } catch (error: any) {
         conn.end();
         logger.log({ level: "error", message: `Bootstrap failed for ${server.host}: ${error.message}` });
         next(new BadRequestError(`Bootstrap failed: ${error.message}`));
       }
+    } catch (error) {
+      next(error);
+    }
+  }
+
+  async function setup(req: Request, res: Response, next: NextFunction) {
+    try {
+      const id = req.params.id as string;
+      const server = await repo.getById(id);
+
+      if (!server) {
+        next(new NotFoundError("Server not found"));
+        return;
+      }
+
+      if (!server.sshKeyId) {
+        next(new BadRequestError("Server does not have an SSH key configured"));
+        return;
+      }
+
+      if (server.setupStatus === "running") {
+        res.json({
+          message: "Server setup is already in progress",
+          setupStatus: "running",
+        });
+        return;
+      }
+
+      serverService.setupServer(id).catch((err: Error) => {
+        logger.log({ level: "error", message: `[setup] Unhandled error: ${err.message}` });
+      });
+
+      res.json({
+        message: "Server setup started",
+        setupStatus: "running",
+      });
+    } catch (error) {
+      next(error);
+    }
+  }
+
+  async function getSetupStatus(req: Request, res: Response, next: NextFunction) {
+    try {
+      const id = req.params.id as string;
+      const server = await repo.getById(id);
+
+      if (!server) {
+        next(new NotFoundError("Server not found"));
+        return;
+      }
+
+      res.json({
+        setupStatus: server.setupStatus ?? "idle",
+        setupLog: server.setupLog ?? [],
+        setupStartedAt: server.setupStartedAt,
+        setupCompletedAt: server.setupCompletedAt,
+        status: server.status,
+        dockerInstalled: server.dockerInstalled ?? false,
+        resources: server.resources,
+      });
+    } catch (error) {
+      next(error);
+    }
+  }
+
+  /**
+   * SSE stream for real-time setup progress.
+   * Sends the current state immediately, then pushes "update" and "done" events
+   * as the setup service emits them. Closes automatically when setup finishes.
+   */
+  async function setupStream(req: Request, res: Response, next: NextFunction) {
+    try {
+      const id = req.params.id as string;
+      const server = await repo.getById(id);
+
+      if (!server) {
+        next(new NotFoundError("Server not found"));
+        return;
+      }
+
+      res.setHeader("Content-Type", "text/event-stream");
+      res.setHeader("Cache-Control", "no-cache");
+      res.setHeader("Connection", "keep-alive");
+      res.setHeader("X-Accel-Buffering", "no"); // disable nginx buffering
+      res.flushHeaders();
+
+      function send(eventName: string, data: object) {
+        res.write(`event: ${eventName}\ndata: ${JSON.stringify(data)}\n\n`);
+      }
+
+      // Send current state immediately so the client hydrates without a round-trip
+      const snapshot = {
+        setupStatus: server.setupStatus ?? "idle",
+        setupLog: server.setupLog ?? [],
+        status: server.status,
+        resources: server.resources,
+        dockerInstalled: server.dockerInstalled ?? false,
+        setupCompletedAt: server.setupCompletedAt,
+      };
+      send("update", snapshot);
+
+      // If setup is already finished (or never started), send done and close
+      if (server.setupStatus !== "running") {
+        send("done", snapshot);
+        res.end();
+        return;
+      }
+
+      const emitter = getSetupEmitter(id);
+
+      function onUpdate(data: object) {
+        send("update", data);
+      }
+
+      function onDone(data: object) {
+        send("update", data);
+        send("done", data);
+        res.end();
+      }
+
+      emitter.on("update", onUpdate);
+      emitter.once("done", onDone);
+
+      req.on("close", () => {
+        emitter.off("update", onUpdate);
+        emitter.off("done", onDone);
+      });
+    } catch (error) {
+      next(error);
+    }
+  }
+
+  /** List apps deployed to a specific server. */
+  async function getServerApps(req: Request, res: Response, next: NextFunction) {
+    try {
+      const id = req.params.id as string;
+      const server = await repo.getById(id);
+      if (!server) {
+        next(new NotFoundError("Server not found"));
+        return;
+      }
+      const items = await appRepo.getByServerId(id);
+      res.json({ items, total: items.length });
+    } catch (error) {
+      next(error);
+    }
+  }
+
+  /** List databases hosted on a specific server. */
+  async function getServerDatabases(req: Request, res: Response, next: NextFunction) {
+    try {
+      const id = req.params.id as string;
+      const server = await repo.getById(id);
+      if (!server) {
+        next(new NotFoundError("Server not found"));
+        return;
+      }
+      const items = await databaseRepo.getByServerId(id);
+      res.json({ items, total: items.length });
     } catch (error) {
       next(error);
     }
@@ -574,5 +788,10 @@ export function useServerController() {
     checkHealth,
     testConnection,
     bootstrap,
+    setup,
+    getSetupStatus,
+    setupStream,
+    getServerApps,
+    getServerDatabases,
   };
 }

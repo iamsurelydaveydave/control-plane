@@ -1,0 +1,89 @@
+---
+# MongoDB Restore from S3
+# Usage: ansible-playbook playbooks/mongodb-restore.yml -i <inventory> -e @vars.yml
+#
+# Required vars: mongodb_container_name, mongodb_admin_user, mongodb_admin_password,
+#                s3_bucket, s3_access_key, s3_secret_key, s3_region, s3_key
+
+- name: Restore MongoDB from S3
+  hosts: mongodb_primary
+  become: yes
+  gather_facts: yes
+
+  vars:
+    mongodb_port: "{{ mongodb_port | default(27017) }}"
+    mongodb_container_name: "{{ mongodb_container_name | default('mongodb') }}"
+    restore_path: "{{ restore_path | default('/tmp/mongodb-restore') }}"
+
+  pre_tasks:
+    - name: Validate required variables
+      assert:
+        that:
+          - mongodb_admin_user is defined
+          - mongodb_admin_password is defined
+          - mongodb_container_name is defined
+          - s3_bucket is defined
+          - s3_access_key is defined
+          - s3_secret_key is defined
+          - s3_region is defined
+          - s3_key is defined
+        fail_msg: "Required restore variables must be defined"
+
+  tasks:
+    - name: Install AWS CLI (pip3)
+      pip:
+        name: awscli
+        state: present
+        executable: pip3
+
+    - name: Create restore directory
+      file:
+        path: "{{ restore_path }}"
+        state: directory
+        mode: '0755'
+
+    - name: Download backup from S3
+      command: >
+        aws s3 cp s3://{{ s3_bucket }}/{{ s3_key }}
+        {{ restore_path }}/backup.tar.gz
+      environment:
+        AWS_ACCESS_KEY_ID: "{{ s3_access_key }}"
+        AWS_SECRET_ACCESS_KEY: "{{ s3_secret_key }}"
+        AWS_DEFAULT_REGION: "{{ s3_region }}"
+
+    - name: Extract backup archive
+      unarchive:
+        src: "{{ restore_path }}/backup.tar.gz"
+        dest: "{{ restore_path }}"
+        remote_src: yes
+
+    - name: Copy dump into container
+      command: >
+        docker cp {{ restore_path }}/dump
+        {{ mongodb_container_name }}:/tmp/mongorestore-dump
+
+    - name: Run mongorestore inside container
+      command: >
+        docker exec {{ mongodb_container_name }} mongorestore
+        --username "{{ mongodb_admin_user }}"
+        --password "{{ mongodb_admin_password }}"
+        --authenticationDatabase admin
+        --drop
+        /tmp/mongorestore-dump
+      register: mongorestore_result
+
+    - name: Clean up inside container
+      command: >
+        docker exec {{ mongodb_container_name }} rm -rf /tmp/mongorestore-dump
+      ignore_errors: yes
+
+    - name: Clean up restore directory
+      file:
+        path: "{{ restore_path }}"
+        state: absent
+
+    - name: Display restore completion
+      debug:
+        msg: |
+          Restore completed successfully!
+          Source: s3://{{ s3_bucket }}/{{ s3_key }}

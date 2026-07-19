@@ -220,6 +220,39 @@ export function useAppRepo() {
     }
   }
 
+  async function countByServerId(serverId: string | ObjectId): Promise<number> {
+    let id: ObjectId;
+    try {
+      id = new ObjectId(serverId);
+    } catch {
+      throw new BadRequestError("Invalid server ID");
+    }
+
+    try {
+      return await repo.collection.countDocuments({ serverIds: id });
+    } catch (error) {
+      throw new InternalServerError("Failed to count apps for server");
+    }
+  }
+
+  async function getByServerId(serverId: string | ObjectId) {
+    let id: ObjectId;
+    try {
+      id = new ObjectId(serverId);
+    } catch {
+      throw new BadRequestError("Invalid server ID");
+    }
+
+    try {
+      return await repo.collection
+        .find<TApp>({ serverIds: id })
+        .sort({ createdAt: -1 })
+        .toArray();
+    } catch (error) {
+      throw new InternalServerError("Failed to get apps for server");
+    }
+  }
+
   async function deleteById(_id: string | ObjectId) {
     try {
       _id = new ObjectId(_id);
@@ -250,6 +283,8 @@ export function useAppRepo() {
     updateById,
     updateStatus,
     scale,
+    countByServerId,
+    getByServerId,
     deleteById,
   };
 }

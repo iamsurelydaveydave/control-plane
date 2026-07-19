@@ -5,13 +5,38 @@ import { BadRequestError } from "../../utils";
 export const serverProviders = ["hetzner", "digitalocean", "aws", "manual"] as const;
 export type TServerProvider = (typeof serverProviders)[number];
 
-export const serverStatuses = ["online", "offline", "unknown"] as const;
+export const serverStatuses = ["online", "offline", "unknown", "provisioning"] as const;
 export type TServerStatus = (typeof serverStatuses)[number];
+
+export const setupStatuses = ["idle", "running", "success", "failed"] as const;
+export type TSetupStatus = (typeof setupStatuses)[number];
+
+export type TSetupStep = {
+  name: string;
+  label: string;
+  status: "pending" | "running" | "success" | "failed" | "skipped";
+  output?: string;
+  error?: string;
+  duration?: number;
+};
 
 export type TServerResources = {
   cpuCores?: number;
   memoryMb?: number;
   diskGb?: number;
+};
+
+export type THealthCheck = {
+  timestamp: Date;
+  status: "online" | "offline";
+  resources?: TServerResources;
+  serverInfo?: {
+    os: string;
+    hostname: string;
+    uptime: string;
+  };
+  error?: string;
+  durationMs?: number;
 };
 
 export type TServer = {
@@ -27,12 +52,18 @@ export type TServer = {
   status: TServerStatus;
   resources?: TServerResources;
   tags: string[];
+  sshConnectTimeout?: number;
+  timezone?: string;
   dockerInstalled?: boolean;
-  kamalProxyRunning?: boolean;
+  setupStatus?: TSetupStatus;
+  setupLog?: TSetupStep[];
+  setupStartedAt?: Date;
+  setupCompletedAt?: Date;
   bootstrappedAt?: Date;
   createdAt?: Date;
   updatedAt?: Date;
   lastHealthCheck?: Date;
+  healthChecks?: THealthCheck[];
 };
 
 const schemaServerBase = {
@@ -61,6 +92,8 @@ export const schemaServerUpdate = Joi.object({
   provider: Joi.string().valid(...serverProviders).optional(),
   providerId: Joi.string().optional().allow(null, ""),
   tags: Joi.array().items(Joi.string()).optional(),
+  sshConnectTimeout: Joi.number().min(5).max(300).optional(),
+  timezone: Joi.string().max(100).optional().allow(null, ''),
 });
 
 export function modelServer(data: Partial<TServer>): TServer {

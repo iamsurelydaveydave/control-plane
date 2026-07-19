@@ -18,8 +18,8 @@ export type TInstance = {
 };
 
 export const schemaInstanceCreate = Joi.object({
-  appId: Joi.string().required(),
-  serverId: Joi.string().required(),
+  appId: Joi.alternatives().try(Joi.string(), Joi.object()).required(),
+  serverId: Joi.alternatives().try(Joi.string(), Joi.object()).required(),
   port: Joi.number().required(),
   containerId: Joi.string().optional(),
 });
@@ -31,10 +31,26 @@ export function modelInstance(data: Partial<TInstance>): TInstance {
     throw new BadRequestError(`Instance validation error: ${error.message}`);
   }
 
+  // Handle appId - could be string or ObjectId
+  let appId: ObjectId;
+  if (value.appId instanceof ObjectId) {
+    appId = value.appId;
+  } else {
+    appId = new ObjectId(value.appId);
+  }
+
+  // Handle serverId - could be string or ObjectId
+  let serverId: ObjectId;
+  if (value.serverId instanceof ObjectId) {
+    serverId = value.serverId;
+  } else {
+    serverId = new ObjectId(value.serverId);
+  }
+
   return {
     _id: data._id,
-    appId: new ObjectId(value.appId),
-    serverId: new ObjectId(value.serverId),
+    appId,
+    serverId,
     containerId: value.containerId,
     port: value.port,
     status: "stopped",

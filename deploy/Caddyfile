@@ -1,0 +1,14 @@
+# Control Plane Caddyfile
+# Automatic HTTPS with Let's Encrypt
+
+{$DOMAIN:localhost} {
+    # API routes
+    handle /api/* {
+        reverse_proxy control-plane-api:5005
+    }
+
+    # Everything else to Web (Nuxt)
+    handle {
+        reverse_proxy control-plane-web:3000
+    }
+}

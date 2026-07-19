@@ -403,8 +403,8 @@ log "| Registry          | $REGISTRY_URL"
 log "Downloading docker-compose.yml..."
 curl -fsSL "$CDN/docker-compose.yml" -o "$SOURCE_DIR/docker-compose.yml"
 
-log "Downloading nginx.conf..."
-curl -fsSL "$CDN/nginx.conf" -o "$SOURCE_DIR/nginx.conf"
+log "Downloading Caddyfile..."
+curl -fsSL "$CDN/Caddyfile" -o "$SOURCE_DIR/Caddyfile"
 
 log "Downloading .env.template..."
 curl -fsSL "$CDN/.env.template" -o "$SOURCE_DIR/.env.template"

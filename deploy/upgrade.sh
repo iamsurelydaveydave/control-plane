@@ -11,7 +11,7 @@ set -o pipefail
 DATA_DIR="/data/control-plane"
 SOURCE_DIR="$DATA_DIR/source"
 ENV_FILE="$SOURCE_DIR/.env"
-CDN="https://cdn.controlplane.dev"
+CDN="https://get.goweekdays.com"
 DATE=$(date +"%Y%m%d-%H%M%S")
 STATUS_FILE="$SOURCE_DIR/.upgrade-status"
 

@@ -572,7 +572,8 @@ export function useMongoDBProvisionerK8s() {
 
   async function installK3sAgent(server: any, log: (msg: string) => void) {
     // Get K3s server URL and token from environment
-    const k3sServerUrl = process.env.K3S_SERVER_URL;
+    // Use K3S_EXTERNAL_URL for agents (public IP), fallback to K3S_SERVER_URL
+    const k3sServerUrl = process.env.K3S_EXTERNAL_URL || process.env.K3S_SERVER_URL;
     const k3sToken = process.env.K3S_TOKEN;
 
     if (!k3sServerUrl || !k3sToken) {

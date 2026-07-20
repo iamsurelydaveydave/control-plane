@@ -30,6 +30,7 @@ services:
       - K8S_ENABLED=${K8S_ENABLED:-false}
       - K8S_KUBECONFIG=${K8S_KUBECONFIG:-/etc/rancher/k3s/k3s.yaml}
       - K3S_SERVER_URL=${K3S_SERVER_URL:-}
+      - K3S_EXTERNAL_URL=${K3S_EXTERNAL_URL:-}
       - K3S_TOKEN=${K3S_TOKEN:-}
     volumes:
       - control-plane-ssh:/data/control-plane/ssh

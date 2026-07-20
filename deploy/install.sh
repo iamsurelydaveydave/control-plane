@@ -621,6 +621,8 @@ if [ "$ENABLE_K8S" = "true" ]; then
     # The control-plane network uses 172.18.0.0/16 by default, gateway is 172.18.0.1
     DOCKER_GATEWAY="172.18.0.1"
     K3S_SERVER_URL="https://${DOCKER_GATEWAY}:6443"
+    # External URL for agent nodes to join (must use public IP)
+    K3S_EXTERNAL_URL="https://${PUBLIC_IP}:6443"
     
     # Update kubeconfig to use Docker gateway instead of localhost
     log "Configuring K3s for Docker container access..."
@@ -644,10 +646,12 @@ if [ "$ENABLE_K8S" = "true" ]; then
     update_env "K8S_ENABLED" "true"
     update_env "K8S_KUBECONFIG" "/etc/rancher/k3s/k3s.yaml"
     update_env "K3S_SERVER_URL" "$K3S_SERVER_URL"
+    update_env "K3S_EXTERNAL_URL" "$K3S_EXTERNAL_URL"
     update_env "K3S_TOKEN" "$K3S_TOKEN"
     
     log_success "Percona Operator installed"
-    log "K3s Server URL: $K3S_SERVER_URL (accessible from Docker containers)"
+    log "K3s Server URL: $K3S_SERVER_URL (for Docker containers)"
+    log "K3s External URL: $K3S_EXTERNAL_URL (for agent nodes)"
 else
     # K8s failed to install - use Ansible provisioning as fallback
     update_env "K8S_ENABLED" "false"

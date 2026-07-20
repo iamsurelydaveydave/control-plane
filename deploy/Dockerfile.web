@@ -1,10 +1,10 @@
 # Control Plane Web Dockerfile
-# Multi-stage build for Nuxt 4 SSR production
+# Multi-stage, multi-architecture build for Nuxt 4 SSR production
 
 # ================================
 # Stage 1: Build
 # ================================
-FROM node:22-alpine AS builder
+FROM --platform=$BUILDPLATFORM node:22-alpine AS builder
 
 WORKDIR /app
 
@@ -28,6 +28,10 @@ RUN pnpm build
 # ================================
 FROM node:22-alpine AS production
 
+# Build arguments for multi-arch
+ARG TARGETPLATFORM
+ARG BUILDPLATFORM
+
 WORKDIR /app
 
 # Install curl for health checks
@@ -50,7 +54,7 @@ ENV NUXT_PORT=3000
 EXPOSE 3000
 
 # Health check
-HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
+HEALTHCHECK --interval=30s --timeout=10s --start-period=15s --retries=3 \
     CMD curl -f http://localhost:3000/health || exit 1
 
 # Run as non-root user

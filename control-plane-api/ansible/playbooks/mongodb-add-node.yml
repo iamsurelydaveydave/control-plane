@@ -124,12 +124,29 @@
           retries: 5
           start_period: 30s
 
-    - name: Wait for MongoDB to be ready
+    - name: Wait for MongoDB port to be ready
       wait_for:
         host: "127.0.0.1"
         port: "{{ mongodb_port }}"
         delay: 5
-        timeout: 60
+        timeout: 120
+
+    - name: Wait for MongoDB container to be healthy
+      shell: |
+        for i in $(seq 1 36); do
+          status=$(docker inspect --format='{{"{{"}}.State.Health.Status{{"}}"}}' {{ mongodb_container_name }} 2>/dev/null || echo "missing")
+          if [ "$status" = "healthy" ]; then
+            echo "Container healthy after $i checks"
+            exit 0
+          fi
+          echo "Health check $i: $status"
+          sleep 5
+        done
+        echo "Container not healthy after 36 checks (3 minutes)"
+        docker logs --tail 50 {{ mongodb_container_name }} 2>&1 || true
+        exit 1
+      register: health_result
+      changed_when: false
 
 - name: Add Node - Phase 2 (Add to Replica Set)
   hosts: mongodb_primary
@@ -145,7 +162,8 @@
       wait_for:
         host: "{{ new_node_host }}"
         port: "{{ new_node_port | default(mongodb_port) }}"
-        timeout: 120
+        delay: 5
+        timeout: 300
 
     - name: Add new node to replica set (secondary)
       command: >

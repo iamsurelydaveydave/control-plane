@@ -23,13 +23,14 @@
 #                            If not provided, one will be generated on the primary.
 
 # ---------------------------------------------------------------------------
-# Phase 1 — Provision each node (one at a time to avoid race conditions)
+# Phase 1 — Provision all nodes in parallel
+# Each node is independent until replica set initialization, so parallel is safe
 # ---------------------------------------------------------------------------
 - name: Provision MongoDB Replica Set — Nodes
   hosts: mongodb
   become: yes
   gather_facts: yes
-  serial: 1
+  # No serial: runs all nodes in parallel (faster)
 
   vars:
     mongodb_mode: replicaset
@@ -41,7 +42,7 @@
     mongodb_log_dir: "{{ mongodb_log_dir | default('/opt/mongodb/logs') }}"
     mongodb_keyfile_dir: "{{ mongodb_keyfile_dir | default('/opt/mongodb/keyfile') }}"
     mongodb_replicaset_name: "{{ mongodb_replicaset_name | default('rs0') }}"
-    docker_network: "{{ docker_network | default('cp_databases') }}"
+    _docker_network: "{{ docker_network | default('cp_databases') }}"
 
   pre_tasks:
     - name: Validate required variables
@@ -78,17 +79,91 @@
   run_once: true
 
   vars:
+    mongodb_version: "{{ mongodb_version | default('7.0') }}"
     mongodb_port: "{{ mongodb_port | default(27017) }}"
     mongodb_container_name: "{{ mongodb_container_name | default('mongodb') }}"
     mongodb_replicaset_name: "{{ mongodb_replicaset_name | default('rs0') }}"
+    mongodb_data_dir: "{{ mongodb_data_dir | default('/opt/mongodb/data') }}"
+    mongodb_config_dir: "{{ mongodb_config_dir | default('/opt/mongodb/config') }}"
+    mongodb_log_dir: "{{ mongodb_log_dir | default('/opt/mongodb/logs') }}"
+    mongodb_keyfile_dir: "{{ mongodb_keyfile_dir | default('/opt/mongodb/keyfile') }}"
+    _docker_network: "{{ docker_network | default('cp_databases') }}"
 
   tasks:
-    - name: Wait for all nodes to be reachable on MongoDB port
+    # -------------------------------------------------------------------------
+    # Wait for Docker health checks on ALL nodes CONCURRENTLY
+    # Uses async to run health checks in parallel across all nodes
+    # -------------------------------------------------------------------------
+    - name: Start health check on all nodes (async)
+      shell: |
+        for i in $(seq 1 60); do
+          status=$(docker inspect --format='{{"{{"}}.State.Health.Status{{"}}"}}' {{ mongodb_container_name }} 2>/dev/null || echo "missing")
+          if [ "$status" = "healthy" ]; then
+            echo "Container healthy after $i checks"
+            exit 0
+          fi
+          echo "Health check $i: $status"
+          sleep 5
+        done
+        echo "Container not healthy after 60 checks (5 minutes)"
+        exit 1
+      delegate_to: "{{ item }}"
+      loop: "{{ groups['mongodb'] }}"
+      async: 360  # 6 minute timeout
+      poll: 0     # Don't wait, fire and continue
+      register: health_check_async
+
+    - name: Wait for all health checks to complete
+      async_status:
+        jid: "{{ item.ansible_job_id }}"
+      delegate_to: "{{ item.item }}"
+      loop: "{{ health_check_async.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+      register: health_check
+      until: health_check.finished
+      retries: 72   # 6 minutes at 5s intervals
+      delay: 5
+
+    - name: Debug health check results
+      debug:
+        msg: "{{ item.stdout_lines[-3:] | default(['(no output)']) }}"
+      loop: "{{ health_check.results }}"
+      loop_control:
+        label: "{{ item.item.item }}"
+      when: item.stdout_lines is defined
+
+    # -------------------------------------------------------------------------
+    # Test cross-node connectivity CONCURRENTLY
+    # -------------------------------------------------------------------------
+    - name: Check port connectivity on all nodes (async)
       wait_for:
         host: "{{ hostvars[item]['ansible_host'] }}"
         port: "{{ mongodb_port }}"
-        timeout: 120
+        delay: 5
+        timeout: 300
       loop: "{{ groups['mongodb'] }}"
+      async: 310  # slightly longer than wait_for timeout
+      poll: 0
+      register: port_check_async
+
+    - name: Wait for all port checks to complete
+      async_status:
+        jid: "{{ item.ansible_job_id }}"
+      loop: "{{ port_check_async.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+      register: port_check
+      until: port_check.finished
+      retries: 65
+      delay: 5
+
+    - name: Debug port check results
+      debug:
+        msg: "Port {{ mongodb_port }} reachable on {{ hostvars[item.item.item]['ansible_host'] }}"
+      loop: "{{ port_check.results }}"
+      loop_control:
+        label: "{{ item.item.item }}"
 
     - name: Check if replica set is already initialised
       command: >
@@ -133,12 +208,15 @@
       delay: 5
       until: rs_wait.rc == 0
 
+    # Always try to create admin user - the JS checks if user exists first
+    # This ensures user is created even on reprovision where rs_init didn't change
+    # Uses w:"majority" to ensure user is replicated before returning
     - name: Create admin user
-      command: >
-        docker exec {{ mongodb_container_name }} mongosh --eval '
-        use admin;
-        if (db.getUser("{{ mongodb_admin_user }}") === null) {
-          db.createUser({
+      command: >-
+        docker exec {{ mongodb_container_name }} mongosh admin --eval '
+        var adminDb = db.getSiblingDB("admin");
+        if (adminDb.getUser("{{ mongodb_admin_user }}") === null) {
+          adminDb.createUser({
             user: "{{ mongodb_admin_user }}",
             pwd: "{{ mongodb_admin_password }}",
             roles: [
@@ -148,17 +226,156 @@
               { role: "readWriteAnyDatabase", db: "admin" },
               { role: "clusterAdmin", db: "admin" }
             ]
-          });
-          print("Admin user created");
+          },
+          { w: "majority", wtimeout: 30000 });
+          print("Admin user created with majority write concern");
         } else {
           print("Admin user already exists");
         }
         '
-      when: rs_init is changed
       register: admin_user
       retries: 5
       delay: 5
       until: admin_user.rc == 0
+
+    - name: Debug admin user creation result
+      debug:
+        msg: "{{ admin_user.stdout_lines }}"
+      when: admin_user.stdout_lines is defined
+
+    # -------------------------------------------------------------------------
+    # Switch ALL nodes to final config with authorization enabled
+    # This must be done AFTER admin user is created, BEFORE auth verification
+    # Uses async to run operations in parallel across all nodes
+    # -------------------------------------------------------------------------
+    - name: Check if already using final config with authorization (async)
+      shell: |
+        docker exec {{ mongodb_container_name }} cat /etc/mongod.conf | grep -q "authorization: enabled" && echo "YES" || echo "NO"
+      delegate_to: "{{ item }}"
+      loop: "{{ groups['mongodb'] }}"
+      async: 60
+      poll: 0
+      register: config_check_async
+
+    - name: Wait for config checks to complete
+      async_status:
+        jid: "{{ item.ansible_job_id }}"
+      delegate_to: "{{ item.item }}"
+      loop: "{{ config_check_async.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+      register: config_check
+      until: config_check.finished
+      retries: 12
+      delay: 5
+
+    - name: Set needs_config_switch fact
+      set_fact:
+        _needs_config_switch: "{{ config_check.results | selectattr('stdout', 'equalto', 'NO') | list | length > 0 }}"
+
+    - name: Stop MongoDB containers for config switch (async)
+      shell: |
+        docker stop {{ mongodb_container_name }} || true
+        docker rm {{ mongodb_container_name }} || true
+      delegate_to: "{{ item }}"
+      loop: "{{ groups['mongodb'] }}"
+      async: 120
+      poll: 0
+      register: stop_async
+      when: _needs_config_switch | bool
+
+    - name: Wait for containers to stop
+      async_status:
+        jid: "{{ item.ansible_job_id }}"
+      delegate_to: "{{ item.item }}"
+      loop: "{{ stop_async.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+      register: stop_result
+      until: stop_result.finished
+      retries: 24
+      delay: 5
+      when: _needs_config_switch | bool
+
+    - name: Restart MongoDB containers with final config (async)
+      shell: |
+        docker run -d \
+          --name {{ mongodb_container_name }} \
+          --restart unless-stopped \
+          -p {{ mongodb_bind_ip | default('0.0.0.0') }}:{{ mongodb_port }}:27017 \
+          -v {{ mongodb_data_dir }}:/data/db \
+          -v {{ mongodb_config_dir }}/mongod.conf:/etc/mongod.conf:ro \
+          -v {{ mongodb_keyfile_dir }}/mongodb-keyfile:/etc/mongodb-keyfile:ro \
+          -v {{ mongodb_log_dir }}:/var/log/mongodb \
+          --network {{ _docker_network }} \
+          --health-cmd "mongosh --eval 'db.adminCommand(\"ping\")'" \
+          --health-interval 10s \
+          --health-timeout 5s \
+          --health-retries 5 \
+          --health-start-period 30s \
+          mongo:{{ mongodb_version }} mongod --config /etc/mongod.conf
+      delegate_to: "{{ item }}"
+      loop: "{{ groups['mongodb'] }}"
+      async: 120
+      poll: 0
+      register: restart_async
+      when: _needs_config_switch | bool
+
+    - name: Wait for containers to start
+      async_status:
+        jid: "{{ item.ansible_job_id }}"
+      delegate_to: "{{ item.item }}"
+      loop: "{{ restart_async.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+      register: restart_result
+      until: restart_result.finished
+      retries: 24
+      delay: 5
+      when: _needs_config_switch | bool
+
+    - name: Wait for MongoDB containers to be healthy after config switch (async)
+      shell: |
+        for i in $(seq 1 36); do
+          status=$(docker inspect --format='{{"{{"}}.State.Health.Status{{"}}"}}' {{ mongodb_container_name }} 2>/dev/null || echo "missing")
+          if [ "$status" = "healthy" ]; then
+            echo "Container healthy after $i checks"
+            exit 0
+          fi
+          echo "Health check $i: $status"
+          sleep 5
+        done
+        echo "Container not healthy after 36 checks (3 minutes)"
+        exit 1
+      delegate_to: "{{ item }}"
+      loop: "{{ groups['mongodb'] }}"
+      async: 360
+      poll: 0
+      register: health_async
+
+    - name: Wait for all health checks to complete after config switch
+      async_status:
+        jid: "{{ item.ansible_job_id }}"
+      delegate_to: "{{ item.item }}"
+      loop: "{{ health_async.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+      register: health_result
+      until: health_result.finished
+      retries: 72
+      delay: 5
+
+    # Verify the admin user can actually authenticate
+    - name: Verify admin user authentication works
+      command: >-
+        docker exec {{ mongodb_container_name }} mongosh
+        -u "{{ mongodb_admin_user }}" -p "{{ mongodb_admin_password }}"
+        --authenticationDatabase admin
+        --eval "db.runCommand({ping:1})"
+      register: auth_verify
+      retries: 10
+      delay: 3
+      until: auth_verify.rc == 0
 
   post_tasks:
     - name: Display connection information
@@ -173,4 +390,7 @@
 
           Connect with mongosh:
           mongosh "mongodb://{{ hostvars[groups['mongodb_primary'][0]]['ansible_host'] }}:{{ mongodb_port }}" --username {{ mongodb_admin_user }} --authenticationDatabase admin
+
+          NOTE: If you enable TLS later with mongodb-configure-tls.yml, add these params:
+          &tls=true&tlsAllowInvalidCertificates=true
       run_once: true

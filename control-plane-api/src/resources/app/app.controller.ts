@@ -3,7 +3,8 @@ import { useAppRepo } from "./app.repository";
 import { useServerRepo } from "../server/server.repository";
 import { useKamalExecutor } from "../../services/kamal.executor";
 import { schemaAppCreate, schemaAppUpdate, schemaAppDeploy } from "./app.model";
-import { BadRequestError, NotFoundError } from "../../utils";
+import { BadRequestError, NotFoundError, generateSslipHost, isSslipHost, logBroker } from "../../utils";
+import { useDNSService } from "../../services/dns.service";
 
 export function useAppController() {
   const repo = useAppRepo();
@@ -16,7 +17,45 @@ export function useAppController() {
 
   async function add(req: Request, res: Response, next: NextFunction) {
     try {
-      const { error, value } = schemaAppCreate.validate(req.body);
+      // -----------------------------------------------------------------------
+      // Auto-assign a hostname when none is provided.
+      // Priority: 1) explicit proxy.host  2) DNS subdomain  3) sslip.io
+      // -----------------------------------------------------------------------
+      const body = { ...req.body };
+
+      if (!body.proxy?.host && Array.isArray(body.serverIds) && body.serverIds.length > 0) {
+        const firstServer = await serverRepo.getById(body.serverIds[0]);
+        const serverIp = firstServer?.host;
+
+        if (serverIp) {
+          const dns = useDNSService();
+          const appsConfig = await dns.getAppsConfig();
+          const appName = (body.name as string) || "app";
+
+          let host: string;
+          let ssl = false;
+
+          if (appsConfig?.baseDomain) {
+            // DNS configured — use the registered subdomain
+            const safeName = appName.toLowerCase().replace(/[^a-z0-9-]/g, "-");
+            host = `${safeName}.${appsConfig.baseDomain}`;
+            ssl  = true;
+          } else {
+            // No DNS — fall back to sslip.io (no SSL)
+            host = generateSslipHost(appName, serverIp);
+            ssl  = false;
+          }
+
+          body.proxy = {
+            appPort: 3000,
+            ssl,
+            ...body.proxy,
+            host,               // always override the empty/missing host
+          };
+        }
+      }
+
+      const { error, value } = schemaAppCreate.validate(body);
       if (error) {
         next(new BadRequestError(error.message));
         return;
@@ -32,7 +71,18 @@ export function useAppController() {
       }
 
       const id = await repo.add(value);
-      res.status(201).json({ message: "App created", appId: id });
+      const isSslip = isSslipHost(value.proxy?.host ?? "");
+
+      res.status(201).json({
+        message: "App created",
+        appId: id,
+        url: value.proxy?.host
+          ? `${value.proxy.ssl ? "https" : "http"}://${value.proxy.host}`
+          : null,
+        urlType: value.proxy?.host
+          ? (isSslip ? "sslip" : "custom")
+          : null,
+      });
     } catch (error) {
       next(error);
     }
@@ -158,12 +208,11 @@ export function useAppController() {
           version: value.version,
           force: value.force,
           triggeredBy: userId,
-          onLog: (line) => {
-            console.log(`[Deploy ${app.name}] ${line}`);
-          },
+          onLog: (line) => logBroker.addLine(id, line),
         })
         .catch((err) => {
-          console.error(`Deployment failed for ${app.name}:`, err);
+          logBroker.addLine(id, `[ERROR] ${err.message}`);
+          logBroker.complete(id, "failed");
         });
 
       res.status(202).json({
@@ -196,12 +245,11 @@ export function useAppController() {
         .redeploy({
           appId: id,
           triggeredBy: userId,
-          onLog: (line) => {
-            console.log(`[Redeploy ${app.name}] ${line}`);
-          },
+          onLog: (line) => logBroker.addLine(id, line),
         })
         .catch((err) => {
-          console.error(`Redeployment failed for ${app.name}:`, err);
+          logBroker.addLine(id, `[ERROR] ${err.message}`);
+          logBroker.complete(id, "failed");
         });
 
       res.status(202).json({
@@ -231,12 +279,11 @@ export function useAppController() {
           appId: id,
           version,
           triggeredBy: userId,
-          onLog: (line) => {
-            console.log(`[Rollback ${app.name}] ${line}`);
-          },
+          onLog: (line) => logBroker.addLine(id, line),
         })
         .catch((err) => {
-          console.error(`Rollback failed for ${app.name}:`, err);
+          logBroker.addLine(id, `[ERROR] ${err.message}`);
+          logBroker.complete(id, "failed");
         });
 
       res.status(202).json({
@@ -385,6 +432,23 @@ export function useAppController() {
     }
   }
 
+  async function getDeployments(req: Request, res: Response, next: NextFunction) {
+    try {
+      const id = req.params.id as string;
+      const app = await repo.getById(id);
+      if (!app) { next(new NotFoundError("App not found")); return; }
+
+      const limit = req.query.limit ? Math.min(Number(req.query.limit), 50) : 10;
+      const { useDeploymentRepo } = await import("../deployment");
+      const deploymentRepo = useDeploymentRepo();
+      const deployments = await deploymentRepo.getByAppId(id, { page: 1, limit });
+
+      res.json({ deployments: deployments.items });
+    } catch (error) {
+      next(error);
+    }
+  }
+
   return {
     add,
     getById,
@@ -400,5 +464,6 @@ export function useAppController() {
     getLogs,
     getVersion,
     appExec,
+    getDeployments,
   };
 }

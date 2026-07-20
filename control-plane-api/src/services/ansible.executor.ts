@@ -201,9 +201,6 @@ export function useAnsibleExecutor() {
       args.push("--check");
     }
 
-    // Force color output
-    args.push("--force-color");
-
     logger.log({
       level: "info",
       message: `Executing: ansible-playbook ${args.join(" ")}`,

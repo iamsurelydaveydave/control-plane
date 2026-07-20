@@ -13,6 +13,8 @@ const router = useRouter()
 const toast = useToast()
 const appId = route.params.id as string
 
+const historyRef = ref<{ load: () => void } | null>(null)
+
 const {
   getById,
   deploy,
@@ -282,18 +284,27 @@ useHead({ title: computed(() => app.value ? `${app.value.name} · Control Plane`
             </UBadge>
           </div>
           <p class="text-sm text-muted mt-0.5">
-            <a
-              v-if="app.proxy?.host"
-              :href="`${app.proxy.ssl ? 'https' : 'http'}://${app.proxy.host}`"
-              target="_blank"
-              class="text-primary hover:underline"
-            >
-              {{ app.proxy.host }}
-              <UIcon
-                name="i-lucide-external-link"
-                class="inline-block size-3"
+            <template v-if="app.proxy?.host">
+              <a
+                :href="`${app.proxy.ssl ? 'https' : 'http'}://${app.proxy.host}`"
+                target="_blank"
+                class="text-primary hover:underline"
+              >
+                {{ app.proxy.host }}
+                <UIcon
+                  name="i-lucide-external-link"
+                  class="inline-block size-3"
+                />
+              </a>
+              <UBadge
+                v-if="app.proxy.host.endsWith('.sslip.io')"
+                label="sslip.io"
+                color="neutral"
+                variant="subtle"
+                size="xs"
+                class="ml-1 align-middle"
               />
-            </a>
+            </template>
             <span v-else>No domain configured</span>
           </p>
         </div>
@@ -381,6 +392,21 @@ useHead({ title: computed(() => app.value ? `${app.value.name} · Control Plane`
       v-else-if="app"
       class="space-y-6"
     >
+      <!-- Deployment log — visible while deploying or after failure -->
+      <ProvisionLog
+        v-if="app.status === 'deploying' || app.status === 'failed'"
+        :resource-id="appId"
+        resource-type="app"
+        :status="app.status"
+        @done="() => { refresh(); historyRef?.load() }"
+      />
+
+      <!-- Deployment history -->
+      <DeploymentHistory
+        ref="historyRef"
+        :resource-id="appId"
+        resource-type="app"
+      />
       <!-- Deployment Info -->
       <div class="rounded-xl border border-default bg-elevated/50 p-6">
         <h2 class="text-lg font-semibold text-highlighted mb-4">

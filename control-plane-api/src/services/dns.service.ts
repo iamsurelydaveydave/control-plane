@@ -37,10 +37,16 @@ export type TDNSReplicaSetResult = {
 // Settings keys
 // ---------------------------------------------------------------------------
 
-const KEY_PROVIDER   = "dns.provider";
-const KEY_API_TOKEN  = "dns.cloudflare.apiToken";
-const KEY_ZONE_ID    = "dns.cloudflare.zoneId";
-const KEY_BASE_DOMAIN = "dns.baseDomain";
+const KEY_PROVIDER    = "dns.provider";
+const KEY_API_TOKEN   = "dns.cloudflare.apiToken";
+
+// Per-use-case: apps
+const KEY_APPS_ZONE   = "dns.apps.zoneId";
+const KEY_APPS_DOMAIN = "dns.apps.baseDomain";
+
+// Per-use-case: databases
+const KEY_DB_ZONE     = "dns.db.zoneId";
+const KEY_DB_DOMAIN   = "dns.db.baseDomain";
 
 const CF_BASE = "https://api.cloudflare.com/client/v4";
 
@@ -52,18 +58,33 @@ export function useDNSService() {
   const settings = useSettingsRepo();
 
   /**
-   * Load DNS configuration from the settings store.
-   * Returns null when DNS has not been configured yet.
+   * Load the shared provider + token, plus the per-scope zone + domain.
+   * `scope` is either 'apps' or 'db'. Returns null if not configured.
    */
-  async function getConfig(): Promise<TDNSConfig | null> {
+  async function getConfig(scope: 'apps' | 'db' = 'db'): Promise<TDNSConfig | null> {
+    const zoneKey   = scope === 'apps' ? KEY_APPS_ZONE   : KEY_DB_ZONE;
+    const domainKey = scope === 'apps' ? KEY_APPS_DOMAIN : KEY_DB_DOMAIN;
+
     const [provider, apiToken, zoneId, baseDomain] = await Promise.all([
       settings.get(KEY_PROVIDER),
       settings.get(KEY_API_TOKEN),
-      settings.get(KEY_ZONE_ID),
-      settings.get(KEY_BASE_DOMAIN),
+      settings.get(zoneKey),
+      settings.get(domainKey),
     ]);
 
-    if (!provider || !apiToken || !zoneId || !baseDomain) return null;
+    // Debug logging
+    logger.log({
+      level: "debug",
+      message: `[DNS] getConfig(${scope}): provider=${provider ? 'set' : 'missing'}, token=${apiToken ? 'set' : 'missing'}, zoneId=${zoneId ? 'set' : 'missing'}, baseDomain=${baseDomain || 'missing'}`,
+    });
+
+    if (!provider || !apiToken || !zoneId || !baseDomain) {
+      logger.log({
+        level: "warn",
+        message: `[DNS] Config incomplete for scope '${scope}': provider=${!!provider}, token=${!!apiToken}, zoneId=${!!zoneId}, baseDomain=${!!baseDomain}`,
+      });
+      return null;
+    }
 
     if (provider !== "cloudflare") {
       logger.log({ level: "warn", message: `[DNS] Unsupported provider: ${provider}` });
@@ -73,17 +94,42 @@ export function useDNSService() {
     return { provider, apiToken, zoneId, baseDomain };
   }
 
+  /** Convenience wrappers. */
+  const getAppsConfig = () => getConfig('apps');
+  const getDBConfig   = () => getConfig('db');
+
   /**
-   * Persist DNS configuration into the settings store.
-   * The apiToken is stored as-is (caller responsible for security).
+   * Save the shared token + provider AND the per-scope zone + domain.
    */
-  async function saveConfig(config: TDNSConfig): Promise<void> {
+  async function saveConfig(
+    config: TDNSConfig,
+    scope: 'apps' | 'db'
+  ): Promise<void> {
+    const zoneKey   = scope === 'apps' ? KEY_APPS_ZONE   : KEY_DB_ZONE;
+    const domainKey = scope === 'apps' ? KEY_APPS_DOMAIN : KEY_DB_DOMAIN;
+
     await Promise.all([
       settings.set(KEY_PROVIDER, config.provider),
       settings.set(KEY_API_TOKEN, config.apiToken),
-      settings.set(KEY_ZONE_ID, config.zoneId),
-      settings.set(KEY_BASE_DOMAIN, config.baseDomain),
+      settings.set(zoneKey,   config.zoneId),
+      settings.set(domainKey, config.baseDomain),
     ]);
+  }
+
+  const saveAppsConfig = (config: TDNSConfig) => saveConfig(config, 'apps');
+  const saveDBConfig   = (config: TDNSConfig) => saveConfig(config, 'db');
+
+  /**
+   * Load only the shared token — used when we need to verify credentials
+   * before a scope-specific config exists.
+   */
+  async function getTokenOnly(): Promise<{ provider: string; apiToken: string } | null> {
+    const [provider, apiToken] = await Promise.all([
+      settings.get(KEY_PROVIDER),
+      settings.get(KEY_API_TOKEN),
+    ]);
+    if (!provider || !apiToken) return null;
+    return { provider, apiToken };
   }
 
   // -------------------------------------------------------------------------
@@ -295,53 +341,57 @@ export function useDNSService() {
    */
   async function setupReplicaSet(options: {
     databaseName: string;
-    nodes: Array<{ host: string; port: number }>;  // host = server IP
+    nodes: Array<{ host: string; port: number }>;
     adminUser: string;
     adminPassword: string;
     replicaSetName: string;
   }): Promise<TDNSReplicaSetResult | null> {
-    const config = await getConfig();
+    const config = await getDBConfig();
     if (!config) {
-      logger.log({ level: "info", message: "[DNS] DNS not configured — skipping DNS setup" });
+      logger.log({ level: "info", message: "[DNS] Database DNS not configured — skipping DNS setup" });
       return null;
     }
 
     const { databaseName, nodes, adminUser, adminPassword, replicaSetName } = options;
     const safeName = databaseName.replace(/[^a-zA-Z0-9-]/g, "-").toLowerCase();
-    const clusterSubdomain = safeName;               // "mydb"
-    const clusterHost = `${clusterSubdomain}.${config.baseDomain}`; // "mydb.example.com"
-    const srvName = `_mongodb._tcp.${clusterSubdomain}`;           // relative to zone
+    const clusterHost = `${safeName}.${config.baseDomain}`; // "mydb.db.example.com"
 
     const records: TDNSRecordRef[] = [];
     const nodeHosts: string[] = [];
 
     try {
-      // Step 1 — A record per node
-      for (let i = 0; i < nodes.length; i++) {
-        const nodeSubdomain = `node${i + 1}.${clusterSubdomain}`;  // "node1.mydb"
-        const nodeFQDN = `${nodeSubdomain}.${config.baseDomain}`;  // "node1.mydb.example.com"
+      // Step 1 — A records for all nodes (CONCURRENT)
+      // NOTE: baseDomain may be a subdomain (e.g. "db.goweekdays.com"), so we must
+      // pass the FQDN to Cloudflare, not just the relative subdomain.
+      const aRecordPromises = nodes.map(async (node, i) => {
+        const nodeFQDN = `node${i + 1}.${clusterHost}`;  // "node1.mydb.db.example.com"
         nodeHosts.push(nodeFQDN);
+        const id = await createARecord(config, nodeFQDN, node.host);
+        return { id, type: "A", name: nodeFQDN } as TDNSRecordRef;
+      });
+      const aRecords = await Promise.all(aRecordPromises);
+      records.push(...aRecords);
 
-        const id = await createARecord(config, nodeSubdomain, nodes[i].host);
-        records.push({ id, type: "A", name: nodeFQDN });
-      }
+      // Step 2 — SRV records for all nodes (CONCURRENT)
+      // SRV name must also be relative to the zone but include the full subdomain path
+      const srvFQDN = `_mongodb._tcp.${clusterHost}`;  // "_mongodb._tcp.mydb.db.example.com"
+      const srvRecordPromises = nodes.map(async (node, i) => {
+        const id = await createSRVRecord(config, srvFQDN, nodeHosts[i], node.port);
+        return { id, type: "SRV", name: srvFQDN } as TDNSRecordRef;
+      });
+      const srvRecords = await Promise.all(srvRecordPromises);
+      records.push(...srvRecords);
 
-      // Step 2 — SRV record per node (all under the same SRV name)
-      for (let i = 0; i < nodes.length; i++) {
-        const id = await createSRVRecord(config, srvName, nodeHosts[i], nodes[i].port);
-        records.push({ id, type: "SRV", name: `${srvName}.${config.baseDomain}` });
-      }
-
-      // Step 3 — TXT record with driver options
-      const txtContent = `authSource=admin&replicaSet=${replicaSetName}`;
-      const txtId = await createTXTRecord(config, clusterSubdomain, txtContent);
+      // Step 3 — TXT record with driver options (includes tls=true since TLS is default)
+      const txtContent = `authSource=admin&replicaSet=${replicaSetName}&tls=true`;
+      const txtId = await createTXTRecord(config, clusterHost, txtContent);
       records.push({ id: txtId, type: "TXT", name: clusterHost });
 
       // Step 4 — Build mongodb+srv:// connection string
       const user = encodeURIComponent(adminUser);
       const pass = encodeURIComponent(adminPassword);
       const srvConnectionString =
-        `mongodb+srv://${user}:${pass}@${clusterHost}/?replicaSet=${replicaSetName}&authSource=admin`;
+        `mongodb+srv://${user}:${pass}@${clusterHost}/?authSource=admin`;
 
       logger.log({
         level: "info",
@@ -366,9 +416,9 @@ export function useDNSService() {
   async function teardown(recordRefs: TDNSRecordRef[]): Promise<void> {
     if (!recordRefs.length) return;
 
-    const config = await getConfig();
+    const config = await getDBConfig();
     if (!config) {
-      logger.log({ level: "warn", message: "[DNS] teardown: DNS not configured — cannot delete records" });
+      logger.log({ level: "warn", message: "[DNS] teardown: Database DNS not configured — cannot delete records" });
       return;
     }
 
@@ -376,5 +426,17 @@ export function useDNSService() {
     logger.log({ level: "info", message: `[DNS] Teardown complete — ${recordRefs.length} records removed` });
   }
 
-  return { getConfig, saveConfig, verifyAndDiscover, lookupZoneId, setupReplicaSet, teardown };
+  return {
+    getConfig,
+    getAppsConfig,
+    getDBConfig,
+    saveConfig,
+    saveAppsConfig,
+    saveDBConfig,
+    getTokenOnly,
+    verifyAndDiscover,
+    lookupZoneId,
+    setupReplicaSet,
+    teardown,
+  };
 }

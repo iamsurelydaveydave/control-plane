@@ -26,9 +26,16 @@ services:
       # Caddy integration
       - CADDY_ADMIN_URL=http://control-plane-proxy:2019
       - CADDY_ENABLED=${CADDY_ENABLED:-true}
+      # Kubernetes (K3s) configuration for database provisioning
+      - K8S_ENABLED=${K8S_ENABLED:-false}
+      - K8S_KUBECONFIG=${K8S_KUBECONFIG:-/etc/rancher/k3s/k3s.yaml}
+      - K3S_SERVER_URL=${K3S_SERVER_URL:-}
+      - K3S_TOKEN=${K3S_TOKEN:-}
     volumes:
       - control-plane-ssh:/data/control-plane/ssh
       - control-plane-logs:/data/control-plane/logs
+      # Mount K3s kubeconfig if K8s is enabled
+      - ${K8S_KUBECONFIG:-/etc/rancher/k3s/k3s.yaml}:${K8S_KUBECONFIG:-/etc/rancher/k3s/k3s.yaml}:ro
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:5005/api/health"]
       interval: 30s

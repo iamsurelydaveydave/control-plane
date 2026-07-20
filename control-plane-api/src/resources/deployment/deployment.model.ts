@@ -16,13 +16,20 @@ export type TDeployment = {
   completedAt?: Date;
 };
 
+/** Input type for creating a deployment — accepts strings (Joi validates + modelDeployment converts to ObjectId). */
+export type TDeploymentInput = {
+  appId: string;
+  image: string;
+  triggeredBy: string;
+};
+
 export const schemaDeploymentCreate = Joi.object({
   appId: Joi.string().required(),
   image: Joi.string().required(),
   triggeredBy: Joi.string().required(),
 });
 
-export function modelDeployment(data: Partial<TDeployment>): TDeployment {
+export function modelDeployment(data: TDeploymentInput): TDeployment {
   const { error, value } = schemaDeploymentCreate.validate(data);
 
   if (error) {
@@ -30,7 +37,6 @@ export function modelDeployment(data: Partial<TDeployment>): TDeployment {
   }
 
   return {
-    _id: data._id,
     appId: new ObjectId(value.appId),
     image: value.image,
     status: "pending",

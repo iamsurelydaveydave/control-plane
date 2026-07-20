@@ -1,5 +1,5 @@
 import { ObjectId } from "mongodb";
-import { modelDeployment, TDeployment, TDeploymentStatus } from "./deployment.model";
+import { modelDeployment, TDeployment, TDeploymentInput, TDeploymentStatus } from "./deployment.model";
 import {
   BadRequestError,
   InternalServerError,
@@ -28,7 +28,7 @@ export function useDeploymentRepo() {
     }
   }
 
-  async function add(value: Partial<TDeployment>) {
+  async function add(value: TDeploymentInput) {
     try {
       const deployment = modelDeployment(value);
       const res = await repo.collection.insertOne(deployment);

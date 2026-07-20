@@ -1,0 +1,92 @@
+# Example PerconaServerMongoDB manifest
+# This is what the K8s provisioner generates automatically
+# You can also apply this manually: kubectl apply -f mongodb-cluster-example.yaml
+
+apiVersion: psmdb.percona.com/v1
+kind: PerconaServerMongoDB
+metadata:
+  name: my-mongodb
+  namespace: databases
+  labels:
+    app.kubernetes.io/name: percona-server-mongodb
+    app.kubernetes.io/instance: my-mongodb
+spec:
+  crVersion: "1.16.0"
+  image: percona/percona-server-mongodb:7.0
+  imagePullPolicy: IfNotPresent
+
+  # Secret containing MongoDB user credentials
+  # Create this first: kubectl create secret generic my-mongodb-secrets ...
+  secrets:
+    users: my-mongodb-secrets
+
+  # Replica set configuration
+  replsets:
+    - name: rs0
+      size: 3  # Number of replica set members
+
+      # Storage
+      volumeSpec:
+        persistentVolumeClaim:
+          resources:
+            requests:
+              storage: 10Gi
+
+      # Resource limits
+      resources:
+        limits:
+          cpu: "1"
+          memory: 2Gi
+        requests:
+          cpu: 500m
+          memory: 1Gi
+
+      # Spread pods across nodes
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels:
+                  app.kubernetes.io/instance: my-mongodb
+              topologyKey: kubernetes.io/hostname
+
+  # No sharding (replica set only)
+  sharding:
+    enabled: false
+
+  # Backups (optional - requires S3 or Azure blob storage)
+  backup:
+    enabled: false
+    # Uncomment to enable:
+    # storages:
+    #   s3-backup:
+    #     type: s3
+    #     s3:
+    #       bucket: my-backup-bucket
+    #       region: us-east-1
+    #       credentialsSecret: my-s3-credentials
+    # tasks:
+    #   - name: daily-backup
+    #     enabled: true
+    #     schedule: "0 0 * * *"
+    #     storageName: s3-backup
+
+---
+# Secret for MongoDB users
+# The Percona Operator expects these specific keys
+apiVersion: v1
+kind: Secret
+metadata:
+  name: my-mongodb-secrets
+  namespace: databases
+type: Opaque
+stringData:
+  # Required users
+  MONGODB_BACKUP_USER: backup
+  MONGODB_BACKUP_PASSWORD: backupPassword123
+  MONGODB_CLUSTER_ADMIN_USER: clusterAdmin
+  MONGODB_CLUSTER_ADMIN_PASSWORD: clusterAdminPassword123
+  MONGODB_CLUSTER_MONITOR_USER: clusterMonitor
+  MONGODB_CLUSTER_MONITOR_PASSWORD: clusterMonitorPassword123
+  MONGODB_USER_ADMIN_USER: admin
+  MONGODB_USER_ADMIN_PASSWORD: adminPassword123

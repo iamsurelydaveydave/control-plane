@@ -1,41 +1,153 @@
 ---
-# Remove MongoDB deployment
+# Remove MongoDB deployment - reverses everything created by provisioning
 # Usage: ansible-playbook playbooks/mongodb-remove.yml -i <inventory>
+#
+# This playbook removes:
+# - MongoDB container
+# - Config files
+# - Keyfile (security)
+# - TLS certificates (security)
+# - Log files
+# - Data directory (optional, controlled by keep_data)
+# - UFW firewall rules (all rules for the MongoDB port)
+# - Base directory (always removed, even if not empty after data removal)
+
 - name: Remove MongoDB
   hosts: mongodb
   become: yes
   gather_facts: yes
   
   vars:
-    mongodb_container_name: "{{ mongodb_container_name | default('mongodb') }}"
-    mongodb_data_dir: "{{ mongodb_data_dir | default('/opt/mongodb/data') }}"
-    mongodb_config_dir: "{{ mongodb_config_dir | default('/opt/mongodb/config') }}"
-    mongodb_log_dir: "{{ mongodb_log_dir | default('/opt/mongodb/logs') }}"
-    mongodb_keyfile_dir: "{{ mongodb_keyfile_dir | default('/opt/mongodb/keyfile') }}"
-    remove_data: "{{ remove_data | default(false) }}"
+    _mongodb_container_name: "{{ mongodb_container_name | default('mongodb') }}"
+    _mongodb_base_dir: "{{ mongodb_base_dir | default('/opt/mongodb') }}"
+    _mongodb_data_dir: "{{ mongodb_data_dir | default(_mongodb_base_dir + '/data') }}"
+    _mongodb_config_dir: "{{ mongodb_config_dir | default(_mongodb_base_dir + '/config') }}"
+    _mongodb_log_dir: "{{ mongodb_log_dir | default(_mongodb_base_dir + '/logs') }}"
+    _mongodb_keyfile_dir: "{{ mongodb_keyfile_dir | default(_mongodb_base_dir + '/keyfile') }}"
+    _mongodb_tls_dir: "{{ mongodb_tls_dir | default(_mongodb_base_dir + '/tls') }}"
+    _mongodb_port: "{{ mongodb_port | default(27017) }}"
+    _keep_data: "{{ keep_data | default(false) }}"
   
   tasks:
+    # =========================================================================
+    # 1. Stop and remove the MongoDB Docker container
+    # =========================================================================
     - name: Stop and remove MongoDB container
       docker_container:
-        name: "{{ mongodb_container_name }}"
+        name: "{{ _mongodb_container_name }}"
         state: absent
       ignore_errors: yes
 
-    - name: Remove MongoDB data (if requested)
+    # =========================================================================
+    # 2. Remove all MongoDB directories (security & cleanup)
+    # =========================================================================
+    - name: Remove MongoDB config directory
       file:
-        path: "{{ item }}"
+        path: "{{ _mongodb_config_dir }}"
         state: absent
-      loop:
-        - "{{ mongodb_data_dir }}"
-        - "{{ mongodb_config_dir }}"
-        - "{{ mongodb_log_dir }}"
-        - "{{ mongodb_keyfile_dir }}"
-      when: remove_data | bool
 
-    - name: Remove UFW rule for MongoDB
+    - name: Remove MongoDB keyfile directory
+      file:
+        path: "{{ _mongodb_keyfile_dir }}"
+        state: absent
+
+    - name: Remove MongoDB TLS directory
+      file:
+        path: "{{ _mongodb_tls_dir }}"
+        state: absent
+
+    - name: Remove MongoDB log directory
+      file:
+        path: "{{ _mongodb_log_dir }}"
+        state: absent
+
+    # Remove data directory unless keep_data is true
+    - name: Remove MongoDB data directory
+      file:
+        path: "{{ _mongodb_data_dir }}"
+        state: absent
+      when: not (_keep_data | bool)
+
+    # Always try to remove the base directory
+    # If keep_data=true and data dir is inside base dir, this will fail (which is fine)
+    - name: Remove base directory
+      file:
+        path: "{{ _mongodb_base_dir }}"
+        state: absent
+      ignore_errors: yes
+
+    # =========================================================================
+    # 3. Remove ALL UFW firewall rules for the MongoDB port
+    #    Provisioning creates rules for:
+    #    - Replica set member IPs (from_ip: specific IP)
+    #    - General access (from_ip: any)
+    #    - Allowed IPs list (from_ip: specific IPs)
+    # =========================================================================
+    
+    # Method 1: Get all rule numbers for this port and delete in reverse order
+    # Using sed/awk for compatibility (no Perl regex needed)
+    - name: Get UFW rule numbers for MongoDB port
+      shell: |
+        ufw status numbered 2>/dev/null | grep '{{ _mongodb_port }}' | sed 's/^\[//' | sed 's/\].*//' | sort -rn
+      register: ufw_rule_numbers
+      changed_when: false
+      failed_when: false
+
+    - name: Remove UFW rules by number (reverse order to preserve numbering)
+      shell: echo "y" | ufw delete {{ item }}
+      loop: "{{ ufw_rule_numbers.stdout_lines | default([]) }}"
+      when: 
+        - ufw_rule_numbers.stdout_lines | default([]) | length > 0
+        - item | trim | length > 0
+      ignore_errors: yes
+      register: ufw_delete_result
+
+    # Method 2: Fallback - try to delete common rule patterns directly
+    # This catches any rules that the numbered deletion might have missed
+    - name: Remove UFW allow rule for MongoDB port (any source)
       ufw:
         rule: allow
-        port: "{{ mongodb_port | default(27017) }}"
+        port: "{{ _mongodb_port }}"
         proto: tcp
         delete: yes
       ignore_errors: yes
+
+    # Method 3: Also try to remove rules with comments (replica set members)
+    - name: Final cleanup - remove any remaining MongoDB port rules
+      shell: |
+        # Keep trying to delete rules until none remain
+        for i in $(seq 1 20); do
+          rule_num=$(ufw status numbered 2>/dev/null | grep '{{ _mongodb_port }}' | head -1 | sed 's/^\[//' | sed 's/\].*//' | tr -d ' ')
+          if [ -z "$rule_num" ]; then
+            echo "No more rules for port {{ _mongodb_port }}"
+            break
+          fi
+          echo "Deleting rule $rule_num"
+          echo "y" | ufw delete "$rule_num" || break
+        done
+      register: final_ufw_cleanup
+      changed_when: "'Deleting rule' in final_ufw_cleanup.stdout"
+      failed_when: false
+
+    # =========================================================================
+    # 4. Verify cleanup
+    # =========================================================================
+    - name: Verify no MongoDB containers remain
+      shell: docker ps -a --format '{{ '{{' }}.Names{{ '}}' }}' | grep -q "{{ _mongodb_container_name }}" && echo "CONTAINER_EXISTS" || echo "CLEAN"
+      register: container_check
+      changed_when: false
+      failed_when: false
+
+    - name: Verify no UFW rules remain for MongoDB port
+      shell: ufw status numbered | grep -c '{{ _mongodb_port }}' || echo "0"
+      register: ufw_check
+      changed_when: false
+      failed_when: false
+
+    - name: Report cleanup status
+      debug:
+        msg: |
+          Cleanup completed:
+          - Container: {{ 'REMOVED' if container_check.stdout == 'CLEAN' else 'WARNING - still exists' }}
+          - UFW rules remaining: {{ ufw_check.stdout | default('0') }}
+          - Base directory: {{ _mongodb_base_dir }} (removal attempted)

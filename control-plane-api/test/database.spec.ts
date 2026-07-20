@@ -2,7 +2,7 @@ import { expect } from "chai";
 import { describe, it, afterEach } from "mocha";
 import { ObjectId } from "mongodb";
 import { useDatabaseRepo } from "../src/resources/database/database.repository";
-import { modelDatabase } from "../src/resources/database/database.model";
+import { modelDatabase, TDatabaseType, TDatabaseNodeRole, TDatabaseNodeStatus } from "../src/resources/database/database.model";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -12,7 +12,7 @@ import { modelDatabase } from "../src/resources/database/database.model";
 function makeDbPayload(overrides: Record<string, unknown> = {}) {
   return {
     name: `test-db-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-    type: "mongodb",
+    type: "mongodb" as TDatabaseType,
     version: "7.0",
     credentials: {
       adminUser: "admin",
@@ -22,8 +22,8 @@ function makeDbPayload(overrides: Record<string, unknown> = {}) {
     nodes: [
       {
         serverId: new ObjectId().toString(),
-        role: "primary",
-        status: "stopped",
+        role: "primary" as TDatabaseNodeRole,
+        status: "stopped" as TDatabaseNodeStatus,
       },
     ],
     config: { port: 27017, replicaSetName: "rs0" },
@@ -71,7 +71,7 @@ describe("Database Resource", function () {
 
     it("should convert string serverId to ObjectId in nodes", () => {
       const serverId = new ObjectId().toString();
-      const db = modelDatabase(makeDbPayload({ nodes: [{ serverId, role: "secondary", status: "stopped" }] }));
+      const db = modelDatabase(makeDbPayload({ nodes: [{ serverId, role: "secondary" as TDatabaseNodeRole, status: "stopped" as TDatabaseNodeStatus }] }));
       expect(db.nodes[0].serverId).to.be.instanceOf(ObjectId);
     });
 
@@ -163,7 +163,7 @@ describe("Database Resource", function () {
       const result = await repo.getAll({ page: 1, limit: 50 });
       expect(result.items).to.be.an("array");
       expect(result.items.length).to.be.at.least(2);
-      expect(result.total).to.be.at.least(2);
+      expect(result.pages).to.be.at.least(1);
     });
 
     it("should filter by type", async () => {

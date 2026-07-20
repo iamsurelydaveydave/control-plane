@@ -9,7 +9,7 @@ import { useServerRepo } from "../resources/server";
 import { useSecretRepo } from "../resources/secret";
 import { useSSHKeyRepo } from "../resources/ssh-key";
 import { useDeploymentRepo } from "../resources/deployment";
-import { logger, InternalServerError, NotFoundError, BadRequestError } from "../utils";
+import { logger, InternalServerError, NotFoundError, BadRequestError, logBroker } from "../utils";
 
 // =============================================================================
 // Types
@@ -325,6 +325,7 @@ export function useKamalExecutor() {
 
     const log = (line: string) => {
       logs.push(line);
+      logBroker.addLine(appId, line);
       if (onLog) onLog(line);
       logger.log({ level: "info", message: `[Deploy ${appId}] ${line}` });
     };
@@ -351,12 +352,14 @@ export function useKamalExecutor() {
 
       // Create deployment record
       const deploymentId = await deploymentRepo.add({
-        appId: new ObjectId(appId),
+        appId: appId,
         image: targetImage,
-        triggeredBy: new ObjectId(triggeredBy),
+        triggeredBy: triggeredBy || new ObjectId().toHexString(),
       });
 
       await deploymentRepo.updateStatus(deploymentId, "running");
+
+      logBroker.addLine(appId, `[deploy] Starting deployment of ${app.name}...`);
 
       // Execute Kamal deploy
       const kamalCommand = force ? "deploy" : "deploy";
@@ -377,8 +380,10 @@ export function useKamalExecutor() {
       await deploymentRepo.updateStatus(
         deploymentId,
         result.success ? "success" : "failed",
-        result.stdout + "\n" + result.stderr
+        logs.join("\n")
       );
+
+      logBroker.complete(appId, result.success ? "success" : "failed");
 
       if (result.success) {
         // Update app status
@@ -437,6 +442,7 @@ export function useKamalExecutor() {
 
     const log = (line: string) => {
       logs.push(line);
+      logBroker.addLine(appId, line);
       if (onLog) onLog(line);
     };
 
@@ -455,6 +461,8 @@ export function useKamalExecutor() {
           deployedAt: new Date(),
         });
       }
+
+      logBroker.complete(appId, result.success ? "success" : "failed");
 
       return {
         success: result.success,
@@ -483,6 +491,7 @@ export function useKamalExecutor() {
 
     const log = (line: string) => {
       logs.push(line);
+      logBroker.addLine(appId, line);
       if (onLog) onLog(line);
     };
 
@@ -503,6 +512,8 @@ export function useKamalExecutor() {
           deployedAt: new Date(),
         });
       }
+
+      logBroker.complete(appId, result.success ? "success" : "failed");
 
       return {
         success: result.success,

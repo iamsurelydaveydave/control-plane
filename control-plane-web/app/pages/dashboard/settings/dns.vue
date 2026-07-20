@@ -1,6 +1,12 @@
 <script setup lang="ts">
 /**
- * DNS Settings — configure Cloudflare credentials for mongodb+srv:// URLs.
+ * DNS Settings — separate Cloudflare configuration for Apps and Databases.
+ *
+ * Apps DNS    → subdomains for deployed applications  (e.g. myapp.example.com)
+ * Database DNS → SRV records for MongoDB replica sets (e.g. mongodb+srv://mydb.example.com)
+ *
+ * Both scopes share the same Cloudflare API token but can point at different
+ * base domains (or the same domain with different subdomain patterns).
  */
 definePageMeta({
   layout: 'dashboard',
@@ -9,126 +15,162 @@ definePageMeta({
 })
 
 const toast = useToast()
-const { getDNSConfig, verifyDNS, saveDNSConfig, removeDNSConfig } = useSettings()
+const { getDNSConfig, verifyDNS, saveToken, saveDNSConfig, removeDNSConfig } = useSettings()
 
 // ---------------------------------------------------------------------------
 // Load current config
 // ---------------------------------------------------------------------------
 const { data: configData, refresh: refreshConfig } = await useLazyAsyncData(
   'dns-config',
-  () => getDNSConfig().catch(() => ({ configured: false })),
+  () => getDNSConfig().catch(() => ({
+    provider: null,
+    apiToken: undefined,
+    apps: { configured: false, zoneId: undefined as string | undefined, baseDomain: undefined as string | undefined },
+    db: { configured: false, zoneId: undefined as string | undefined, baseDomain: undefined as string | undefined }
+  })),
   { server: false, immediate: true }
 )
 const config = computed(() => configData.value)
 
 // ---------------------------------------------------------------------------
-// Form state
+// Shared API token
 // ---------------------------------------------------------------------------
-const form = reactive({
-  apiToken: '',
-  baseDomain: '',
-})
+const sharedToken = ref('')
+const tokenSaving = ref(false)
 
-// ---------------------------------------------------------------------------
-// Verify step — shows discovered zone before saving
-// ---------------------------------------------------------------------------
-const verifyResult = ref<{ zoneId: string; zoneName: string; tokenId: string } | null>(null)
-const verifying = ref(false)
-const saving = ref(false)
+// After saving, show the masked token length as the placeholder
+const tokenPlaceholder = computed(() =>
+  config.value?.apiToken
+    ? '•'.repeat(config.value.apiToken.length)
+    : 'Paste your Cloudflare API token'
+)
 
-async function handleVerify() {
-  if (!form.apiToken.trim() || !form.baseDomain.trim()) {
-    toast.add({ title: 'Both fields are required', color: 'error' })
+async function handleSaveToken() {
+  if (!sharedToken.value.trim()) {
+    toast.add({ title: 'Enter an API token first', color: 'error' })
     return
   }
-
-  verifyResult.value = null
-  verifying.value = true
-
+  tokenSaving.value = true
   try {
-    const result = await verifyDNS(form.apiToken.trim(), form.baseDomain.trim())
-
-    if (!result.valid) {
-      toast.add({
-        title: 'Verification failed',
-        description: result.error || 'Check your token and domain',
-        color: 'error',
-      })
-      return
-    }
-
-    verifyResult.value = {
-      zoneId: result.zoneId!,
-      zoneName: result.zoneName!,
-      tokenId: result.tokenId!,
-    }
-    toast.add({
-      title: 'Token verified',
-      description: `Zone found: ${result.zoneName} (${result.zoneId})`,
-      color: 'success',
-      icon: 'i-lucide-check',
-    })
+    await saveToken(sharedToken.value.trim())
+    toast.add({ title: 'API token saved', color: 'success', icon: 'i-lucide-check' })
+    sharedToken.value = ''
+    await refreshConfig()
   } catch (e: unknown) {
     const err = e as { data?: { message?: string } }
-    toast.add({
-      title: 'Verification failed',
-      description: err?.data?.message || 'Could not reach Cloudflare',
-      color: 'error',
-    })
+    toast.add({ title: 'Failed to save token', description: err?.data?.message, color: 'error' })
   } finally {
-    verifying.value = false
+    tokenSaving.value = false
   }
 }
 
-async function handleSave() {
-  if (!verifyResult.value) {
-    toast.add({ title: 'Verify first', description: 'Click Verify before saving', color: 'warning' })
+// ---------------------------------------------------------------------------
+// Per-scope form state
+// ---------------------------------------------------------------------------
+type ScopeState = {
+  baseDomain: string
+  saving: boolean
+  removing: boolean
+  confirmRemoveOpen: boolean
+}
+
+function makeScopeState(): ScopeState {
+  return {
+    baseDomain: '',
+    saving: false,
+    removing: false,
+    confirmRemoveOpen: false
+  }
+}
+
+const appsState = reactive(makeScopeState())
+const dbState = reactive(makeScopeState())
+
+function stateFor(scope: 'apps' | 'db') {
+  return scope === 'apps' ? appsState : dbState
+}
+
+// ---------------------------------------------------------------------------
+// Save (verifies + saves in one step)
+// ---------------------------------------------------------------------------
+async function handleSave(scope: 'apps' | 'db') {
+  const s = stateFor(scope)
+
+  if (!s.baseDomain.trim()) {
+    toast.add({ title: 'Enter a base domain first', color: 'error' })
     return
   }
 
-  saving.value = true
+  const hasNewToken = !!sharedToken.value.trim()
+  const hasSavedToken = !!config.value?.apiToken
+
+  if (!hasNewToken && !hasSavedToken) {
+    toast.add({ title: 'Save your API token first', color: 'error' })
+    return
+  }
+
+  s.saving = true
   try {
-    await saveDNSConfig({
-      apiToken: form.apiToken.trim(),
-      baseDomain: form.baseDomain.trim(),
-      zoneId: verifyResult.value.zoneId,
+    // If the user entered a new token, verify it and include it in the request.
+    // If they didn't, omit apiToken — the backend will use the already-saved one.
+    let zoneId: string | undefined
+
+    if (hasNewToken) {
+      const verify = await verifyDNS(sharedToken.value.trim(), s.baseDomain.trim())
+      if (!verify.valid) {
+        toast.add({
+          title: 'Verification failed',
+          description: verify.error || 'Check your token and domain',
+          color: 'error'
+        })
+        return
+      }
+      zoneId = verify.zoneId
+    }
+
+    const result = await saveDNSConfig(scope, {
+      baseDomain: s.baseDomain.trim(),
+      ...(hasNewToken ? { apiToken: sharedToken.value.trim(), zoneId } : {})
     })
     toast.add({
-      title: 'DNS configuration saved',
-      description: `Cloudflare zone: ${verifyResult.value.zoneName}`,
+      title: `${scope === 'apps' ? 'Apps' : 'Databases'} DNS saved`,
+      description: `Zone: ${result.zoneName} · ${result.baseDomain}`,
       color: 'success',
-      icon: 'i-lucide-check',
+      icon: 'i-lucide-check'
     })
-    form.apiToken = ''
-    form.baseDomain = ''
-    verifyResult.value = null
+    s.baseDomain = ''
     await refreshConfig()
   } catch (e: unknown) {
     const err = e as { data?: { message?: string } }
     toast.add({
       title: 'Failed to save',
       description: err?.data?.message || 'Unknown error',
-      color: 'error',
+      color: 'error'
     })
   } finally {
-    saving.value = false
+    s.saving = false
   }
 }
 
-const removing = ref(false)
-const confirmRemoveOpen = ref(false)
-
-async function handleRemove() {
-  removing.value = true
+// ---------------------------------------------------------------------------
+// Remove
+// ---------------------------------------------------------------------------
+async function handleRemove(scope: 'apps' | 'db') {
+  const s = stateFor(scope)
+  s.removing = true
   try {
-    await removeDNSConfig()
-    toast.add({ title: 'DNS configuration removed', color: 'success', icon: 'i-lucide-check' })
-    confirmRemoveOpen.value = false
+    await removeDNSConfig(scope)
+    toast.add({
+      title: `${scope === 'apps' ? 'Apps' : 'Databases'} DNS removed`,
+      color: 'success',
+      icon: 'i-lucide-check'
+    })
+    s.confirmRemoveOpen = false
     await refreshConfig()
   } catch {
     toast.add({ title: 'Failed to remove', color: 'error' })
   } finally {
-    removing.value = false
+    s.removing = false
   }
 }
 
@@ -150,136 +192,193 @@ useHead({ title: 'DNS Settings · Control Plane' })
           DNS Settings
         </h1>
         <p class="text-sm text-muted">
-          Connect Cloudflare to enable
+          Automate subdomain assignment for apps and
           <code>mongodb+srv://</code>
-          URLs for your replica sets.
+          URLs for replica sets.
         </p>
       </div>
     </div>
 
-    <!-- Current status -->
+    <!-- Shared API token -->
     <div class="rounded-xl border border-default bg-elevated/50 p-6 space-y-4">
-      <h2 class="text-base font-semibold text-highlighted">
-        Current Configuration
-      </h2>
-
-      <div v-if="config?.configured" class="space-y-3">
-        <UAlert
-          color="success"
-          variant="soft"
-          icon="i-lucide-check-circle"
-          title="Cloudflare connected"
-          :description="`Zone: ${config.baseDomain} · Token: ${config.apiToken}`"
-        />
-        <div class="grid grid-cols-2 gap-3 text-sm">
-          <div>
-            <span class="text-muted">Provider</span>
-            <p class="font-medium capitalize">
-              {{ config.provider }}
-            </p>
-          </div>
-          <div>
-            <span class="text-muted">Base Domain</span>
-            <p class="font-mono font-medium">
-              {{ config.baseDomain }}
-            </p>
-          </div>
-          <div>
-            <span class="text-muted">Zone ID</span>
-            <p class="font-mono text-xs text-muted truncate">
-              {{ config.zoneId }}
-            </p>
-          </div>
-        </div>
-        <div class="flex justify-end pt-2 border-t border-default">
-          <UButton
-            color="error"
-            variant="ghost"
-            icon="i-lucide-trash"
-            size="sm"
-            @click="confirmRemoveOpen = true"
-          >
-            Remove configuration
-          </UButton>
-        </div>
-      </div>
-
-      <div v-else>
-        <UAlert
-          color="neutral"
-          variant="soft"
-          icon="i-lucide-globe"
-          title="Not configured"
-          description="Add your Cloudflare API token below to enable DNS automation."
-        />
-      </div>
-    </div>
-
-    <!-- Add / update form -->
-    <div class="rounded-xl border border-default bg-elevated/50 p-6 space-y-5">
       <div>
         <h2 class="text-base font-semibold text-highlighted">
-          {{ config?.configured ? 'Update Credentials' : 'Add Cloudflare Credentials' }}
+          Cloudflare API Token
         </h2>
-        <p class="text-sm text-muted mt-1">
-          Your token needs <strong>Zone › DNS › Edit</strong> and <strong>Zone › Zone › Read</strong> permissions.
-          The Zone ID is discovered automatically.
+        <p class="text-sm text-muted mt-0.5">
+          Shared across both scopes. Needs
+          <strong>Zone › DNS › Edit</strong> and
+          <strong>Zone › Zone › Read</strong> permissions.
         </p>
       </div>
 
-      <div class="grid grid-cols-2 gap-4">
-        <UFormField label="API Token" class="col-span-1">
-          <UInput
-            v-model="form.apiToken"
-            type="password"
-            placeholder="Paste your Cloudflare API token"
-            class="w-full font-mono"
-            autocomplete="off"
-          />
-        </UFormField>
+      <div class="flex items-center gap-3">
+        <UInput
+          v-model="sharedToken"
+          type="password"
+          :placeholder="tokenPlaceholder"
+          class="flex-1 font-mono"
+          autocomplete="off"
+        />
+        <UButton
+          icon="i-lucide-save"
+          :loading="tokenSaving"
+          :disabled="!sharedToken"
+          @click="handleSaveToken"
+        >
+          Save token
+        </UButton>
+      </div>
+      <p class="text-sm text-muted">
+        The token is shared across both Apps and Databases DNS scopes.
+      </p>
+    </div>
 
-        <UFormField label="Base Domain" class="col-span-1">
+    <!-- Two scope cards -->
+    <div class="space-y-6">
+      <!-- Apps DNS -->
+      <div class="rounded-xl border border-default bg-elevated/50 p-5 space-y-4">
+        <div class="flex items-start justify-between">
+          <div>
+            <div class="flex items-center gap-2">
+              <UIcon
+                name="i-lucide-layout-grid"
+                class="size-4 text-muted"
+              />
+              <h2 class="text-base font-semibold text-highlighted">
+                Apps
+              </h2>
+              <UBadge
+                v-if="config?.apps.configured"
+                color="success"
+                variant="subtle"
+                size="xs"
+                icon="i-lucide-shield-check"
+                label="Verified"
+              />
+            </div>
+            <p class="text-xs text-muted mt-0.5">
+              Subdomains for deployed apps
+            </p>
+          </div>
+          <UButton
+            v-if="config?.apps.configured"
+            icon="i-lucide-trash"
+            color="error"
+            variant="ghost"
+            @click="appsState.confirmRemoveOpen = true"
+          />
+        </div>
+
+        <!-- Active status -->
+        <div
+          v-if="config?.apps.configured"
+          class="rounded-lg bg-success/10 border border-success/20 px-3 py-2 text-xs space-y-0.5"
+        >
+          <p class="font-medium text-success">
+            {{ config?.apps?.baseDomain }}
+          </p>
+          <p class="text-muted font-mono">
+            Zone: {{ config?.apps?.zoneId }}
+          </p>
+        </div>
+
+        <!-- Form -->
+        <UFormField label="Base Domain">
           <UInput
-            v-model="form.baseDomain"
+            v-model="appsState.baseDomain"
             placeholder="example.com"
             class="w-full font-mono"
           />
         </UFormField>
+        <p class="text-xs text-muted -mt-2">
+          Apps will be accessible at
+          <code>myapp.example.com</code>.
+        </p>
+
+        <div class="flex gap-2">
+          <UButton
+            icon="i-lucide-save"
+            :loading="appsState.saving"
+            :disabled="!appsState.baseDomain || (!sharedToken && !config?.apiToken)"
+            @click="handleSave('apps')"
+          >
+            Save
+          </UButton>
+        </div>
       </div>
-      <p class="text-sm text-muted">
-        The root domain managed by Cloudflare. Replica set URLs will be
-        <code>mydb.example.com</code>.
-      </p>
 
-      <!-- Verify result -->
-      <UAlert
-        v-if="verifyResult"
-        color="success"
-        variant="soft"
-        icon="i-lucide-shield-check"
-        title="Token verified — ready to save"
-        :description="`Zone: ${verifyResult.zoneName} (${verifyResult.zoneId})`"
-      />
+      <!-- Databases DNS -->
+      <div class="rounded-xl border border-default bg-elevated/50 p-5 space-y-4">
+        <div class="flex items-start justify-between">
+          <div>
+            <div class="flex items-center gap-2">
+              <UIcon
+                name="i-lucide-database"
+                class="size-4 text-muted"
+              />
+              <h2 class="text-base font-semibold text-highlighted">
+                Databases
+              </h2>
+              <UBadge
+                v-if="config?.db.configured"
+                color="success"
+                variant="subtle"
+                size="xs"
+                icon="i-lucide-shield-check"
+                label="Verified"
+              />
+            </div>
+            <p class="text-xs text-muted mt-0.5">
+              <code>mongodb+srv://</code>
+              for replica sets
+            </p>
+          </div>
+          <UButton
+            v-if="config?.db.configured"
+            icon="i-lucide-trash"
+            color="error"
+            variant="ghost"
+            @click="dbState.confirmRemoveOpen = true"
+          />
+        </div>
 
-      <div class="flex items-center gap-3">
-        <UButton
-          icon="i-lucide-shield-check"
-          color="neutral"
-          variant="outline"
-          :loading="verifying"
-          :disabled="!form.apiToken || !form.baseDomain"
-          @click="handleVerify"
+        <!-- Active status -->
+        <div
+          v-if="config?.db.configured"
+          class="rounded-lg bg-success/10 border border-success/20 px-3 py-2 text-xs space-y-0.5"
         >
-          Verify
-        </UButton>
-        <UButton
-          icon="i-lucide-save"
-          :loading="saving"
-          :disabled="!verifyResult"
-          @click="handleSave"
-        >
-          Save Configuration
-        </UButton>
+          <p class="font-medium text-success">
+            {{ config?.db?.baseDomain }}
+          </p>
+          <p class="text-muted font-mono">
+            Zone: {{ config?.db?.zoneId }}
+          </p>
+        </div>
+
+        <!-- Form -->
+        <UFormField label="Base Domain">
+          <UInput
+            v-model="dbState.baseDomain"
+            placeholder="db.example.com"
+            class="w-full font-mono"
+          />
+        </UFormField>
+        <p class="text-xs text-muted -mt-2">
+          Replica sets resolve as
+          <code>mongodb+srv://mydb.db.example.com</code>.
+        </p>
+
+        <div class="flex gap-2">
+          <UButton
+            icon="i-lucide-save"
+            :loading="dbState.saving"
+            :disabled="!dbState.baseDomain || (!sharedToken && !config?.apiToken)"
+            @click="handleSave('db')"
+          >
+            Save
+          </UButton>
+        </div>
       </div>
     </div>
 
@@ -288,47 +387,57 @@ useHead({ title: 'DNS Settings · Control Plane' })
       <h2 class="text-base font-semibold text-highlighted">
         How it works
       </h2>
-      <ol class="space-y-2 text-sm text-muted list-decimal list-inside">
-        <li>Save your Cloudflare token here (one-time setup).</li>
-        <li>
-          Go to a running replica set database and click
-          <strong class="text-default">Configure DNS</strong>.
-        </li>
-        <li>
-          The control plane creates A, SRV and TXT records in Cloudflare
-          automatically.
-        </li>
-        <li>
-          You get a single
-          <code>mongodb+srv://</code>
-          connection URL — paste it into your app's
-          <code>MONGO_URI</code>.
-        </li>
-      </ol>
-      <UAlert
-        color="info"
-        variant="soft"
-        icon="i-lucide-info"
-        title="No proxy involved"
-        description="The driver resolves SRV records to node hostnames, then connects directly to each node. Caddy is not involved."
-      />
+      <div class="grid grid-cols-1 sm:grid-cols-2 gap-4 text-sm">
+        <div class="space-y-1">
+          <p class="font-medium flex items-center gap-2">
+            <UIcon
+              name="i-lucide-layout-grid"
+              class="size-4 text-muted"
+            />
+            Apps
+          </p>
+          <p class="text-muted">
+            When you deploy an app, the control plane creates an A record pointing
+            <code>myapp.example.com</code>
+            to the server, and Caddy routes traffic.
+          </p>
+        </div>
+        <div class="space-y-1">
+          <p class="font-medium flex items-center gap-2">
+            <UIcon
+              name="i-lucide-database"
+              class="size-4 text-muted"
+            />
+            Databases
+          </p>
+          <p class="text-muted">
+            After a replica set is provisioned, clicking
+            <strong>Configure DNS</strong>
+            on the database page creates A + SRV + TXT records, giving you a single
+            <code>mongodb+srv://</code>
+            URL.
+          </p>
+        </div>
+      </div>
     </div>
 
-    <!-- Confirm remove modal -->
+    <!-- Confirm remove modals -->
     <UModal
-      v-model:open="confirmRemoveOpen"
+      v-model:open="appsState.confirmRemoveOpen"
       class="max-w-sm"
     >
       <template #header>
         <h3 class="text-lg font-semibold">
-          Remove DNS configuration?
+          Remove Apps DNS?
         </h3>
       </template>
       <template #body>
         <div class="p-6">
           <p class="text-muted">
-            This removes the saved Cloudflare credentials. Existing DNS records on databases
-            are <strong>not deleted</strong> — remove those individually from each database page.
+            This removes the saved Apps DNS configuration. Existing DNS records
+            already created are
+            <strong>not deleted</strong>
+            — manage those from your Cloudflare dashboard.
           </p>
         </div>
       </template>
@@ -336,15 +445,55 @@ useHead({ title: 'DNS Settings · Control Plane' })
         <UButton
           color="neutral"
           variant="ghost"
-          @click="confirmRemoveOpen = false"
+          @click="appsState.confirmRemoveOpen = false"
         >
           Cancel
         </UButton>
         <UButton
           color="error"
-          :loading="removing"
+          :loading="appsState.removing"
           icon="i-lucide-trash"
-          @click="handleRemove"
+          @click="handleRemove('apps')"
+        >
+          Remove
+        </UButton>
+      </template>
+    </UModal>
+
+    <UModal
+      v-model:open="dbState.confirmRemoveOpen"
+      class="max-w-sm"
+    >
+      <template #header>
+        <h3 class="text-lg font-semibold">
+          Remove Databases DNS?
+        </h3>
+      </template>
+      <template #body>
+        <div class="p-6">
+          <p class="text-muted">
+            This removes the saved Databases DNS configuration. Existing SRV / A / TXT
+            records are
+            <strong>not deleted</strong>
+            — use
+            <strong>Delete DNS</strong>
+            on each database page to remove them from Cloudflare.
+          </p>
+        </div>
+      </template>
+      <template #footer>
+        <UButton
+          color="neutral"
+          variant="ghost"
+          @click="dbState.confirmRemoveOpen = false"
+        >
+          Cancel
+        </UButton>
+        <UButton
+          color="error"
+          :loading="dbState.removing"
+          icon="i-lucide-trash"
+          @click="handleRemove('db')"
         >
           Remove
         </UButton>

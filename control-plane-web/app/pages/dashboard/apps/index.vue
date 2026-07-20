@@ -276,13 +276,25 @@ useHead({ title: 'Apps · Control Plane' })
           </template>
 
           <template #domain-cell="{ row }">
-            <span
+            <div
               v-if="row.original.proxy?.host"
-              class="text-sm text-muted font-mono"
+              class="flex items-center gap-1.5"
             >
-              {{ row.original.proxy.host }}
-            </span>
-            <span v-else class="text-sm text-muted">—</span>
+              <span class="text-sm text-muted font-mono truncate max-w-48">
+                {{ row.original.proxy.host }}
+              </span>
+              <UBadge
+                v-if="row.original.proxy.host.endsWith('.sslip.io')"
+                label="sslip.io"
+                color="neutral"
+                variant="subtle"
+                size="xs"
+              />
+            </div>
+            <span
+              v-else
+              class="text-sm text-muted"
+            >—</span>
           </template>
 
           <template #status-cell="{ row }">

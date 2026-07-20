@@ -26,7 +26,10 @@ export default function useDatabase() {
     })
   }
 
-  function add(value: TDatabaseForm & { nodes: { serverId: string, role: string }[] }) {
+  function add(value: TDatabaseForm & {
+    nodes: { serverId: string, role: string }[]
+    config?: Record<string, unknown>
+  }) {
     return useNuxtApp().$api<{ message: string, databaseId: string }>('/databases', {
       method: 'POST',
       body: {
@@ -37,15 +40,19 @@ export default function useDatabase() {
           adminUser: value.adminUser,
           adminPassword: value.adminPassword
         },
-        nodes: value.nodes
+        nodes: value.nodes,
+        config: value.config ?? {},
       }
     })
   }
 
-  function deleteById(id: string, deleteRecord = true) {
-    return useNuxtApp().$api<{ message: string }>(`/databases/${id}/remove`, {
-      method: 'POST',
-      body: { delete_record: deleteRecord }
+  function deleteById(id: string, options?: { keepData?: boolean, force?: boolean }) {
+    const query: Record<string, string> = {}
+    if (options?.keepData) query.keep_data = 'true'
+    if (options?.force) query.force = 'true'
+    return useNuxtApp().$api<{ message: string, databaseId: string, status: string }>(`/databases/${id}`, {
+      method: 'DELETE',
+      query
     })
   }
 
@@ -96,6 +103,19 @@ export default function useDatabase() {
     })
   }
 
+  function getLogs(id: string) {
+    return useNuxtApp().$api<{
+      deployments: Array<{
+        _id: string
+        status: 'pending' | 'running' | 'success' | 'failed'
+        logs?: string
+        startedAt?: string
+        completedAt?: string
+        image?: string
+      }>
+    }>(`/databases/${id}/logs`, { method: 'GET' })
+  }
+
   return {
     database,
     getAll,
@@ -109,5 +129,6 @@ export default function useDatabase() {
     getHealth,
     configureDNS,
     removeDNS,
+    getLogs,
   }
 }

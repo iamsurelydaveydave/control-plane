@@ -1,0 +1,250 @@
+---
+# MongoDB TLS Configuration Playbook
+# Generates CA and node certificates, configures TLS on all replica set members
+#
+# Uses a two-phase approach to avoid split-brain:
+#   Phase 1: Generate certs on primary, distribute to ALL nodes, update configs
+#   Phase 2: Restart ALL containers together (not serial)
+#
+# Usage: ansible-playbook playbooks/mongodb-configure-tls.yml -i <inventory> -e @vars.yml
+#
+# Required vars: mongodb_container_name, mongodb_admin_user, mongodb_admin_password
+# Optional vars: tls_ca_common_name, tls_validity_days
+
+- name: "Phase 1a: Generate TLS CA and Certificates"
+  hosts: mongodb_primary
+  become: yes
+  gather_facts: yes
+  run_once: true
+
+  vars:
+    _tls_dir: "{{ mongodb_tls_dir }}"
+    _tls_ca_cn: "{{ tls_ca_common_name | default('MongoDB CA') }}"
+    _tls_validity: "{{ tls_validity_days | default(3650) }}"
+    _container_name: "{{ mongodb_container_name }}"
+
+  tasks:
+    - name: Create TLS directory on primary
+      file:
+        path: "{{ _tls_dir }}"
+        state: directory
+        mode: '0755'
+
+    - name: Generate CA private key
+      command: openssl genrsa -out {{ _tls_dir }}/ca.key 4096
+      args:
+        creates: "{{ _tls_dir }}/ca.key"
+
+    - name: Generate CA certificate
+      command: >
+        openssl req -x509 -new -nodes
+        -key {{ _tls_dir }}/ca.key
+        -sha256 -days {{ _tls_validity }}
+        -out {{ _tls_dir }}/ca.crt
+        -subj "/CN={{ _tls_ca_cn }}/O=Control Plane/C=US"
+      args:
+        creates: "{{ _tls_dir }}/ca.crt"
+
+    - name: Read CA certificate
+      slurp:
+        src: "{{ _tls_dir }}/ca.crt"
+      register: ca_cert
+
+    - name: Read CA key
+      slurp:
+        src: "{{ _tls_dir }}/ca.key"
+      register: ca_key
+
+    - name: Set CA facts for other hosts
+      set_fact:
+        _mongodb_ca_cert: "{{ ca_cert.content | b64decode }}"
+        _mongodb_ca_key: "{{ ca_key.content | b64decode }}"
+
+    # Generate certificates for ALL nodes
+    - name: Generate node certificates
+      include_tasks: ../tasks/generate-node-cert.yml
+      loop: "{{ groups['mongodb'] }}"
+      loop_control:
+        loop_var: target_host
+      vars:
+        node_host: "{{ hostvars[target_host]['ansible_host'] }}"
+        node_dns: "{{ hostvars[target_host]['mongodb_dns_name'] | default('') }}"
+        tls_dir: "{{ _tls_dir }}"
+        tls_validity: "{{ _tls_validity }}"
+
+- name: "Phase 1b: Distribute TLS Certificates and Update Config on ALL Nodes"
+  hosts: mongodb
+  become: yes
+  gather_facts: no
+  # NO serial — run on all nodes simultaneously
+
+  vars:
+    mongodb_tls_dir: "{{ mongodb_tls_dir | default('/opt/mongodb/tls') }}"
+    mongodb_container_name: "{{ mongodb_container_name | default('mongodb') }}"
+    mongodb_config_dir: "{{ mongodb_config_dir | default('/opt/mongodb/config') }}"
+    mongodb_data_dir: "{{ mongodb_data_dir | default('/opt/mongodb/data') }}"
+    mongodb_log_dir: "{{ mongodb_log_dir | default('/opt/mongodb/logs') }}"
+    mongodb_keyfile_dir: "{{ mongodb_keyfile_dir | default('/opt/mongodb/keyfile') }}"
+    mongodb_port: "{{ mongodb_port | default(27017) }}"
+    mongodb_version: "{{ mongodb_version | default('8.0') }}"
+    mongodb_replicaset_name: "{{ mongodb_replicaset_name | default('rs0') }}"
+
+  tasks:
+    - name: Create TLS directory
+      file:
+        path: "{{ mongodb_tls_dir }}"
+        state: directory
+        mode: '0755'
+        owner: "999"
+        group: "999"
+
+    - name: Copy CA certificate
+      copy:
+        content: "{{ hostvars[groups['mongodb_primary'][0]]['_mongodb_ca_cert'] }}"
+        dest: "{{ mongodb_tls_dir }}/ca.crt"
+        mode: '0644'
+        owner: "999"
+        group: "999"
+
+    - name: Copy node certificate
+      copy:
+        content: "{{ hostvars[groups['mongodb_primary'][0]]['_node_certs'][ansible_host]['cert'] }}"
+        dest: "{{ mongodb_tls_dir }}/server.crt"
+        mode: '0644'
+        owner: "999"
+        group: "999"
+
+    - name: Copy node private key
+      copy:
+        content: "{{ hostvars[groups['mongodb_primary'][0]]['_node_certs'][ansible_host]['key'] }}"
+        dest: "{{ mongodb_tls_dir }}/server.key"
+        mode: '0600'
+        owner: "999"
+        group: "999"
+
+    - name: Create combined PEM file (cert + key)
+      shell: |
+        cat {{ mongodb_tls_dir }}/server.crt {{ mongodb_tls_dir }}/server.key > {{ mongodb_tls_dir }}/server.pem
+        chown 999:999 {{ mongodb_tls_dir }}/server.pem
+        chmod 0600 {{ mongodb_tls_dir }}/server.pem
+
+    - name: Update MongoDB configuration with TLS
+      template:
+        src: ../roles/mongodb/templates/mongod-replicaset-tls.conf.j2
+        dest: "{{ mongodb_config_dir }}/mongod.conf"
+        mode: '0644'
+
+- name: "Phase 2: Restart ALL Containers Together"
+  hosts: mongodb
+  become: yes
+  gather_facts: no
+  # NO serial — restart all nodes together to avoid split-brain
+
+  vars:
+    mongodb_tls_dir: "{{ mongodb_tls_dir | default('/opt/mongodb/tls') }}"
+    mongodb_container_name: "{{ mongodb_container_name | default('mongodb') }}"
+    mongodb_config_dir: "{{ mongodb_config_dir | default('/opt/mongodb/config') }}"
+    mongodb_data_dir: "{{ mongodb_data_dir | default('/opt/mongodb/data') }}"
+    mongodb_log_dir: "{{ mongodb_log_dir | default('/opt/mongodb/logs') }}"
+    mongodb_keyfile_dir: "{{ mongodb_keyfile_dir | default('/opt/mongodb/keyfile') }}"
+    mongodb_port: "{{ mongodb_port | default(27017) }}"
+    mongodb_version: "{{ mongodb_version | default('8.0') }}"
+    mongodb_replicaset_name: "{{ mongodb_replicaset_name | default('rs0') }}"
+
+  tasks:
+    - name: Stop existing MongoDB container
+      docker_container:
+        name: "{{ mongodb_container_name }}"
+        state: stopped
+      ignore_errors: yes
+
+    - name: Remove existing MongoDB container
+      docker_container:
+        name: "{{ mongodb_container_name }}"
+        state: absent
+      ignore_errors: yes
+
+    - name: Start MongoDB container with TLS volumes
+      docker_container:
+        name: "{{ mongodb_container_name }}"
+        image: "mongo:{{ mongodb_version }}"
+        state: started
+        restart_policy: unless-stopped
+        ports:
+          - "0.0.0.0:{{ mongodb_port }}:27017"
+        volumes:
+          - "{{ mongodb_data_dir }}:/data/db"
+          - "{{ mongodb_config_dir }}/mongod.conf:/etc/mongod.conf:ro"
+          - "{{ mongodb_keyfile_dir }}/mongodb-keyfile:/etc/mongodb-keyfile:ro"
+          - "{{ mongodb_log_dir }}:/var/log/mongodb"
+          - "{{ mongodb_tls_dir }}:/etc/mongodb/tls:ro"
+        command: ["mongod", "--config", "/etc/mongod.conf"]
+        networks:
+          - name: "{{ docker_network | default('cp_databases') }}"
+        healthcheck:
+          test: ["CMD", "mongosh", "--tls", "--tlsCAFile", "/etc/mongodb/tls/ca.crt", "--eval", "db.adminCommand('ping')"]
+          interval: 10s
+          timeout: 5s
+          retries: 5
+          start_period: 30s
+
+    - name: Wait for MongoDB to be ready with TLS
+      wait_for:
+        host: "127.0.0.1"
+        port: "{{ mongodb_port }}"
+        delay: 10
+        timeout: 120
+
+    - name: Wait for MongoDB container to be healthy
+      shell: |
+        for i in $(seq 1 36); do
+          status=$(docker inspect --format='{{.State.Health.Status}}' {{ mongodb_container_name }} 2>/dev/null || echo "missing")
+          if [ "$status" = "healthy" ]; then
+            echo "Container healthy after $i checks"
+            exit 0
+          fi
+          echo "Health check $i: $status"
+          sleep 5
+        done
+        echo "Container not healthy after 36 checks"
+        docker logs --tail 20 {{ mongodb_container_name }} 2>&1 || true
+        exit 1
+      register: health_result
+      changed_when: false
+
+- name: "Phase 3: Verify TLS Configuration"
+  hosts: mongodb_primary
+  become: yes
+  gather_facts: no
+  run_once: true
+
+  vars:
+    mongodb_container_name: "{{ mongodb_container_name | default('mongodb') }}"
+    mongodb_admin_user: "{{ mongodb_admin_user }}"
+    mongodb_admin_password: "{{ mongodb_admin_password }}"
+
+  tasks:
+    - name: Test TLS connection with authentication
+      command: >
+        docker exec {{ mongodb_container_name }} mongosh
+        --tls --tlsCAFile /etc/mongodb/tls/ca.crt
+        -u "{{ mongodb_admin_user }}" -p "{{ mongodb_admin_password }}"
+        --authenticationDatabase admin
+        --eval "rs.status().members.forEach(m => print(m.name + ' - ' + m.stateStr))"
+      register: tls_test
+      retries: 10
+      delay: 10
+      until: tls_test.rc == 0
+
+    - name: Display TLS test result
+      debug:
+        msg: |
+          TLS Configuration Complete!
+          
+          {{ tls_test.stdout }}
+          
+          Connection string (with TLS):
+          mongodb://{{ mongodb_admin_user }}:***@{% for host in groups['mongodb'] %}{{ hostvars[host]['ansible_host'] }}:27017{% if not loop.last %},{% endif %}{% endfor %}/admin?replicaSet={{ mongodb_replicaset_name }}&tls=true&tlsCAFile=/path/to/ca.crt
+          
+          SRV connection string (TLS enabled by default):
+          mongodb+srv://{{ mongodb_admin_user }}:***@<your-domain>/?authSource=admin

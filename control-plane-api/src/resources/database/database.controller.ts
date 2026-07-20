@@ -2,14 +2,14 @@ import { Request, Response, NextFunction } from "express";
 import { ObjectId } from "mongodb";
 import { useDatabaseRepo } from "./database.repository";
 import { schemaDatabaseCreate, schemaDatabaseUpdate, databaseNodeRoles } from "./database.model";
-import { BadRequestError, NotFoundError, InternalServerError } from "../../utils";
-import { useMongoDBProvisioner } from "../../services";
+import { BadRequestError, NotFoundError, InternalServerError, generateSslipHost, logBroker } from "../../utils";
+import { getMongoDBProvisioner, getProvisionerType } from "../../services/mongodb.provisioner.factory";
 import { useServerRepo } from "../server";
 
 export function useDatabaseController() {
   const repo = useDatabaseRepo();
   const serverRepo = useServerRepo();
-  const mongoProvisioner = useMongoDBProvisioner();
+  const mongoProvisioner = getMongoDBProvisioner();
 
   async function add(req: Request, res: Response, next: NextFunction) {
     try {
@@ -19,15 +19,11 @@ export function useDatabaseController() {
         return;
       }
 
-      const id = await repo.add(value);
-
       // Start provisioning in background if auto_provision is enabled
       const autoProvision = req.query.auto_provision !== "false";
-      
-      if (autoProvision && value.type === "mongodb") {
-        const userId = req.cookies?.user;
 
-        // Verify all target servers are ready for provisioning
+      // Verify all target servers are ready BEFORE creating the record
+      if (autoProvision && value.type === "mongodb") {
         for (const node of value.nodes ?? []) {
           const server = await serverRepo.getById(node.serverId);
           if (!server) {
@@ -43,19 +39,25 @@ export function useDatabaseController() {
             return;
           }
         }
+      }
+
+      const id = await repo.add(value);
+
+      if (autoProvision && value.type === "mongodb") {
+        const userId = req.cookies?.user;
 
         // Don't await - let it run in background
+        const dbId = id.toString();
         mongoProvisioner
           .provision({
-            databaseId: id.toString(),
+            databaseId: dbId,
             triggeredBy: userId,
-            onLog: (line) => {
-              // In production, you'd stream this via SSE or WebSocket
-              console.log(`[Provision ${id}] ${line}`);
-            },
+            onLog: (line) => logBroker.addLine(dbId, line),
           })
+          .then((result) => logBroker.complete(dbId, result.success ? "success" : "failed"))
           .catch((err) => {
-            console.error(`Provisioning failed for ${id}:`, err);
+            logBroker.addLine(dbId, `[ERROR] ${err.message}`);
+            logBroker.complete(dbId, "failed");
           });
 
         res.status(202).json({
@@ -85,9 +87,29 @@ export function useDatabaseController() {
         return;
       }
 
+      // Build per-node sslip.io fallback hosts when DB DNS is not configured.
+      // This gives every node a stable human-readable hostname even without DNS.
+      const port = (database.config?.port as number | undefined) || 27017;
+      let nodesWithSslip = database.nodes;
+
+      if (!database.dns?.enabled) {
+        const safeName = database.name.replace(/[^a-z0-9-]/g, "-").toLowerCase();
+        nodesWithSslip = await Promise.all(
+          database.nodes.map(async (node, i) => {
+            const server = await serverRepo.getById(node.serverId).catch(() => null);
+            const sslipHost = server?.host
+              ? generateSslipHost(`node${i + 1}-${safeName}`, server.host)
+              : undefined;
+            const sslipConnectionHost = sslipHost ? `${sslipHost}:${port}` : undefined;
+            return { ...node, sslipHost, sslipConnectionHost };
+          })
+        );
+      }
+
       // Mask sensitive credentials in response
       const safeDatabase = {
         ...database,
+        nodes: nodesWithSslip,
         credentials: {
           adminUser: database.credentials.adminUser,
           hasPassword: !!database.credentials.adminPassword,
@@ -119,13 +141,147 @@ export function useDatabaseController() {
     }
   }
 
+  /**
+   * DELETE /databases/:id
+   * Full deletion - removes everything:
+   * - Stops and removes MongoDB containers
+   * - Removes config files, keyfiles, TLS certificates
+   * - Optionally removes data directory
+   * - Removes DNS records from Cloudflare
+   * - Deletes the database record
+   *
+   * This operation is ASYNC - returns immediately with status "deleting"
+   * and the deletion happens in the background.
+   *
+   * Query params:
+   *   - keep_data=true: Preserve the data directory on servers
+   *   - force=true: Delete record even if container removal fails (for orphaned records)
+   */
   async function deleteById(req: Request, res: Response, next: NextFunction) {
     try {
       const id = req.params.id as string;
-      await repo.deleteById(id);
-      res.json({ message: "Database deleted" });
+      const keepData = req.query.keep_data === "true";
+      const force = req.query.force === "true";
+
+      const database = await repo.getById(id);
+
+      if (!database) {
+        next(new NotFoundError("Database not found"));
+        return;
+      }
+
+      // If already deleting, just return current status
+      if (database.status === "deleting") {
+        res.status(202).json({
+          message: "Database deletion already in progress",
+          databaseId: id,
+          status: "deleting",
+        });
+        return;
+      }
+
+      // Set status to deleting immediately
+      await repo.updateStatus(id, "deleting");
+
+      // Return immediately - deletion happens in background
+      res.status(202).json({
+        message: "Database deletion started",
+        databaseId: id,
+        status: "deleting",
+      });
+
+      // Run deletion in background (don't await)
+      runDeletionInBackground(id, database, keepData, force);
     } catch (error) {
       next(error);
+    }
+  }
+
+  /**
+   * Background deletion handler - runs after response is sent
+   */
+  async function runDeletionInBackground(
+    id: string,
+    database: any,
+    keepData: boolean,
+    force: boolean
+  ) {
+    try {
+      let removedContainers = false;
+      let removedData = false;
+      let removedDnsRecords = 0;
+      let removedTls = false;
+
+      // For MongoDB databases that have been provisioned, clean up the deployment
+      if (database.type === "mongodb" && database.status !== "provisioning") {
+        logBroker.addLine(id, "[delete] Starting full database deletion...");
+        logBroker.addLine(id, `[delete] Keep data: ${keepData}`);
+
+        try {
+          // Remove MongoDB containers, configs, TLS, DNS from all nodes
+          const result = await mongoProvisioner.remove(id, keepData, (line) =>
+            logBroker.addLine(id, line)
+          );
+
+          if (result.success) {
+            removedContainers = true;
+            removedData = !keepData;
+            removedDnsRecords = database.dns?.records?.length || 0;
+            removedTls = !!database.tls?.enabled;
+          } else if (!force) {
+            logBroker.addLine(id, `[delete] Removal failed: ${result.error}`);
+            logBroker.complete(id, "failed");
+            // Update status to failed instead of deleting the record
+            await repo.updateStatus(id, "failed");
+            return;
+          } else {
+            logBroker.addLine(id, "[delete] Removal failed but continuing with force=true");
+          }
+        } catch (removeErr: any) {
+          if (!force) {
+            logBroker.addLine(id, `[delete] Error: ${removeErr.message}`);
+            logBroker.complete(id, "failed");
+            await repo.updateStatus(id, "failed");
+            return;
+          }
+          logBroker.addLine(id, `[delete] Error (ignored with force=true): ${removeErr.message}`);
+        }
+
+        logBroker.addLine(id, "[delete] Deleting database record...");
+        logBroker.complete(id, "success");
+      } else if (database.type === "mongodb" && database.status === "provisioning") {
+        // Database was created but provisioning may have partially completed
+        // Try to clean up DNS records if any were created
+        logBroker.addLine(id, "[delete] Database in provisioning state, cleaning up any partial resources...");
+
+        if (database.dns?.records?.length) {
+          try {
+            const { useDNSService } = await import("../../services/dns.service");
+            const dns = useDNSService();
+            await dns.teardown(database.dns.records);
+            removedDnsRecords = database.dns.records.length;
+            logBroker.addLine(id, `[delete] Removed ${removedDnsRecords} DNS records`);
+          } catch (dnsErr: any) {
+            logBroker.addLine(id, `[delete] DNS cleanup failed (non-fatal): ${dnsErr.message}`);
+          }
+        }
+
+        logBroker.addLine(id, "[delete] Deleting database record...");
+        logBroker.complete(id, "success");
+      }
+
+      // Delete the database record
+      await repo.deleteById(id);
+    } catch (error: any) {
+      console.error(`[database] Background deletion failed for ${id}:`, error.message);
+      logBroker.addLine(id, `[delete] Background deletion error: ${error.message}`);
+      logBroker.complete(id, "failed");
+      // Try to update status to failed
+      try {
+        await repo.updateStatus(id, "failed");
+      } catch {
+        // Record may already be deleted
+      }
     }
   }
 
@@ -160,13 +316,13 @@ export function useDatabaseController() {
       }
 
       // Start provisioning
+      logBroker.addLine(id, "[provision] Starting provisioning...");
       const result = await mongoProvisioner.provision({
         databaseId: id,
         triggeredBy: userId,
-        onLog: (line) => {
-          console.log(`[Provision ${id}] ${line}`);
-        },
+        onLog: (line) => logBroker.addLine(id, line),
       });
+      logBroker.complete(id, result.success ? "success" : "failed");
 
       if (result.success) {
         res.json({
@@ -223,12 +379,12 @@ export function useDatabaseController() {
         .provision({
           databaseId: id,
           triggeredBy: userId,
-          onLog: (line) => {
-            console.log(`[Reprovision ${id}] ${line}`);
-          },
+          onLog: (line) => logBroker.addLine(id, line),
         })
+        .then((result) => logBroker.complete(id, result.success ? "success" : "failed"))
         .catch((err) => {
-          console.error(`Reprovisioning failed for ${id}:`, err);
+          logBroker.addLine(id, `[ERROR] ${err.message}`);
+          logBroker.complete(id, "failed");
         });
 
       res.json({ message: "Database reprovision initiated" });
@@ -237,10 +393,19 @@ export function useDatabaseController() {
     }
   }
 
+  /**
+   * POST /databases/:id/remove
+   * Soft remove - stops containers but keeps the database record.
+   * Use DELETE /databases/:id for full deletion.
+   * 
+   * Query params:
+   *   - keep_data=true: Preserve data directory (default: false = remove everything)
+   *   - delete_record=true: Also delete the database record
+   */
   async function remove(req: Request, res: Response, next: NextFunction) {
     try {
       const id = req.params.id as string;
-      const removeData = req.query.remove_data === "true";
+      const keepData = req.query.keep_data === "true";
 
       const database = await repo.getById(id);
 
@@ -257,9 +422,7 @@ export function useDatabaseController() {
       }
 
       // Remove MongoDB deployment
-      const result = await mongoProvisioner.remove(id, removeData, (line) => {
-        console.log(`[Remove ${id}] ${line}`);
-      });
+      const result = await mongoProvisioner.remove(id, keepData, (line) => logBroker.addLine(id, line));
 
       if (result.success) {
         // Optionally delete the record
@@ -448,7 +611,8 @@ export function useDatabaseController() {
       // Get recent deployments/logs
       const { useDeploymentRepo } = await import("../deployment");
       const deploymentRepo = useDeploymentRepo();
-      const deployments = await deploymentRepo.getByAppId(id, { page: 1, limit: 5 });
+      const limit = req.query.limit ? Math.min(Number(req.query.limit), 50) : 10;
+      const deployments = await deploymentRepo.getByAppId(id, { page: 1, limit });
 
       res.json({
         deployments: deployments.items,
@@ -526,12 +690,12 @@ export function useDatabaseController() {
           serverId,
           role,
           triggeredBy: userId,
-          onLog: (line) => {
-            console.log(`[AddNode ${databaseId}] ${line}`);
-          },
+          onLog: (line) => logBroker.addLine(databaseId, line),
         })
+        .then((result) => logBroker.complete(databaseId, result.success ? "success" : "failed"))
         .catch((err) => {
-          console.error(`Add node failed for ${databaseId}:`, err);
+          logBroker.addLine(databaseId, `[ERROR] ${err.message}`);
+          logBroker.complete(databaseId, "failed");
         });
 
       res.status(202).json({
@@ -611,12 +775,12 @@ export function useDatabaseController() {
           databaseId,
           serverId,
           triggeredBy: userId,
-          onLog: (line) => {
-            console.log(`[RemoveNode ${databaseId}] ${line}`);
-          },
+          onLog: (line) => logBroker.addLine(databaseId, line),
         })
+        .then((result) => logBroker.complete(databaseId, result.success ? "success" : "failed"))
         .catch((err) => {
-          console.error(`Remove node failed for ${databaseId}:`, err);
+          logBroker.addLine(databaseId, `[ERROR] ${err.message}`);
+          logBroker.complete(databaseId, "failed");
         });
 
       res.status(202).json({
@@ -666,6 +830,175 @@ export function useDatabaseController() {
     }
   }
 
+  /**
+   * POST /databases/:id/tls
+   * Configure TLS for a MongoDB replica set.
+   * Returns immediately with status 202 and streams logs via SSE at GET /:id/tls/stream
+   */
+  async function configureTLS(req: Request, res: Response, next: NextFunction) {
+    try {
+      const databaseId = req.params.id as string;
+      const database = await repo.getById(databaseId);
+
+      if (!database) {
+        next(new NotFoundError("Database not found"));
+        return;
+      }
+
+      if (database.type !== "mongodb") {
+        next(new BadRequestError("TLS configuration is only supported for MongoDB"));
+        return;
+      }
+
+      if (database.status !== "running") {
+        next(new BadRequestError("Database must be running to configure TLS"));
+        return;
+      }
+
+      if (database.nodes.length < 2) {
+        next(new BadRequestError("TLS requires a replica set (2+ nodes)"));
+        return;
+      }
+
+      if (database.tls?.enabled) {
+        next(new BadRequestError("TLS is already configured for this database"));
+        return;
+      }
+
+      const userId = req.cookies?.user || "system";
+
+      // Start TLS configuration asynchronously using the database ID as the log key
+      // (same pattern as provisioning)
+      logBroker.addLine(databaseId, "[TLS] Starting TLS configuration...");
+
+      mongoProvisioner
+        .configureTLS({
+          databaseId,
+          triggeredBy: userId,
+          onLog: (line) => logBroker.addLine(databaseId, line),
+        })
+        .then((result) => {
+          logBroker.complete(databaseId, result.success ? "success" : "failed");
+        })
+        .catch((err) => {
+          logBroker.addLine(databaseId, `[TLS ERROR] ${err.message}`);
+          logBroker.complete(databaseId, "failed");
+        });
+
+      res.status(202).json({
+        message: "TLS configuration started",
+        databaseId,
+        streamUrl: `/api/databases/${databaseId}/provision/stream`,
+      });
+    } catch (error) {
+      next(error);
+    }
+  }
+
+  /**
+   * GET /databases/:id/tls
+   * Get TLS configuration status and CA certificate for client distribution.
+   */
+  async function getTLSStatus(req: Request, res: Response, next: NextFunction) {
+    try {
+      const databaseId = req.params.id as string;
+      const database = await repo.getById(databaseId);
+
+      if (!database) {
+        next(new NotFoundError("Database not found"));
+        return;
+      }
+
+      if (!database.tls?.enabled) {
+        res.json({
+          enabled: false,
+          message: "TLS is not configured for this database",
+        });
+        return;
+      }
+
+      res.json({
+        enabled: true,
+        configuredAt: database.tls.configuredAt,
+        tlsConnectionString: maskCredentials(database.tls.tlsConnectionString),
+        hasCaCert: !!database.tls.caCert,
+      });
+    } catch (error) {
+      next(error);
+    }
+  }
+
+  /**
+   * GET /databases/:id/tls/ca
+   * Download the CA certificate for client connections.
+   */
+  async function getTLSCertificate(req: Request, res: Response, next: NextFunction) {
+    try {
+      const databaseId = req.params.id as string;
+      const database = await repo.getById(databaseId);
+
+      if (!database) {
+        next(new NotFoundError("Database not found"));
+        return;
+      }
+
+      if (!database.tls?.enabled || !database.tls.caCert) {
+        next(new NotFoundError("TLS CA certificate not available"));
+        return;
+      }
+
+      const safeName = database.name.replace(/[^a-zA-Z0-9_-]/g, "_");
+
+      res.setHeader("Content-Type", "application/x-pem-file");
+      res.setHeader("Content-Disposition", `attachment; filename="${safeName}-ca.crt"`);
+      res.send(database.tls.caCert);
+    } catch (error) {
+      next(error);
+    }
+  }
+
+  /**
+   * DELETE /databases/:id/tls
+   * Disable TLS on a MongoDB replica set (reconfigure without TLS).
+   * Note: This is a destructive operation that will restart all nodes.
+   */
+  async function disableTLS(req: Request, res: Response, next: NextFunction) {
+    try {
+      const databaseId = req.params.id as string;
+      const database = await repo.getById(databaseId);
+
+      if (!database) {
+        next(new NotFoundError("Database not found"));
+        return;
+      }
+
+      if (!database.tls?.enabled) {
+        res.json({ message: "TLS is not enabled for this database" });
+        return;
+      }
+
+      // For now, just clear the TLS config from the database record.
+      // A full implementation would also reconfigure the MongoDB containers.
+      // TODO: Implement Ansible playbook to disable TLS on running cluster
+
+      await repo.updateTLS(databaseId, null);
+      await repo.updateById(databaseId, {
+        config: {
+          ...database.config,
+          tlsEnabled: false,
+          tlsDir: undefined,
+        },
+      });
+
+      res.json({
+        message: "TLS configuration removed from database record. Note: MongoDB containers may still have TLS enabled until reprovisioned.",
+        warning: "A full reprovision is recommended to disable TLS on the running cluster.",
+      });
+    } catch (error) {
+      next(error);
+    }
+  }
+
   return {
     add,
     getById,
@@ -684,6 +1017,10 @@ export function useDatabaseController() {
     getHealth,
     configureDNS,
     removeDNS,
+    configureTLS,
+    getTLSStatus,
+    getTLSCertificate,
+    disableTLS,
   };
 }
 

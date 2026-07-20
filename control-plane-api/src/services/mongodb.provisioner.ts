@@ -96,6 +96,8 @@ export function useMongoDBProvisioner() {
     const { databaseId, triggeredBy, onLog } = options;
     const logs: string[] = [];
     let sshKeyFile: string | null = null;
+    // Tracked so the catch block can always persist failure logs to MongoDB.
+    let deploymentId: ObjectId | null = null;
 
     const log = (line: string) => {
       logs.push(line);
@@ -104,13 +106,9 @@ export function useMongoDBProvisioner() {
     };
 
     try {
-      // Check Ansible is available
-      const ansibleInstalled = await ansible.checkAnsibleInstalled();
-      if (!ansibleInstalled) {
-        throw new InternalServerError("Ansible is not installed on this server");
-      }
-
-      // Get database configuration
+      // ----------------------------------------------------------------
+      // 1. Fetch database — needed before we can create a deployment record.
+      // ----------------------------------------------------------------
       const database = await databaseRepo.getById(databaseId);
       if (!database) {
         throw new NotFoundError("Database not found");
@@ -123,6 +121,29 @@ export function useMongoDBProvisioner() {
       log(`Starting MongoDB provisioning for: ${database.name}`);
       log(`Version: ${database.version}`);
       log(`Mode: ${database.nodes.length > 1 ? "replica set" : "standalone"}`);
+
+      // ----------------------------------------------------------------
+      // 2. Create the deployment record IMMEDIATELY so every failure path
+      //    (Ansible missing, SSH error, server offline, …) always writes
+      //    a record with the full error log.
+      // ----------------------------------------------------------------
+      await databaseRepo.updateStatus(databaseId, "provisioning");
+
+      deploymentId = await deploymentRepo.add({
+        appId: databaseId,
+        image: `mongo:${database.version}`,
+        triggeredBy: triggeredBy || new ObjectId().toHexString(),
+      });
+      await deploymentRepo.updateStatus(deploymentId, "running");
+
+      // ----------------------------------------------------------------
+      // 3. Pre-flight checks (these now log failures to the deployment record
+      //    via the catch block below).
+      // ----------------------------------------------------------------
+      const ansibleInstalled = await ansible.checkAnsibleInstalled();
+      if (!ansibleInstalled) {
+        throw new InternalServerError("Ansible is not installed on this server");
+      }
 
       // Get server details for all nodes
       const servers = await Promise.all(
@@ -145,23 +166,12 @@ export function useMongoDBProvisioner() {
         log("No SSH key registered — Ansible will use system SSH agent");
       }
 
-      // Update database status to provisioning
-      await databaseRepo.updateStatus(databaseId, "provisioning");
-
-      // Create deployment record
-      const deploymentId = await deploymentRepo.add({
-        appId: new ObjectId(databaseId), // Reusing appId field for database
-        image: `mongo:${database.version}`,
-        triggeredBy: new ObjectId(triggeredBy),
-      });
-
-      await deploymentRepo.updateStatus(deploymentId, "running");
-
-      // Determine provisioning mode
+      // ----------------------------------------------------------------
+      // 4. Run the playbook.
+      // ----------------------------------------------------------------
       const isReplicaSet = database.nodes.length > 1;
       const playbook = isReplicaSet ? "mongodb-replicaset.yml" : "mongodb-standalone.yml";
 
-      // Build inventory
       let inventoryContent: string;
       if (isReplicaSet) {
         inventoryContent = buildReplicaSetInventory(servers, database, sshKeyFile ?? undefined);
@@ -172,13 +182,9 @@ export function useMongoDBProvisioner() {
       log("Generated inventory:");
       log(inventoryContent);
 
-      // Write inventory file
       const inventoryPath = await ansible.writeInventoryFile(inventoryContent);
-
-      // Build extra vars
       const extraVars = buildExtraVars(database, isReplicaSet);
 
-      // Generate keyfile content for replica set (generate it here so we can store it)
       let keyfileContent: string | undefined;
       if (isReplicaSet) {
         keyfileContent = generateKeyfileContent();
@@ -188,137 +194,152 @@ export function useMongoDBProvisioner() {
 
       log("Starting Ansible playbook execution...");
 
-      // Execute playbook
       const result = await ansible.execPlaybook(
-        {
-          playbook,
-          inventory: inventoryPath,
-          extraVars,
-          verbose: true,
-        },
+        { playbook, inventory: inventoryPath, extraVars, verbose: true },
         log
       );
 
-      // Update deployment with logs
+      // ----------------------------------------------------------------
+      // 5. Persist full logs to the deployment record.
+      // ----------------------------------------------------------------
       await deploymentRepo.updateStatus(
         deploymentId,
         result.success ? "success" : "failed",
-        result.stdout + "\n" + result.stderr
+        logs.join("\n")
       );
 
       if (result.success) {
-        // Build connection string
         const connectionString = buildConnectionString(database, servers);
 
-        // Update database with connection string, running status, and keyfile (for replica sets)
         const updateData: Partial<TDatabase> = {
           status: "running",
-          credentials: {
-            ...database.credentials,
-            connectionString,
-          },
+          credentials: { ...database.credentials, connectionString },
         };
 
-        // Store keyfile content in config for future node additions
         if (isReplicaSet && keyfileContent) {
-          updateData.config = {
-            ...database.config,
-            keyfileContent,
-          };
+          updateData.config = { ...database.config, keyfileContent };
           log("Stored keyfile content in database config for future node additions");
         }
 
         await databaseRepo.updateById(databaseId, updateData);
 
-        // Update node statuses
-        for (const { node } of servers) {
-          node.status = "running";
-        }
-        await databaseRepo.updateById(databaseId, {
-          nodes: database.nodes,
-        });
+        for (const { node } of servers) { node.status = "running"; }
+        await databaseRepo.updateById(databaseId, { nodes: database.nodes });
 
         log("MongoDB provisioning completed successfully!");
         log(`Connection string: ${maskPassword(connectionString)}`);
 
-        // ---------------------------------------------------------------
-        // Optional: set up DNS records if provider is configured
-        // DNS failure is non-fatal — we still return success so the
-        // database is accessible via the IP connection string.
-        // ---------------------------------------------------------------
+        // ----------------------------------------------------------------
+        // 6. Post-provisioning setup: DNS and TLS (replica sets only)
+        //    DNS and admin-user-replication-wait run concurrently since
+        //    they are independent. TLS runs after the wait completes.
+        // ----------------------------------------------------------------
+        let tlsConnectionString = connectionString;
         if (isReplicaSet) {
+          // Start DNS setup and replication wait concurrently
+          const dnsPromise = (async (): Promise<string[]> => {
+            try {
+              const dns = useDNSService();
+              const replicaSetName = database.config.replicaSetName || `rs_${database.name.replace(/[^a-zA-Z0-9_-]/g, "_")}`;
+              const dnsResult = await dns.setupReplicaSet({
+                databaseName: database.name,
+                nodes: servers.map((s) => ({ host: s.server.host, port: database.config.port || 27017 })),
+                adminUser: database.credentials.adminUser,
+                adminPassword: database.credentials.adminPassword,
+                replicaSetName,
+              });
+
+              if (dnsResult) {
+                await databaseRepo.updateDNS(databaseId, {
+                  enabled: true,
+                  provider: "cloudflare",
+                  clusterHost: dnsResult.clusterHost,
+                  nodeHosts: dnsResult.nodeHosts,
+                  srvConnectionString: dnsResult.srvConnectionString,
+                  records: dnsResult.records,
+                  configuredAt: new Date(),
+                });
+                log(`DNS configured: ${dnsResult.clusterHost}`);
+                log(`SRV connection string: ${maskPassword(dnsResult.srvConnectionString)}`);
+                return dnsResult.nodeHosts;
+              }
+            } catch (dnsErr: any) {
+              log(`[DNS] Setup skipped or failed (non-fatal): ${dnsErr.message}`);
+            }
+            return [];
+          })();
+
+          const replicationWaitPromise = (async () => {
+            log("");
+            log("Waiting 10s for admin user replication before TLS configuration...");
+            await new Promise((r) => setTimeout(r, 10_000));
+          })();
+
+          // Wait for both DNS and replication wait to complete concurrently
+          const [dnsHostnames] = await Promise.all([dnsPromise, replicationWaitPromise]);
+
+          // Now configure TLS (depends on replication wait completing)
+          log("");
+          log("=".repeat(60));
+          log("Starting TLS configuration...");
+          log("=".repeat(60));
+
           try {
-            const dns = useDNSService();
-            const replicaSetName = database.config.replicaSetName || `rs_${database.name.replace(/[^a-zA-Z0-9_-]/g, "_")}`;
-            const dnsResult = await dns.setupReplicaSet({
-              databaseName: database.name,
-              nodes: servers.map((s) => ({
-                host: s.server.host,
-                port: database.config.port || 27017,
-              })),
-              adminUser: database.credentials.adminUser,
-              adminPassword: database.credentials.adminPassword,
-              replicaSetName,
+            const tlsResult = await configureTLSInternal({
+              databaseId,
+              servers,
+              database,
+              dnsHostnames,
+              sshKeyFile,
+              onLog: log,
             });
 
-            if (dnsResult) {
-              await databaseRepo.updateDNS(databaseId, {
-                enabled: true,
-                provider: "cloudflare",
-                clusterHost: dnsResult.clusterHost,
-                nodeHosts: dnsResult.nodeHosts,
-                srvConnectionString: dnsResult.srvConnectionString,
-                records: dnsResult.records,
-                configuredAt: new Date(),
-              });
-              log(`DNS configured: ${dnsResult.clusterHost}`);
-              log(`SRV connection string: ${maskPassword(dnsResult.srvConnectionString)}`);
+            if (tlsResult.success) {
+              tlsConnectionString = tlsResult.tlsConnectionString || connectionString;
+              log("TLS configuration completed successfully!");
+              log(`TLS connection string: ${maskPassword(tlsConnectionString)}`);
+            } else {
+              log(`[TLS] Configuration failed (non-fatal): ${tlsResult.error}`);
+              log("Database is running without TLS. You can configure TLS later via POST /databases/:id/tls");
             }
-          } catch (dnsErr: any) {
-            log(`[DNS] Setup skipped or failed (non-fatal): ${dnsErr.message}`);
+          } catch (tlsErr: any) {
+            log(`[TLS] Configuration failed (non-fatal): ${tlsErr.message}`);
+            log("Database is running without TLS. You can configure TLS later via POST /databases/:id/tls");
           }
         }
 
-        return {
-          success: true,
-          connectionString,
-          logs,
-        };
+        return { success: true, connectionString: tlsConnectionString, logs };
       } else {
-        // Update database status to failed
         await databaseRepo.updateStatus(databaseId, "failed");
-
         log("MongoDB provisioning failed!");
         log(result.stderr);
-
-        return {
-          success: false,
-          error: result.stderr || "Ansible playbook failed",
-          logs,
-        };
+        return { success: false, error: result.stderr || "Ansible playbook failed", logs };
       }
     } catch (error: any) {
       log(`Error: ${error.message}`);
-      
-      // Update database status to failed
+
+      // Always persist logs to the deployment record, even for early failures.
+      if (deploymentId) {
+        await deploymentRepo.updateStatus(deploymentId, "failed", logs.join("\n")).catch(() => {});
+      }
+
       await databaseRepo.updateStatus(databaseId, "failed").catch(() => {});
 
-      return {
-        success: false,
-        error: error.message,
-        logs,
-      };
+      return { success: false, error: error.message, logs };
     } finally {
       cleanupKeyFile(sshKeyFile);
     }
   }
 
   /**
-   * Remove a MongoDB deployment
+   * Remove a MongoDB deployment - reverses everything created by provisioning
+   * @param databaseId - The database ID
+   * @param keepData - If true, keeps the data directory (default: false = delete everything)
+   * @param onLog - Callback for log messages
    */
   async function remove(
     databaseId: string,
-    removeData: boolean = false,
+    keepData: boolean = false,
     onLog?: (line: string) => void
   ): Promise<TProvisionResult> {
     const logs: string[] = [];
@@ -337,6 +358,7 @@ export function useMongoDBProvisioner() {
       }
 
       log(`Removing MongoDB deployment: ${database.name}`);
+      log(`Keep data: ${keepData}`);
 
       // Get server details
       const servers = await Promise.all(
@@ -355,14 +377,26 @@ export function useMongoDBProvisioner() {
       const inventoryContent = buildRemoveInventory(servers, database, sshKeyFile ?? undefined);
       const inventoryPath = await ansible.writeInventoryFile(inventoryContent);
 
+      const safeName = database.name.replace(/[^a-zA-Z0-9_-]/g, "_");
+      const baseDir = `/opt/mongodb/${safeName}`;
+
+      log(`Removing containers on ${servers.length} node(s)...`);
+
       // Execute remove playbook
       const result = await ansible.execPlaybook(
         {
           playbook: "mongodb-remove.yml",
           inventory: inventoryPath,
           extraVars: {
-            mongodb_container_name: `mongodb_${database.name.replace(/[^a-zA-Z0-9_-]/g, "_")}`,
-            remove_data: removeData,
+            mongodb_container_name: `mongodb_${safeName}`,
+            mongodb_base_dir: baseDir,
+            mongodb_data_dir: database.config?.dataDir || `${baseDir}/data`,
+            mongodb_config_dir: database.config?.configDir || `${baseDir}/config`,
+            mongodb_log_dir: database.config?.logDir || `${baseDir}/logs`,
+            mongodb_keyfile_dir: database.config?.keyfileDir || `${baseDir}/keyfile`,
+            mongodb_tls_dir: database.config?.tlsDir || `${baseDir}/tls`,
+            mongodb_port: database.config?.port || 27017,
+            keep_data: keepData,
           },
           verbose: true,
         },
@@ -370,23 +404,13 @@ export function useMongoDBProvisioner() {
       );
 
       if (result.success) {
-        // Update database status
-        await databaseRepo.updateStatus(databaseId, "stopped");
-        
-        // Update node statuses
-        for (const { node } of servers) {
-          node.status = "stopped";
-        }
-        await databaseRepo.updateById(databaseId, {
-          nodes: database.nodes,
-        });
-
-        log("MongoDB removal completed successfully!");
+        log("MongoDB containers and files removed successfully!");
 
         // Tear down DNS records if any were configured
         try {
           const freshDb = await databaseRepo.getById(databaseId);
           if (freshDb?.dns?.records?.length) {
+            log(`Removing ${freshDb.dns.records.length} DNS records...`);
             const dns = useDNSService();
             await dns.teardown(freshDb.dns.records);
             await databaseRepo.updateDNS(databaseId, null);
@@ -395,6 +419,33 @@ export function useMongoDBProvisioner() {
         } catch (dnsErr: any) {
           log(`[DNS] Teardown failed (non-fatal): ${dnsErr.message}`);
         }
+
+        // Clear TLS config
+        if (database.tls?.enabled) {
+          await databaseRepo.updateTLS(databaseId, null);
+          log("TLS configuration cleared");
+        }
+
+        // Update database status and clear sensitive config
+        await databaseRepo.updateStatus(databaseId, "stopped");
+        
+        // Update node statuses and clear connection string (no longer valid)
+        for (const { node } of servers) {
+          node.status = "stopped";
+        }
+        await databaseRepo.updateById(databaseId, {
+          nodes: database.nodes,
+          credentials: {
+            ...database.credentials,
+            connectionString: "",  // No longer valid
+          },
+          config: {
+            ...database.config,
+            keyfileContent: undefined,  // Security: clear keyfile from DB
+          },
+        });
+
+        log("MongoDB removal completed successfully!");
       }
 
       return {
@@ -480,9 +531,9 @@ export function useMongoDBProvisioner() {
 
       // Create deployment record
       const deploymentId = await deploymentRepo.add({
-        appId: new ObjectId(databaseId),
+        appId: databaseId,
         image: `mongo:${database.version}`,
-        triggeredBy: new ObjectId(triggeredBy),
+        triggeredBy: triggeredBy || new ObjectId().toHexString(),
       });
 
       await deploymentRepo.updateStatus(deploymentId, "running");
@@ -601,7 +652,7 @@ export function useMongoDBProvisioner() {
       await deploymentRepo.updateStatus(
         deploymentId,
         result.success ? "success" : "failed",
-        result.stdout + "\n" + result.stderr
+        logs.join("\n")
       );
 
       if (result.success) {
@@ -752,9 +803,9 @@ export function useMongoDBProvisioner() {
 
       // Create deployment record
       const deploymentId = await deploymentRepo.add({
-        appId: new ObjectId(databaseId),
+        appId: databaseId,
         image: `mongo:${database.version}`,
-        triggeredBy: new ObjectId(triggeredBy),
+        triggeredBy: triggeredBy || new ObjectId().toHexString(),
       });
 
       await deploymentRepo.updateStatus(deploymentId, "running");
@@ -791,7 +842,7 @@ export function useMongoDBProvisioner() {
       await deploymentRepo.updateStatus(
         deploymentId,
         result.success ? "success" : "failed",
-        result.stdout + "\n" + result.stderr
+        logs.join("\n")
       );
 
       if (result.success) {
@@ -1314,6 +1365,238 @@ export function useMongoDBProvisioner() {
     return result;
   }
 
+  /**
+   * Internal TLS configuration - called during provisioning with pre-loaded data.
+   * Does NOT clean up the SSH key file (caller is responsible).
+   */
+  async function configureTLSInternal(options: {
+    databaseId: string;
+    servers: Array<{ server: any; node: TDatabaseNode }>;
+    database: TDatabase;
+    dnsHostnames: string[];
+    sshKeyFile: string | null;
+    onLog?: (line: string) => void;
+  }): Promise<{ success: boolean; error?: string; caCert?: string; tlsConnectionString?: string }> {
+    const { databaseId, servers, database, dnsHostnames, sshKeyFile, onLog } = options;
+
+    const log = (line: string) => {
+      if (onLog) onLog(line);
+      logger.log({ level: "info", message: `[MongoDB TLS] ${line}` });
+    };
+
+    try {
+      log(`Configuring TLS for: ${database.name}`);
+      log(`Servers: ${servers.map((s) => s.server.host).join(", ")}`);
+
+      // Build inventory for TLS playbook
+      const safeName = database.name.replace(/[^a-zA-Z0-9_-]/g, "_");
+      const inventoryContent = buildReplicaSetInventory(servers, database, sshKeyFile ?? undefined);
+
+      log("Generated TLS inventory");
+
+      const inventoryPath = await ansible.writeInventoryFile(inventoryContent);
+      const tlsDir = `/opt/mongodb/${safeName}/tls`;
+
+      const extraVars: Record<string, any> = {
+        mongodb_version: database.version || "8.0",
+        mongodb_admin_user: database.credentials.adminUser,
+        mongodb_admin_password: database.credentials.adminPassword,
+        mongodb_container_name: `mongodb_${safeName}`,
+        mongodb_port: database.config.port || 27017,
+        mongodb_data_dir: database.config.dataDir || `/opt/mongodb/${safeName}/data`,
+        mongodb_config_dir: database.config.configDir || `/opt/mongodb/${safeName}/config`,
+        mongodb_log_dir: database.config.logDir || `/opt/mongodb/${safeName}/logs`,
+        mongodb_keyfile_dir: database.config.keyfileDir || `/opt/mongodb/${safeName}/keyfile`,
+        mongodb_tls_dir: tlsDir,
+        mongodb_replicaset_name: database.config.replicaSetName || `rs_${safeName}`,
+        mongodb_tls_validity_days: 3650,
+        // Preserve user's cache size when regenerating config for TLS
+        mongodb_cache_size_gb: database.config.cacheSizeGB || 0.5,
+      };
+
+      // Add DNS names to certificates if configured
+      if (dnsHostnames.length > 0) {
+        log(`Including DNS names in certificates: ${dnsHostnames.join(", ")}`);
+        servers.forEach((s, i) => {
+          if (dnsHostnames[i]) {
+            extraVars[`mongodb_dns_name_${s.server.host.replace(/\./g, '_')}`] = dnsHostnames[i];
+          }
+        });
+      }
+
+      log("Starting TLS configuration playbook...");
+
+      const result = await ansible.execPlaybook(
+        { playbook: "mongodb-configure-tls.yml", inventory: inventoryPath, extraVars, verbose: true },
+        log
+      );
+
+      if (result.success) {
+        log("TLS playbook completed successfully");
+
+        // Read CA certificate from the primary server for client distribution
+        const primaryServer = servers.find((s) => s.node.role === "primary")?.server || servers[0].server;
+        let caCert: string | undefined;
+
+        try {
+          log(`Reading CA certificate from ${primaryServer.host}...`);
+          caCert = await readRemoteFile(primaryServer, `${tlsDir}/ca.crt`, sshKeyFile);
+          log("CA certificate retrieved successfully");
+        } catch (certErr: any) {
+          log(`Warning: Could not retrieve CA certificate: ${certErr.message}`);
+        }
+
+        // Build TLS-enabled connection string
+        const port = database.config.port || 27017;
+        const replicaSetName = database.config.replicaSetName || `rs_${safeName}`;
+        const hosts = servers.map((s) => `${s.server.host}:${port}`).join(",");
+        const user = encodeURIComponent(database.credentials.adminUser);
+        const password = encodeURIComponent(database.credentials.adminPassword);
+        const tlsConnectionString = `mongodb://${user}:${password}@${hosts}/admin?replicaSet=${replicaSetName}&tls=true`;
+
+        // Update database with TLS configuration
+        await databaseRepo.updateById(databaseId, {
+          config: {
+            ...database.config,
+            tlsEnabled: true,
+            tlsDir,
+          },
+        });
+
+        // Store full TLS config
+        await databaseRepo.updateTLS(databaseId, {
+          enabled: true,
+          caCert: caCert || "",
+          tlsConnectionString,
+          configuredAt: new Date(),
+        });
+
+        // Also update the main connection string to use TLS
+        await databaseRepo.updateById(databaseId, {
+          credentials: {
+            ...database.credentials,
+            connectionString: tlsConnectionString,
+          },
+        });
+
+        return { success: true, caCert, tlsConnectionString };
+      } else {
+        log("TLS configuration failed!");
+        log(result.stderr);
+        return { success: false, error: result.stderr || "Ansible playbook failed" };
+      }
+    } catch (error: any) {
+      log(`TLS Error: ${error.message}`);
+      return { success: false, error: error.message };
+    }
+  }
+
+  /**
+   * Read a file from a remote server via SSH
+   */
+  async function readRemoteFile(
+    server: { host: string; sshUser: string; sshPort?: number },
+    remotePath: string,
+    sshKeyFile: string | null
+  ): Promise<string> {
+    const { spawn } = await import("child_process");
+
+    return new Promise((resolve, reject) => {
+      const sshArgs = [
+        "-o", "StrictHostKeyChecking=no",
+        "-o", "ConnectTimeout=10",
+        "-p", String(server.sshPort || 22),
+      ];
+      if (sshKeyFile) {
+        sshArgs.push("-i", sshKeyFile);
+      }
+      sshArgs.push(
+        `${server.sshUser}@${server.host}`,
+        `cat ${remotePath}`
+      );
+
+      let stdout = "";
+      let stderr = "";
+
+      const proc = spawn("ssh", sshArgs);
+
+      proc.stdout?.on("data", (data: Buffer) => {
+        stdout += data.toString();
+      });
+
+      proc.stderr?.on("data", (data: Buffer) => {
+        stderr += data.toString();
+      });
+
+      proc.on("close", (code) => {
+        if (code === 0) {
+          resolve(stdout);
+        } else {
+          reject(new Error(`SSH command failed (exit ${code}): ${stderr}`));
+        }
+      });
+
+      proc.on("error", (err) => {
+        reject(new Error(`SSH spawn error: ${err.message}`));
+      });
+    });
+  }
+
+  /**
+   * Configure TLS for a MongoDB replica set (public API for manual TLS setup)
+   */
+  async function configureTLS(options: {
+    databaseId: string;
+    triggeredBy?: string;
+    onLog?: (line: string) => void;
+  }): Promise<{ success: boolean; error?: string; caCert?: string; tlsConnectionString?: string }> {
+    const { databaseId, onLog } = options;
+    let sshKeyFile: string | null = null;
+
+    const log = (line: string) => {
+      if (onLog) onLog(line);
+      logger.log({ level: "info", message: `[MongoDB TLS] ${line}` });
+    };
+
+    try {
+      const database = await databaseRepo.getById(databaseId);
+      if (!database) throw new NotFoundError("Database not found");
+      if (database.type !== "mongodb") throw new BadRequestError("TLS config only supported for MongoDB");
+      if (database.status !== "running") throw new BadRequestError("Database must be running to configure TLS");
+      if (database.nodes.length < 2) throw new BadRequestError("TLS requires a replica set (2+ nodes)");
+
+      // Get server details
+      const servers = await Promise.all(
+        database.nodes.map(async (node) => {
+          const server = await serverRepo.getById(node.serverId);
+          if (!server) throw new NotFoundError(`Server not found: ${node.serverId}`);
+          return { server, node };
+        })
+      );
+
+      // Resolve SSH key
+      sshKeyFile = await resolveSSHKeyFile(servers);
+
+      // Get DNS hostnames for certificates (if configured)
+      const dnsHostnames = database.dns?.nodeHosts || [];
+
+      // Delegate to internal function
+      return await configureTLSInternal({
+        databaseId,
+        servers,
+        database,
+        dnsHostnames,
+        sshKeyFile,
+        onLog: log,
+      });
+    } catch (error: any) {
+      log(`Error: ${error.message}`);
+      return { success: false, error: error.message };
+    } finally {
+      cleanupKeyFile(sshKeyFile);
+    }
+  }
+
   return {
     provision,
     remove,
@@ -1323,6 +1606,7 @@ export function useMongoDBProvisioner() {
     backup,
     restore,
     configureDNS,
+    configureTLS,
   };
 }
 

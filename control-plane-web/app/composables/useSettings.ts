@@ -5,12 +5,10 @@ export default function useSettings() {
 
   function getDNSConfig() {
     return useNuxtApp().$api<{
-      configured: boolean
-      provider?: string
-      zoneId?: string
-      zoneName?: string
-      baseDomain?: string
+      provider: string | null
       apiToken?: string  // masked
+      apps: { configured: boolean; zoneId?: string; baseDomain?: string }
+      db:   { configured: boolean; zoneId?: string; baseDomain?: string }
     }>('/settings/dns', { method: 'GET' })
   }
 
@@ -27,26 +25,32 @@ export default function useSettings() {
     })
   }
 
-  function saveDNSConfig(payload: {
-    provider?: string
-    apiToken: string
+  function saveToken(apiToken: string) {
+    return useNuxtApp().$api<{ message: string }>('/settings/dns/token', {
+      method: 'PUT',
+      body: { apiToken }
+    })
+  }
+
+  function saveDNSConfig(scope: 'apps' | 'db', payload: {
     baseDomain: string
     zoneId?: string
+    apiToken?: string   // omit to reuse the token already saved in settings
   }) {
     return useNuxtApp().$api<{
       message: string
-      provider: string
+      scope: string
       zoneId: string
       zoneName: string
       baseDomain: string
-    }>('/settings/dns', {
+    }>(`/settings/dns/${scope}`, {
       method: 'PUT',
       body: payload
     })
   }
 
-  function removeDNSConfig() {
-    return useNuxtApp().$api<{ message: string }>('/settings/dns', {
+  function removeDNSConfig(scope: 'apps' | 'db') {
+    return useNuxtApp().$api<{ message: string }>(`/settings/dns/${scope}`, {
       method: 'DELETE'
     })
   }
@@ -54,6 +58,7 @@ export default function useSettings() {
   return {
     getDNSConfig,
     verifyDNS,
+    saveToken,
     saveDNSConfig,
     removeDNSConfig,
   }

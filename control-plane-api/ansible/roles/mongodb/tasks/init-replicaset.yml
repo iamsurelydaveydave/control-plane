@@ -4,7 +4,8 @@
   wait_for:
     host: "{{ hostvars[item]['ansible_host'] }}"
     port: "{{ mongodb_port }}"
-    timeout: 120
+    delay: 5
+    timeout: 300
   loop: "{{ groups['mongodb'] }}"
   when: groups['mongodb'] is defined
 
@@ -52,11 +53,11 @@
   until: rs_wait.rc == 0
 
 - name: Create admin user on replica set
-  command: >
-    docker exec {{ mongodb_container_name }} mongosh --eval '
-    use admin;
-    if (db.getUser("{{ mongodb_admin_user }}") === null) {
-      db.createUser({
+  command: >-
+    docker exec {{ mongodb_container_name }} mongosh admin --eval '
+    var adminDb = db.getSiblingDB("admin");
+    if (adminDb.getUser("{{ mongodb_admin_user }}") === null) {
+      adminDb.createUser({
         user: "{{ mongodb_admin_user }}",
         pwd: "{{ mongodb_admin_password }}",
         roles: [
@@ -66,8 +67,9 @@
           { role: "readWriteAnyDatabase", db: "admin" },
           { role: "clusterAdmin", db: "admin" }
         ]
-      });
-      print("Admin user created");
+      },
+      { w: "majority", wtimeout: 30000 });
+      print("Admin user created with majority write concern");
     } else {
       print("Admin user already exists");
     }
@@ -77,3 +79,15 @@
   retries: 5
   delay: 5
   until: admin_user.rc == 0
+
+- name: Verify admin user authentication works
+  command: >
+    docker exec {{ mongodb_container_name }} mongosh
+    -u "{{ mongodb_admin_user }}" -p "{{ mongodb_admin_password }}"
+    --authenticationDatabase admin
+    --eval "db.runCommand({ping:1})"
+  register: auth_verify
+  retries: 10
+  delay: 3
+  until: auth_verify.rc == 0
+  when: admin_user is changed or admin_user.rc == 0

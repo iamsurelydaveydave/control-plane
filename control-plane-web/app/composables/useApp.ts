@@ -106,6 +106,19 @@ export default function useApp() {
     })
   }
 
+  function getDeployments(id: string) {
+    return useNuxtApp().$api<{
+      deployments: Array<{
+        _id: string
+        status: 'pending' | 'running' | 'success' | 'failed'
+        logs?: string
+        startedAt?: string
+        completedAt?: string
+        image?: string
+      }>
+    }>(`/apps/${id}/deployments`, { method: 'GET' })
+  }
+
   return {
     app,
     getAll,
@@ -120,6 +133,7 @@ export default function useApp() {
     start,
     restart,
     getLogs,
+    getDeployments,
     getVersion,
     exec
   }

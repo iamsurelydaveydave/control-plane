@@ -29,14 +29,17 @@ export default defineNuxtConfig({
 
   // Proxy API routes to the backend — Nuxt handles cookie forwarding automatically
   routeRules: {
-    '/api/auth/**': { proxy: `${process.env.API_URL || 'http://localhost:5005'}/api/auth/**` },
-    '/api/setup/**': { proxy: `${process.env.API_URL || 'http://localhost:5005'}/api/setup/**` },
-    '/api/users/**': { proxy: `${process.env.API_URL || 'http://localhost:5005'}/api/users/**` },
-    '/api/servers/**': { proxy: `${process.env.API_URL || 'http://localhost:5005'}/api/servers/**` },
-    '/api/apps/**': { proxy: `${process.env.API_URL || 'http://localhost:5005'}/api/apps/**` },
-    '/api/databases/**': { proxy: `${process.env.API_URL || 'http://localhost:5005'}/api/databases/**` },
-    '/api/ssh-keys/**': { proxy: `${process.env.API_URL || 'http://localhost:5005'}/api/ssh-keys/**` },
-    '/api/api-tokens/**': { proxy: `${process.env.API_URL || 'http://localhost:5005'}/api/api-tokens/**` }
+    '/api/auth/**':       { proxy: `${process.env.API_URL || 'http://localhost:5005'}/api/auth/**` },
+    '/api/setup/**':      { proxy: `${process.env.API_URL || 'http://localhost:5005'}/api/setup/**` },
+    '/api/users/**':      { proxy: `${process.env.API_URL || 'http://localhost:5005'}/api/users/**` },
+    '/api/servers/**':    { proxy: `${process.env.API_URL || 'http://localhost:5005'}/api/servers/**` },
+    '/api/apps/**':       { proxy: `${process.env.API_URL || 'http://localhost:5005'}/api/apps/**` },
+    '/api/databases/**':  { proxy: `${process.env.API_URL || 'http://localhost:5005'}/api/databases/**` },
+    '/api/ssh-keys/**':   { proxy: `${process.env.API_URL || 'http://localhost:5005'}/api/ssh-keys/**` },
+    '/api/api-tokens/**': { proxy: `${process.env.API_URL || 'http://localhost:5005'}/api/api-tokens/**` },
+    '/api/secrets/**':    { proxy: `${process.env.API_URL || 'http://localhost:5005'}/api/secrets/**` },
+    '/api/audit-logs/**': { proxy: `${process.env.API_URL || 'http://localhost:5005'}/api/audit-logs/**` },
+    '/api/settings/**':   { proxy: `${process.env.API_URL || 'http://localhost:5005'}/api/settings/**` }
   },
 
   devServer: {

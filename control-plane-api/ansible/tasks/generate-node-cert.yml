@@ -1,0 +1,84 @@
+---
+# Generate TLS certificate for a MongoDB node
+# Called from mongodb-configure-tls.yml
+#
+# Variables:
+#   target_host: inventory hostname
+#   node_host: IP address of the node
+#   node_dns: DNS name of the node (optional)
+#   tls_dir: TLS directory path
+#   tls_validity: Certificate validity in days
+
+- name: "Generate certificate for {{ node_host }}"
+  block:
+    - name: Create OpenSSL config for {{ node_host }}
+      copy:
+        content: |
+          [req]
+          default_bits = 4096
+          prompt = no
+          default_md = sha256
+          distinguished_name = dn
+          req_extensions = req_ext
+
+          [dn]
+          CN = {{ node_host }}
+          O = Control Plane
+          C = US
+
+          [req_ext]
+          subjectAltName = @alt_names
+
+          [alt_names]
+          IP.1 = {{ node_host }}
+          IP.2 = 127.0.0.1
+          DNS.1 = localhost
+          {% if node_dns %}
+          DNS.2 = {{ node_dns }}
+          {% endif %}
+          {% if hostvars[target_host]['mongodb_dns_names'] is defined %}
+          {% for dns in hostvars[target_host]['mongodb_dns_names'] %}
+          DNS.{{ loop.index + 2 }} = {{ dns }}
+          {% endfor %}
+          {% endif %}
+        dest: "{{ tls_dir }}/{{ node_host }}.cnf"
+        mode: '0644'
+
+    - name: Generate private key for {{ node_host }}
+      command: openssl genrsa -out {{ tls_dir }}/{{ node_host }}.key 4096
+      args:
+        creates: "{{ tls_dir }}/{{ node_host }}.key"
+
+    - name: Generate CSR for {{ node_host }}
+      command: >
+        openssl req -new
+        -key {{ tls_dir }}/{{ node_host }}.key
+        -out {{ tls_dir }}/{{ node_host }}.csr
+        -config {{ tls_dir }}/{{ node_host }}.cnf
+
+    - name: Sign certificate for {{ node_host }}
+      command: >
+        openssl x509 -req
+        -in {{ tls_dir }}/{{ node_host }}.csr
+        -CA {{ tls_dir }}/ca.crt
+        -CAkey {{ tls_dir }}/ca.key
+        -CAcreateserial
+        -out {{ tls_dir }}/{{ node_host }}.crt
+        -days {{ tls_validity }}
+        -sha256
+        -extensions req_ext
+        -extfile {{ tls_dir }}/{{ node_host }}.cnf
+
+    - name: Read node certificate
+      slurp:
+        src: "{{ tls_dir }}/{{ node_host }}.crt"
+      register: node_cert
+
+    - name: Read node key
+      slurp:
+        src: "{{ tls_dir }}/{{ node_host }}.key"
+      register: node_key
+
+    - name: Store node certificate in facts
+      set_fact:
+        _node_certs: "{{ _node_certs | default({}) | combine({ node_host: { 'cert': node_cert.content | b64decode, 'key': node_key.content | b64decode } }) }}"

@@ -5,7 +5,7 @@ import { BadRequestError } from "../../utils";
 export const databaseTypes = ["mongodb", "redis", "postgresql", "mysql"] as const;
 export type TDatabaseType = (typeof databaseTypes)[number];
 
-export const databaseStatuses = ["provisioning", "running", "failed", "stopped"] as const;
+export const databaseStatuses = ["provisioning", "running", "failed", "stopped", "deleting"] as const;
 export type TDatabaseStatus = (typeof databaseStatuses)[number];
 
 export const databaseNodeRoles = ["primary", "secondary", "arbiter", "standalone"] as const;
@@ -13,6 +13,9 @@ export type TDatabaseNodeRole = (typeof databaseNodeRoles)[number];
 
 export const databaseNodeStatuses = ["running", "stopped", "syncing", "unhealthy"] as const;
 export type TDatabaseNodeStatus = (typeof databaseNodeStatuses)[number];
+
+export const provisionerTypes = ["ansible", "k8s"] as const;
+export type TProvisionerType = (typeof provisionerTypes)[number];
 
 export type TDatabaseNode = {
   serverId: ObjectId | string;
@@ -53,6 +56,17 @@ export type TDatabaseDNS = {
   configuredAt: Date;
 };
 
+/**
+ * TLS configuration stored on the database document once TLS is enabled.
+ * The CA certificate is stored for client distribution.
+ */
+export type TDatabaseTLS = {
+  enabled: boolean;
+  caCert: string;              // PEM-encoded CA certificate for client connections
+  tlsConnectionString: string; // Connection string with tls=true&tlsCAFile param
+  configuredAt: Date;
+};
+
 export type TDatabaseBackupRecord = {
   _id?: ObjectId;
   s3Key: string;
@@ -70,14 +84,17 @@ export type TDatabase = {
   type: TDatabaseType;
   version: string;
   status: TDatabaseStatus;
+  provisionedWith?: TProvisionerType; // Tracks which provisioner created this database
   config: Record<string, any>;
   credentials: TDatabaseCredentials;
   nodes: TDatabaseNode[];
   backup?: TDatabaseBackup;
   backupRecords?: TDatabaseBackupRecord[];
   dns?: TDatabaseDNS;
+  tls?: TDatabaseTLS;
   createdAt?: Date;
   updatedAt?: Date;
+  deletedAt?: Date;
 };
 
 const schemaCredentials = Joi.object({

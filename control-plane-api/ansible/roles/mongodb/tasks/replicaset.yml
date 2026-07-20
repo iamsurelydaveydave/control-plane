@@ -62,20 +62,62 @@
     owner: "999"
     group: "999"
 
-- name: Template MongoDB replica set configuration
+# Template BOTH config files - init (no auth) and final (with auth)
+# We start with init config to allow user creation, then switch to final
+- name: Template MongoDB initial configuration (no client auth)
+  template:
+    src: mongod-replicaset-init.conf.j2
+    dest: "{{ mongodb_config_dir }}/mongod-init.conf"
+    mode: '0644'
+
+- name: Template MongoDB final configuration (with auth)
   template:
     src: mongod-replicaset.conf.j2
     dest: "{{ mongodb_config_dir }}/mongod.conf"
     mode: '0644'
-  notify: Restart MongoDB
 
-- name: Allow MongoDB port in UFW
+# Check if this is a fresh deployment (no existing data)
+- name: Check if MongoDB data directory has existing data
+  stat:
+    path: "{{ mongodb_data_dir }}/WiredTiger"
+  register: mongodb_data_exists
+
+# Use init config for fresh deployments, final config for existing ones
+- name: Set active config file
+  set_fact:
+    _mongodb_active_config: "{{ 'mongod.conf' if mongodb_data_exists.stat.exists else 'mongod-init.conf' }}"
+
+# Build list of replica set member IPs for firewall rules
+- name: Build replica set member IPs list
+  set_fact:
+    _rs_member_ips: "{{ groups['mongodb'] | map('extract', hostvars, 'ansible_host') | list }}"
+
+- name: Allow MongoDB port from replica set members
   ufw:
     rule: allow
     port: "{{ mongodb_port }}"
     proto: tcp
     from_ip: "{{ item }}"
-  loop: "{{ mongodb_allowed_ips | default(['any']) }}"
+    comment: "MongoDB replica set member"
+  loop: "{{ _rs_member_ips }}"
+
+- name: Allow MongoDB port from any IP (default open)
+  ufw:
+    rule: allow
+    port: "{{ mongodb_port }}"
+    proto: tcp
+    comment: "MongoDB client access"
+  when: mongodb_allowed_ips is not defined or mongodb_allowed_ips | length == 0
+
+- name: Allow MongoDB port from specific IPs only (if specified)
+  ufw:
+    rule: allow
+    port: "{{ mongodb_port }}"
+    proto: tcp
+    from_ip: "{{ item }}"
+    comment: "MongoDB allowed IP"
+  loop: "{{ mongodb_allowed_ips | default([]) }}"
+  when: mongodb_allowed_ips is defined and mongodb_allowed_ips | length > 0
 
 - name: Pull MongoDB Docker image
   docker_image:
@@ -92,7 +134,7 @@
       - "{{ mongodb_bind_ip | default('0.0.0.0') }}:{{ mongodb_port }}:27017"
     volumes:
       - "{{ mongodb_data_dir }}:/data/db"
-      - "{{ mongodb_config_dir }}/mongod.conf:/etc/mongod.conf:ro"
+      - "{{ mongodb_config_dir }}/{{ _mongodb_active_config }}:/etc/mongod.conf:ro"
       - "{{ mongodb_keyfile_dir }}/mongodb-keyfile:/etc/mongodb-keyfile:ro"
       - "{{ mongodb_log_dir }}:/var/log/mongodb"
     command: ["mongod", "--config", "/etc/mongod.conf"]
@@ -105,12 +147,34 @@
       retries: 5
       start_period: 30s
 
-- name: Wait for MongoDB to be ready
+- name: Wait for MongoDB port to be ready
   wait_for:
     host: "127.0.0.1"
     port: "{{ mongodb_port }}"
     delay: 5
-    timeout: 60
+    timeout: 120
+
+- name: Wait for MongoDB container to be healthy
+  shell: |
+    for i in $(seq 1 36); do
+      status=$(docker inspect --format='{{"{{"}}.State.Health.Status{{"}}"}}' {{ mongodb_container_name }} 2>/dev/null || echo "missing")
+      if [ "$status" = "healthy" ]; then
+        echo "Container healthy after $i checks"
+        exit 0
+      fi
+      echo "Health check $i: $status"
+      sleep 5
+    done
+    echo "Container not healthy after 36 checks (3 minutes)"
+    docker logs --tail 50 {{ mongodb_container_name }} 2>&1 || true
+    exit 1
+  register: health_result
+  changed_when: false
+
+- name: Show health check result
+  debug:
+    msg: "{{ health_result.stdout_lines[-5:] }}"
+  when: health_result.stdout_lines | length > 0
 
 # Replica set initialisation is handled by Phase 2 of the calling playbook,
 # after ALL nodes have been provisioned. Do not initialise here.

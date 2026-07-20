@@ -13,6 +13,38 @@ const router = useRouter()
 const toast = useToast()
 const databaseId = route.params.id as string
 
+// Ref for DeploymentHistory so we can trigger updates without full reload
+const historyRef = ref<{
+  load: () => void
+  addRunningEntry: () => string
+  updateLatestStatus: (status: 'success' | 'failed') => void
+} | null>(null)
+
+// Ref for ProvisionLog so we can clear and connect when starting a new provision
+const provisionLogRef = ref<{ clearAndConnect: () => void } | null>(null)
+
+// Selected history entry for log preview
+type THistoryEntry = {
+  _id: string
+  status: string
+  logs?: string
+  startedAt?: string
+  completedAt?: string
+  image?: string
+}
+const selectedHistory = ref<THistoryEntry | null>(null)
+
+// Local provisioning state - shows log viewer immediately when an action is triggered
+const isProvisioningLocal = ref(false)
+
+function handleHistorySelect(entry: THistoryEntry) {
+  // If selecting a non-running entry, clear local provisioning state
+  if (entry.status !== 'running') {
+    isProvisioningLocal.value = false
+  }
+  selectedHistory.value = entry
+}
+
 const {
   getById,
   getCredentials,
@@ -33,7 +65,41 @@ const { data: databaseData, status, refresh } = await useLazyAsyncData(
   { immediate: true, server: false }
 )
 const database = computed(() => databaseData.value?.database)
-const loading = computed(() => status.value === 'pending')
+// Only show loading skeleton on initial load, not on refresh
+const loading = computed(() => status.value === 'pending' && !database.value)
+
+// Auto-refresh while database is in transitional state (provisioning/deleting)
+// If deleted, redirect to list
+const isTransitional = computed(() =>
+  database.value?.status === 'provisioning' || database.value?.status === 'deleting'
+)
+
+let pollInterval: ReturnType<typeof setInterval> | null = null
+
+watch(isTransitional, (transitional) => {
+  if (transitional && !pollInterval) {
+    pollInterval = setInterval(async () => {
+      try {
+        await refresh()
+      } catch {
+        // Database was deleted - redirect to list
+        clearInterval(pollInterval!)
+        pollInterval = null
+        router.push('/dashboard/databases')
+      }
+    }, 3000)
+  } else if (!transitional && pollInterval) {
+    clearInterval(pollInterval)
+    pollInterval = null
+  }
+}, { immediate: true })
+
+onUnmounted(() => {
+  if (pollInterval) {
+    clearInterval(pollInterval)
+    pollInterval = null
+  }
+})
 
 // Fetch servers for add node dropdown
 const { data: serversData } = await useLazyAsyncData(
@@ -110,6 +176,13 @@ async function submitAddNode() {
   addNodeLoading.value = true
   try {
     await addNode(databaseId, addNodeForm.serverId, addNodeForm.role)
+    // Clear selected history and show log viewer immediately
+    selectedHistory.value = null
+    isProvisioningLocal.value = true
+    // Add a running entry to the history immediately
+    historyRef.value?.addRunningEntry()
+    // Clear previous logs and start fresh SSE connection
+    nextTick(() => provisionLogRef.value?.clearAndConnect())
     toast.add({
       title: 'Node addition started',
       description: 'The node is being provisioned. This may take a few minutes.',
@@ -117,7 +190,8 @@ async function submitAddNode() {
       icon: 'i-lucide-check'
     })
     addNodeOpen.value = false
-    await refresh()
+    // Refresh in background to sync status
+    refresh()
   } catch (e: unknown) {
     const err = e as { data?: { message?: string } }
     toast.add({
@@ -145,6 +219,13 @@ async function submitRemoveNode() {
   removeNodeLoading.value = true
   try {
     await removeNode(databaseId, removeNodeTarget.value.serverId)
+    // Clear selected history and show log viewer immediately
+    selectedHistory.value = null
+    isProvisioningLocal.value = true
+    // Add a running entry to the history immediately
+    historyRef.value?.addRunningEntry()
+    // Clear previous logs and start fresh SSE connection
+    nextTick(() => provisionLogRef.value?.clearAndConnect())
     toast.add({
       title: 'Node removal started',
       description: 'The node is being removed from the cluster.',
@@ -153,7 +234,8 @@ async function submitRemoveNode() {
     })
     removeNodeOpen.value = false
     removeNodeTarget.value = null
-    await refresh()
+    // Refresh in background to sync status
+    refresh()
   } catch (e: unknown) {
     const err = e as { data?: { message?: string } }
     toast.add({
@@ -173,12 +255,20 @@ async function handleReprovision() {
   reprovisionLoading.value = true
   try {
     await reprovision(databaseId)
+    // Clear selected history and show log viewer immediately
+    selectedHistory.value = null
+    isProvisioningLocal.value = true
+    // Add a running entry to the history immediately
+    historyRef.value?.addRunningEntry()
+    // Clear previous logs and start fresh SSE connection
+    nextTick(() => provisionLogRef.value?.clearAndConnect())
     toast.add({
       title: 'Reprovisioning started',
       color: 'info',
       icon: 'i-lucide-refresh-cw'
     })
-    await refresh()
+    // Refresh in background to sync status
+    refresh()
   } catch (e: unknown) {
     const err = e as { data?: { message?: string } }
     toast.add({
@@ -200,7 +290,8 @@ async function submitDelete() {
   try {
     await deleteById(databaseId)
     toast.add({
-      title: 'Database deleted',
+      title: 'Database deletion started',
+      description: 'The database is being deleted in the background.',
       color: 'success',
       icon: 'i-lucide-check'
     })
@@ -233,6 +324,7 @@ function getStatusColor(status: string) {
   switch (status) {
     case 'running': return 'success'
     case 'provisioning': return 'warning'
+    case 'deleting': return 'warning'
     case 'syncing': return 'warning'
     case 'failed': return 'error'
     case 'stopped': return 'neutral'
@@ -335,6 +427,11 @@ async function handleRemoveDNS() {
             >
               {{ database.status }}
             </UBadge>
+            <UIcon
+              v-if="database.status === 'provisioning' || database.status === 'deleting'"
+              name="i-lucide-loader-2"
+              class="size-4 animate-spin text-warning"
+            />
           </div>
           <p class="text-sm text-muted">
             {{ database.type }} {{ database.version }}
@@ -395,6 +492,26 @@ async function handleRemoveDNS() {
       v-else-if="database"
       class="space-y-6"
     >
+      <!-- Provisioning log — shows when: initiating provision, ongoing provision, or viewing history -->
+      <ProvisionLog
+        v-if="isProvisioningLocal || database.status === 'provisioning' || selectedHistory"
+        ref="provisionLogRef"
+        :resource-id="databaseId"
+        resource-type="db"
+        :status="isProvisioningLocal ? 'provisioning' : database.status"
+        :historical-entry="selectedHistory"
+        @done="(status) => { historyRef?.updateLatestStatus(status); refresh(); historyRef?.load() }"
+      />
+
+      <!-- Provisioning history -->
+      <DeploymentHistory
+        ref="historyRef"
+        :resource-id="databaseId"
+        resource-type="db"
+        :active-id="selectedHistory?._id"
+        @select="handleHistorySelect"
+      />
+
       <!-- Health Overview -->
       <div class="rounded-xl border border-default bg-elevated/50 p-6">
         <div class="flex items-center justify-between mb-4">
@@ -492,7 +609,7 @@ async function handleRemoveDNS() {
           <UButton
             icon="i-lucide-plus"
             size="sm"
-            :disabled="database.status === 'provisioning' || availableServers.length === 0"
+            :disabled="database.status === 'provisioning' || database.status === 'deleting' || availableServers.length === 0"
             @click="openAddNode"
           >
             Add Node
@@ -696,26 +813,86 @@ async function handleRemoveDNS() {
         <!-- DNS not configured -->
         <div
           v-else
-          class="text-center py-6"
+          class="space-y-4"
         >
-          <UIcon
-            name="i-lucide-globe"
-            class="size-8 text-muted mx-auto mb-2"
-          />
-          <p class="text-sm text-muted">
-            Click <strong>Configure DNS</strong> to create Cloudflare records and get a
-            <code>mongodb+srv://</code> connection URL.
-          </p>
-          <p class="text-xs text-muted mt-1">
-            Requires a Cloudflare API token &amp; Zone ID saved in
-            <UButton
-              variant="link"
-              size="xs"
-              to="/dashboard/settings"
-            >
-              Settings
-            </UButton>.
-          </p>
+          <!-- sslip.io fallback (when DB has running nodes) -->
+          <div
+            v-if="database.status === 'running' && database.nodes?.some(n => n.sslipHost)"
+            class="space-y-3"
+          >
+            <div class="flex items-center gap-2">
+              <UIcon
+                name="i-lucide-link"
+                class="size-4 text-muted"
+              />
+              <p class="text-sm font-medium text-highlighted">
+                sslip.io fallback hostnames
+              </p>
+              <UBadge
+                label="No DNS needed"
+                color="neutral"
+                variant="subtle"
+                size="xs"
+              />
+            </div>
+            <p class="text-xs text-muted">
+              These hostnames resolve directly to each node's IP via
+              <a
+                href="https://sslip.io"
+                target="_blank"
+                class="underline"
+              >sslip.io</a>
+              — no DNS setup required.
+            </p>
+            <div class="space-y-2">
+              <div
+                v-for="node in database.nodes?.filter(n => n.sslipHost)"
+                :key="node.serverId"
+                class="flex items-center gap-2 rounded-lg border border-default bg-default/30 px-3 py-2"
+              >
+                <UBadge
+                  :label="node.role"
+                  color="neutral"
+                  variant="outline"
+                  size="xs"
+                  class="shrink-0"
+                />
+                <code class="text-xs text-muted flex-1 truncate">
+                  {{ node.sslipConnectionHost }}
+                </code>
+                <UButton
+                  icon="i-lucide-copy"
+                  color="neutral"
+                  variant="ghost"
+                  size="xs"
+                  @click="copyToClipboard(node.sslipConnectionHost ?? '')"
+                />
+              </div>
+            </div>
+          </div>
+
+          <!-- Prompt to configure DNS -->
+          <div class="text-center py-4">
+            <UIcon
+              name="i-lucide-globe"
+              class="size-8 text-muted mx-auto mb-2"
+            />
+            <p class="text-sm text-muted">
+              Click <strong>Configure DNS</strong> to create Cloudflare records and get a
+              <code>mongodb+srv://</code>
+              connection URL.
+            </p>
+            <p class="text-xs text-muted mt-1">
+              Requires a Cloudflare API token &amp; Zone ID saved in
+              <UButton
+                variant="link"
+                size="xs"
+                to="/dashboard/settings"
+              >
+                Settings
+              </UButton>.
+            </p>
+          </div>
         </div>
       </div>
     </div>

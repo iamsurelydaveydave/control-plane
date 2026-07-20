@@ -7,6 +7,7 @@ import {
   TDatabaseNode,
   TDatabaseNodeStatus,
   TDatabaseStatus,
+  TDatabaseTLS,
 } from "./database.model";
 import {
   BadRequestError,
@@ -25,9 +26,41 @@ export function useDatabaseRepo() {
 
   async function createIndexes() {
     try {
+      // Drop the old non-partial unique index if it exists (one-time migration)
+      // The new index is partial (only enforces uniqueness for non-stopped databases)
+      try {
+        const existingIndexes = await repo.collection.indexes();
+        const oldNameIndex = existingIndexes.find(
+          (idx) =>
+            idx.key?.name === 1 &&
+            idx.unique === true &&
+            !idx.partialFilterExpression
+        );
+        if (oldNameIndex?.name) {
+          logger.log({
+            level: "info",
+            message: `Dropping old non-partial unique index: ${oldNameIndex.name}`,
+          });
+          await repo.collection.dropIndex(oldNameIndex.name);
+        }
+      } catch (dropErr: any) {
+        // Ignore if index doesn't exist
+        if (!dropErr.message?.includes("index not found")) {
+          logger.log({
+            level: "warn",
+            message: `Could not drop old name index: ${dropErr.message}`,
+          });
+        }
+      }
+
       await repo.collection.createIndexes([
         { key: { name: "text" } },
-        { key: { name: 1 }, unique: true },
+        // Unique name only for active databases (not stopped/deleted)
+        {
+          key: { name: 1 },
+          unique: true,
+          partialFilterExpression: { status: { $ne: "stopped" } },
+        },
         { key: { type: 1 } },
         { key: { status: 1 } },
         { key: { "nodes.serverId": 1 } },
@@ -95,12 +128,14 @@ export function useDatabaseRepo() {
     limit = 10,
     type,
     status,
+    includeDeleted = false,
   }: {
     search?: string;
     page?: number;
     limit?: number;
     type?: string;
     status?: TDatabaseStatus;
+    includeDeleted?: boolean;
   } = {}) {
     page = page > 0 ? page - 1 : 0;
 
@@ -116,6 +151,9 @@ export function useDatabaseRepo() {
 
     if (status) {
       query.status = status;
+    } else if (!includeDeleted) {
+      // By default, exclude soft-deleted (stopped) databases
+      query.status = { $ne: "stopped" };
     }
 
     const cacheKey = makeCacheKey(namespace_collection, {
@@ -124,6 +162,7 @@ export function useDatabaseRepo() {
       limit,
       type: type ?? "",
       status: status ?? "",
+      includeDeleted,
       tag_query: "getAll",
     });
 
@@ -330,9 +369,20 @@ export function useDatabaseRepo() {
     }
 
     try {
-      const result = await repo.collection.deleteOne({ _id });
+      // Soft delete: set status to "stopped" so the name can be reused
+      // (the unique index is partial and excludes stopped databases)
+      const result = await repo.collection.updateOne(
+        { _id },
+        {
+          $set: {
+            status: "stopped",
+            deletedAt: new Date(),
+            updatedAt: new Date(),
+          },
+        }
+      );
 
-      if (result.deletedCount === 0) {
+      if (result.matchedCount === 0) {
         throw new NotFoundError("Database not found");
       }
 
@@ -512,6 +562,37 @@ export function useDatabaseRepo() {
     }
   }
 
+  /**
+   * Store (or clear) the TLS configuration on a database document.
+   * Pass `null` to remove existing TLS info.
+   */
+  async function updateTLS(_id: string | ObjectId, tls: TDatabaseTLS | null) {
+    try {
+      _id = new ObjectId(_id);
+    } catch {
+      throw new BadRequestError("Invalid database ID");
+    }
+
+    try {
+      const result = await repo.collection.updateOne(
+        { _id },
+        tls
+          ? { $set: { tls, updatedAt: new Date() } }
+          : { $unset: { tls: "" }, $set: { updatedAt: new Date() } }
+      );
+
+      if (result.matchedCount === 0) {
+        throw new NotFoundError("Database not found");
+      }
+
+      repo.delCachedData();
+      return result;
+    } catch (error) {
+      if (error instanceof NotFoundError) throw error;
+      throw new InternalServerError("Failed to update database TLS");
+    }
+  }
+
   return {
     createIndexes,
     add,
@@ -530,5 +611,6 @@ export function useDatabaseRepo() {
     removeNode,
     updateNodeStatus,
     updateDNS,
+    updateTLS,
   };
 }

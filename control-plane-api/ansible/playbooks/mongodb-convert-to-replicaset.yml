@@ -230,7 +230,8 @@
       wait_for:
         host: "{{ hostvars[item]['ansible_host'] }}"
         port: "{{ mongodb_port }}"
-        timeout: 120
+        delay: 5
+        timeout: 300
       loop: "{{ groups['mongodb_primary'] + groups.get('mongodb_secondary', []) + groups.get('mongodb_arbiter', []) }}"
 
     # The standalone MongoDB already has an admin user in data/db,

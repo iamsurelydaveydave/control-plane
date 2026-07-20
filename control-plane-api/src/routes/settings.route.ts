@@ -2,6 +2,8 @@ import express, { Request, Response, NextFunction } from "express";
 import { requireAuth } from "../utils";
 import { useSettingsRepo } from "../resources/settings";
 import { useDNSService } from "../services/dns.service";
+import { useK8sService } from "../services/k8s.service";
+import { getProvisionerType } from "../services/mongodb.provisioner.factory";
 import { BadRequestError } from "../utils";
 
 const router = express.Router();
@@ -203,6 +205,132 @@ router.delete("/dns/:scope", requireAuth, async (req: Request, res: Response, ne
     ]);
 
     res.json({ message: `${scope === "apps" ? "Apps" : "Databases"} DNS configuration removed` });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Kubernetes (K3s) Settings
+// ---------------------------------------------------------------------------
+
+// GET /api/settings/k8s — Get Kubernetes configuration status
+router.get("/k8s", requireAuth, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const k8sEnabled = process.env.K8S_ENABLED === "true";
+    const provisionerType = getProvisionerType();
+    
+    let k8sStatus: {
+      enabled: boolean;
+      available: boolean;
+      nodes: number;
+      serverUrl?: string;
+      error?: string;
+    } = {
+      enabled: k8sEnabled,
+      available: false,
+      nodes: 0,
+    };
+
+    if (k8sEnabled) {
+      try {
+        const k8s = useK8sService();
+        k8sStatus.available = await k8s.isAvailable();
+        k8sStatus.serverUrl = process.env.K3S_SERVER_URL;
+        
+        if (k8sStatus.available) {
+          const nodes = await k8s.getNodes();
+          k8sStatus.nodes = nodes.length;
+        }
+      } catch (err: any) {
+        k8sStatus.available = false;
+        k8sStatus.error = err.message || "K8s health check failed";
+      }
+    }
+
+    res.json({
+      kubernetes: k8sStatus,
+      provisioner: provisionerType,
+      hasK3sToken: !!process.env.K3S_TOKEN,
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// GET /api/settings/k8s/nodes — List K8s cluster nodes
+router.get("/k8s/nodes", requireAuth, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    if (process.env.K8S_ENABLED !== "true") {
+      res.json({ enabled: false, nodes: [] });
+      return;
+    }
+
+    const k8s = useK8sService();
+    const available = await k8s.isAvailable();
+    
+    if (!available) {
+      res.json({ enabled: true, available: false, nodes: [] });
+      return;
+    }
+
+    const rawNodes = await k8s.getNodes();
+    const nodes = rawNodes.map((node: any) => {
+      const addresses = node.status?.addresses || [];
+      const internalIP = addresses.find((a: any) => a.type === "InternalIP")?.address;
+      const hostname = addresses.find((a: any) => a.type === "Hostname")?.address;
+      const conditions = node.status?.conditions || [];
+      const readyCondition = conditions.find((c: any) => c.type === "Ready");
+      
+      return {
+        name: node.metadata.name,
+        hostname,
+        internalIP,
+        ready: readyCondition?.status === "True",
+        roles: Object.keys(node.metadata.labels || {})
+          .filter((l) => l.startsWith("node-role.kubernetes.io/"))
+          .map((l) => l.replace("node-role.kubernetes.io/", "")),
+        createdAt: node.metadata.creationTimestamp,
+      };
+    });
+
+    res.json({ enabled: true, available: true, nodes });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// GET /api/settings/k8s/agent-command — Get the command to join a server as K3s agent
+router.get("/k8s/agent-command", requireAuth, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    if (process.env.K8S_ENABLED !== "true") {
+      next(new BadRequestError("Kubernetes is not enabled. Set K8S_ENABLED=true to enable."));
+      return;
+    }
+
+    const serverUrl = process.env.K3S_SERVER_URL;
+    const token = process.env.K3S_TOKEN;
+
+    if (!serverUrl || !token) {
+      next(new BadRequestError(
+        "K3S_SERVER_URL and K3S_TOKEN are not configured. " +
+        "Run the K3s server setup script first."
+      ));
+      return;
+    }
+
+    const command = `curl -sfL https://get.k3s.io | K3S_URL=${serverUrl} K3S_TOKEN=${token} sh -`;
+
+    res.json({
+      serverUrl,
+      command,
+      instructions: [
+        "SSH into the database server as root",
+        "Run the command above",
+        "The server will automatically join the K3s cluster",
+        "New databases will use K8s-based provisioning",
+      ],
+    });
   } catch (error) {
     next(error);
   }

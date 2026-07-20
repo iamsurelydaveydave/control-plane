@@ -6,9 +6,9 @@ export default function useSettings() {
   function getDNSConfig() {
     return useNuxtApp().$api<{
       provider: string | null
-      apiToken?: string  // masked
+      apiToken?: string
       apps: { configured: boolean; zoneId?: string; baseDomain?: string }
-      db:   { configured: boolean; zoneId?: string; baseDomain?: string }
+      db: { configured: boolean; zoneId?: string; baseDomain?: string }
     }>('/settings/dns', { method: 'GET' })
   }
 
@@ -35,7 +35,7 @@ export default function useSettings() {
   function saveDNSConfig(scope: 'apps' | 'db', payload: {
     baseDomain: string
     zoneId?: string
-    apiToken?: string   // omit to reuse the token already saved in settings
+    apiToken?: string
   }) {
     return useNuxtApp().$api<{
       message: string
@@ -55,11 +55,57 @@ export default function useSettings() {
     })
   }
 
+  // ---------------------------------------------------------------------------
+  // Kubernetes (K3s)
+  // ---------------------------------------------------------------------------
+
+  function getK8sConfig() {
+    return useNuxtApp().$api<{
+      kubernetes: {
+        enabled: boolean
+        available: boolean
+        nodes: number
+        serverUrl?: string
+        error?: string
+      }
+      provisioner: 'ansible' | 'k8s'
+      hasK3sToken: boolean
+    }>('/settings/k8s', { method: 'GET' })
+  }
+
+  function getK8sNodes() {
+    return useNuxtApp().$api<{
+      enabled: boolean
+      available?: boolean
+      nodes: Array<{
+        name: string
+        hostname?: string
+        internalIP?: string
+        ready: boolean
+        roles: string[]
+        createdAt: string
+      }>
+    }>('/settings/k8s/nodes', { method: 'GET' })
+  }
+
+  function getK8sAgentCommand() {
+    return useNuxtApp().$api<{
+      serverUrl: string
+      command: string
+      instructions: string[]
+    }>('/settings/k8s/agent-command', { method: 'GET' })
+  }
+
   return {
+    // DNS
     getDNSConfig,
     verifyDNS,
     saveToken,
     saveDNSConfig,
     removeDNSConfig,
+    // Kubernetes
+    getK8sConfig,
+    getK8sNodes,
+    getK8sAgentCommand
   }
 }

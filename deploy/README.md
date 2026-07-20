@@ -25,6 +25,7 @@ You can set these before running the installer:
 | Variable | Description | Required |
 |----------|-------------|----------|
 | `MONGODB_URI` | MongoDB Atlas connection string | For production |
+| `REDIS_URL` | Redis connection string | Yes |
 | `DOMAIN` | Domain for HTTPS access | Optional |
 | `ROOT_USERNAME` | Initial admin username | Optional |
 | `ROOT_USER_EMAIL` | Initial admin email | Optional |
@@ -32,6 +33,7 @@ You can set these before running the installer:
 | `VERSION` | Specific version to install | Default: `latest` |
 | `REGISTRY_URL` | Custom Docker registry | Default: `ghcr.io` |
 | `AUTOUPDATE` | Enable auto-updates | Default: `true` |
+| `ENABLE_K8S` | Enable K3s for database provisioning | Default: `false` |
 
 ## What Gets Installed
 
@@ -123,6 +125,22 @@ curl -fsSL https://get.controlplane.dev/install.sh | bash
 ```
 
 Use a load balancer in front of the nodes.
+
+### 4. With Kubernetes Database Provisioning
+
+Enable K3s for automated database management with Percona Operator:
+
+```bash
+MONGODB_URI="mongodb+srv://..." \
+DOMAIN="cp.example.com" \
+ENABLE_K8S=true \
+curl -fsSL https://get.controlplane.dev/install.sh | bash
+```
+
+- Installs K3s (lightweight Kubernetes) on the control plane
+- Installs Percona MongoDB Operator for automated database provisioning
+- Database servers automatically join as K3s agents
+- Enables self-healing, automatic TLS, and backup features
 
 ## Files
 

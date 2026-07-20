@@ -36,6 +36,13 @@ const items = [
     status: 'active' as const
   },
   {
+    title: 'Kubernetes',
+    description: 'K3s cluster status and database provisioning settings.',
+    icon: 'i-lucide-ship',
+    to: '/dashboard/settings/kubernetes',
+    status: 'active' as const
+  },
+  {
     title: 'Account',
     description: 'Manage your account and preferences.',
     icon: 'i-lucide-user',

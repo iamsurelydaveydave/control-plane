@@ -124,7 +124,7 @@ export function useMongoDBProvisionerK8s() {
       }
       log("Kubernetes is available");
 
-      // 4. Ensure all database servers are K3s agents
+      // 4. Ensure all database servers are K3s agents (install in parallel)
       log("Verifying servers are K3s agents...");
       const servers = await getServersForDatabase(database);
       const k8sNodes = await k8s.getNodes();
@@ -132,11 +132,15 @@ export function useMongoDBProvisionerK8s() {
         n.status?.addresses?.find((a: any) => a.type === "InternalIP")?.address
       ).filter(Boolean);
 
-      for (const { server } of servers) {
-        if (!k8sNodeIPs.includes(server.host)) {
+      const agentInstalls = servers
+        .filter(({ server }) => !k8sNodeIPs.includes(server.host))
+        .map(async ({ server }) => {
           log(`Server ${server.host} is not a K3s agent. Installing...`);
           await installK3sAgent(server, log);
-        }
+        });
+      
+      if (agentInstalls.length > 0) {
+        await Promise.all(agentInstalls);
       }
       log("All servers are K3s agents");
 
@@ -185,9 +189,8 @@ export function useMongoDBProvisionerK8s() {
 
       log("MongoDB cluster is ready!");
 
-      // 8. Get connection info
-      const status = (readyResource as any).status;
-      const connectionString = buildConnectionString(database, status);
+      // 8. Get connection info using external server IPs
+      const connectionString = buildConnectionString(database, servers);
 
       // 9. Update database record
       await databaseRepo.updateById(databaseId, {
@@ -699,6 +702,12 @@ export function useMongoDBProvisionerK8s() {
             size: replsetSize,
             arbiter: arbiterCount > 0 ? { enabled: true, size: arbiterCount } : undefined,
 
+            // Expose MongoDB externally via NodePort on each node
+            expose: {
+              enabled: true,
+              exposeType: "NodePort",
+            },
+
             // Storage
             volumeSpec: {
               persistentVolumeClaim: {
@@ -764,13 +773,26 @@ export function useMongoDBProvisionerK8s() {
     };
   }
 
-  function buildConnectionString(database: TDatabase, status: any): string {
-    const host = status?.host || `${database.name}-rs0.${DATABASES_NAMESPACE}.svc.cluster.local`;
+  /**
+   * Build connection string using external server IPs
+   * This makes the MongoDB cluster accessible from outside K8s
+   */
+  function buildConnectionString(
+    database: TDatabase,
+    servers: Array<{ server: any; node: TDatabaseNode }>
+  ): string {
+    // Use external server IPs with default MongoDB port
+    // NodePort exposes on the same port (27017) on each node
+    const hosts = servers
+      .filter((s) => s.node.role !== "arbiter")
+      .map((s) => `${s.server.host}:27017`)
+      .join(",");
+    
     const user = encodeURIComponent(database.credentials.adminUser);
     const password = encodeURIComponent(database.credentials.adminPassword);
     const replicaSetName = "rs0";
 
-    return `mongodb://${user}:${password}@${host}:27017/admin?replicaSet=${replicaSetName}`;
+    return `mongodb://${user}:${password}@${hosts}/admin?replicaSet=${replicaSetName}`;
   }
 
   function generatePassword(): string {

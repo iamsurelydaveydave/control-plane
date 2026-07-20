@@ -628,12 +628,16 @@ if [ "$ENABLE_K8S" = "true" ]; then
     log "Configuring K3s for Docker container access..."
     sed -i "s|127.0.0.1:6443|${DOCKER_GATEWAY}:6443|g" /etc/rancher/k3s/k3s.yaml
     
-    # Add firewall rules to allow Docker containers to reach K3s API
-    # This is needed because the default firewall blocks access from Docker networks
+    # Add firewall rules to allow K3s API access
+    # - Docker containers need access via Docker gateway
+    # - External agent nodes need access via public IP
     if command -v iptables >/dev/null 2>&1; then
-        log "Adding firewall rules for Docker-to-K3s communication..."
+        log "Adding firewall rules for K3s API access..."
+        # Allow from Docker networks (for control-plane-api container)
         iptables -I INPUT 1 -s 172.18.0.0/16 -p tcp --dport 6443 -j ACCEPT 2>/dev/null || true
         iptables -I INPUT 1 -s 172.17.0.0/16 -p tcp --dport 6443 -j ACCEPT 2>/dev/null || true
+        # Allow from all (for external K3s agent nodes to join)
+        iptables -I INPUT 1 -p tcp --dport 6443 -j ACCEPT 2>/dev/null || true
         # Persist iptables rules
         if [ -d /etc/iptables ]; then
             iptables-save > /etc/iptables/rules.v4 2>/dev/null || true

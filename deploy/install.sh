@@ -8,6 +8,7 @@
 ## Environment variables:
 ## MONGODB_URI          - MongoDB Atlas connection string (production)
 ## DOMAIN               - Domain for HTTPS (optional, uses IP if not set)
+## ACME_EMAIL           - Email for Let's Encrypt SSL certificates (defaults to ROOT_USER_EMAIL)
 ## ROOT_USERNAME        - Initial admin username
 ## ROOT_USER_EMAIL      - Initial admin email
 ## ROOT_USER_PASSWORD   - Initial admin password
@@ -496,6 +497,8 @@ if [ -n "${DOMAIN:-}" ]; then
     update_env "DOMAIN" "$DOMAIN"
     update_env "COOKIE_DOMAIN" ".$DOMAIN"
     update_env "ALLOWED_ORIGINS" "https://$DOMAIN"
+    # Use admin email for ACME/Let's Encrypt SSL certificates
+    update_env "ACME_EMAIL" "${ROOT_USER_EMAIL:-admin@${DOMAIN}}"
     log_success "Domain configured: $DOMAIN"
 else
     log "No DOMAIN set - will use HTTP on public IP"

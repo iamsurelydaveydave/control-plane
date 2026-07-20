@@ -546,99 +546,80 @@ else
 fi
 
 # ================================
-# Install K3s (Optional - for K8s-based database provisioning)
+# Install K3s (for K8s-based database provisioning)
 # ================================
 
-# Ask about K3s if not set via env var
-if [ -z "${ENABLE_K8S:-}" ]; then
-    echo ""
-    echo -e "${YELLOW}Kubernetes Database Provisioning (optional)${NC}"
-    echo "  K3s enables advanced database provisioning with automatic failover,"
-    echo "  TLS management, and self-healing via the Percona MongoDB Operator."
-    echo ""
-    echo "  Without K3s: Uses Ansible-based provisioning (traditional)"
-    echo "  With K3s: Uses Kubernetes operators (recommended for production)"
-    echo ""
-    echo -ne "${GREEN}→${NC} Enable K3s for database provisioning? [y/N]: "
-    read ENABLE_K8S_ANSWER < /dev/tty
-    if [[ "$ENABLE_K8S_ANSWER" =~ ^[Yy] ]]; then
-        ENABLE_K8S="true"
-    else
+log_section "Step 6b/7: Installing K3s + Percona Operator"
+
+# Check if K3s is already installed
+if command -v k3s >/dev/null 2>&1; then
+    log_success "K3s is already installed"
+    ENABLE_K8S="true"
+else
+    log "Installing K3s server..."
+    ENABLE_K8S="true"
+    
+    # Get public IP for K3s TLS SAN
+    PUBLIC_IP=$(curl -4s --max-time 5 https://ifconfig.io 2>/dev/null || hostname -I | awk '{print $1}')
+    
+    curl -sfL https://get.k3s.io | sh -s - server \
+        --disable traefik \
+        --disable servicelb \
+        --write-kubeconfig-mode 644 \
+        --tls-san "$PUBLIC_IP" 2>&1 || {
+        log_error "K3s installation failed"
+        log_warn "Continuing without K3s - will use Ansible for database provisioning"
         ENABLE_K8S="false"
+    }
+    
+    if [ "$ENABLE_K8S" = "true" ]; then
+        # Wait for K3s to be ready
+        log "Waiting for K3s to be ready..."
+        sleep 10
+        WAITED=0
+        while ! kubectl get nodes >/dev/null 2>&1 && [ $WAITED -lt 60 ]; do
+            sleep 5
+            WAITED=$((WAITED + 5))
+        done
+        
+        if kubectl get nodes >/dev/null 2>&1; then
+            log_success "K3s server installed"
+        else
+            log_error "K3s did not become ready"
+            ENABLE_K8S="false"
+        fi
     fi
 fi
 
+# Install Percona Operator
 if [ "$ENABLE_K8S" = "true" ]; then
-    log_section "Step 6b/7: Installing K3s + Percona Operator"
+    log "Installing Percona MongoDB Operator..."
     
-    # Check if K3s is already installed
-    if command -v k3s >/dev/null 2>&1; then
-        log_success "K3s is already installed"
-    else
-        log "Installing K3s server..."
-        
-        # Get public IP for K3s TLS SAN
-        PUBLIC_IP=$(curl -4s --max-time 5 https://ifconfig.io 2>/dev/null || hostname -I | awk '{print $1}')
-        
-        curl -sfL https://get.k3s.io | sh -s - server \
-            --disable traefik \
-            --disable servicelb \
-            --write-kubeconfig-mode 644 \
-            --tls-san "$PUBLIC_IP" 2>&1 || {
-            log_error "K3s installation failed"
-            log_warn "Continuing without K3s - will use Ansible for database provisioning"
-            ENABLE_K8S="false"
-        }
-        
-        if [ "$ENABLE_K8S" = "true" ]; then
-            # Wait for K3s to be ready
-            log "Waiting for K3s to be ready..."
-            sleep 10
-            WAITED=0
-            while ! kubectl get nodes >/dev/null 2>&1 && [ $WAITED -lt 60 ]; do
-                sleep 5
-                WAITED=$((WAITED + 5))
-            done
-            
-            if kubectl get nodes >/dev/null 2>&1; then
-                log_success "K3s server installed"
-            else
-                log_error "K3s did not become ready"
-                ENABLE_K8S="false"
-            fi
-        fi
-    fi
+    # Apply Percona Operator
+    kubectl apply --server-side -f https://raw.githubusercontent.com/percona/percona-server-mongodb-operator/v1.16.0/deploy/bundle.yaml 2>&1 || {
+        log_warn "Failed to install Percona Operator - continuing anyway"
+    }
     
-    # Install Percona Operator
-    if [ "$ENABLE_K8S" = "true" ]; then
-        log "Installing Percona MongoDB Operator..."
-        
-        # Apply Percona Operator
-        kubectl apply --server-side -f https://raw.githubusercontent.com/percona/percona-server-mongodb-operator/v1.16.0/deploy/bundle.yaml 2>&1 || {
-            log_warn "Failed to install Percona Operator - continuing anyway"
-        }
-        
-        # Create databases namespace
-        kubectl create namespace databases --dry-run=client -o yaml | kubectl apply -f - 2>/dev/null || true
-        
-        # Install operator in databases namespace too
-        kubectl apply --server-side -f https://raw.githubusercontent.com/percona/percona-server-mongodb-operator/v1.16.0/deploy/bundle.yaml -n databases 2>&1 || true
-        
-        # Get K3s token for agent nodes
-        K3S_TOKEN=$(cat /var/lib/rancher/k3s/server/node-token 2>/dev/null || echo "")
-        K3S_SERVER_URL="https://${PUBLIC_IP}:6443"
-        
-        # Update .env with K8s configuration
-        update_env "K8S_ENABLED" "true"
-        update_env "K8S_KUBECONFIG" "/etc/rancher/k3s/k3s.yaml"
-        update_env "K3S_SERVER_URL" "$K3S_SERVER_URL"
-        update_env "K3S_TOKEN" "$K3S_TOKEN"
-        
-        log_success "Percona Operator installed"
-        log "K3s Server URL: $K3S_SERVER_URL"
-    fi
+    # Create databases namespace
+    kubectl create namespace databases --dry-run=client -o yaml | kubectl apply -f - 2>/dev/null || true
+    
+    # Install operator in databases namespace too
+    kubectl apply --server-side -f https://raw.githubusercontent.com/percona/percona-server-mongodb-operator/v1.16.0/deploy/bundle.yaml -n databases 2>&1 || true
+    
+    # Get K3s token for agent nodes
+    K3S_TOKEN=$(cat /var/lib/rancher/k3s/server/node-token 2>/dev/null || echo "")
+    K3S_SERVER_URL="https://${PUBLIC_IP}:6443"
+    
+    # Update .env with K8s configuration
+    update_env "K8S_ENABLED" "true"
+    update_env "K8S_KUBECONFIG" "/etc/rancher/k3s/k3s.yaml"
+    update_env "K3S_SERVER_URL" "$K3S_SERVER_URL"
+    update_env "K3S_TOKEN" "$K3S_TOKEN"
+    
+    log_success "Percona Operator installed"
+    log "K3s Server URL: $K3S_SERVER_URL"
 else
-    # K8s not enabled - use Ansible provisioning
+    # K8s failed to install - use Ansible provisioning as fallback
     update_env "K8S_ENABLED" "false"
     
     # Create empty kubeconfig placeholder so Docker volume mount doesn't fail

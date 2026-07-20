@@ -128,128 +128,98 @@ fi
 log_success "Version set to $TARGET_VERSION"
 
 # ================================
-# Install/Update K3s (Optional)
+# Install/Update K3s
 # ================================
 
-# Check if K8s should be enabled
-ENABLE_K8S="${ENABLE_K8S:-}"
+write_status "4b" "Setting up Kubernetes"
 
-# If not set via env var, check if already configured in .env
-if [ -z "$ENABLE_K8S" ]; then
-    if grep -q "^K8S_ENABLED=true" "$ENV_FILE" 2>/dev/null; then
-        ENABLE_K8S="true"
-    fi
-fi
+# Always install K3s by default
+ENABLE_K8S="true"
 
-# If still not set, ask interactively (only if terminal is available)
-if [ -z "$ENABLE_K8S" ] && [ -t 0 ]; then
-    # Check if K3s is already installed
-    if command -v k3s >/dev/null 2>&1; then
-        log "K3s is already installed"
-        ENABLE_K8S="true"
-    else
-        echo ""
-        echo -e "${YELLOW}Kubernetes Database Provisioning${NC}"
-        echo "  K3s enables advanced database provisioning with automatic failover."
-        echo ""
-        echo -ne "${GREEN}→${NC} Enable K3s for database provisioning? [y/N]: "
-        read -r ENABLE_K8S_ANSWER < /dev/tty
-        if [[ "$ENABLE_K8S_ANSWER" =~ ^[Yy] ]]; then
-            ENABLE_K8S="true"
-        else
-            ENABLE_K8S="false"
-        fi
-    fi
-fi
-
-if [ "$ENABLE_K8S" = "true" ]; then
-    write_status "4b" "Setting up Kubernetes"
-    
-    # Check if K3s is already installed
-    if command -v k3s >/dev/null 2>&1 && systemctl is-active --quiet k3s 2>/dev/null; then
-        log_success "K3s is already installed and running"
-    else
-        log "Installing K3s server..."
-        
-        # Get public IP for K3s TLS SAN
-        PUBLIC_IP=$(curl -4s --max-time 5 https://ifconfig.io 2>/dev/null || hostname -I | awk '{print $1}')
-        
-        curl -sfL https://get.k3s.io | sh -s - server \
-            --disable traefik \
-            --disable servicelb \
-            --write-kubeconfig-mode 644 \
-            --tls-san "$PUBLIC_IP" 2>&1 || {
-            log_error "K3s installation failed"
-            log "Continuing without K3s - will use Ansible for database provisioning"
-            ENABLE_K8S="false"
-        }
-        
-        if [ "$ENABLE_K8S" = "true" ]; then
-            # Wait for K3s to be ready
-            log "Waiting for K3s to be ready..."
-            sleep 10
-            WAITED=0
-            while ! kubectl get nodes >/dev/null 2>&1 && [ $WAITED -lt 60 ]; do
-                sleep 5
-                WAITED=$((WAITED + 5))
-            done
-            
-            if kubectl get nodes >/dev/null 2>&1; then
-                log_success "K3s server installed"
-            else
-                log_error "K3s did not become ready"
-                ENABLE_K8S="false"
-            fi
-        fi
-    fi
-    
-    # Install Percona Operator if K3s is running
-    if [ "$ENABLE_K8S" = "true" ]; then
-        # Check if Percona Operator is already installed
-        if kubectl get deployment percona-server-mongodb-operator >/dev/null 2>&1; then
-            log_success "Percona Operator is already installed"
-        else
-            log "Installing Percona MongoDB Operator..."
-            
-            kubectl apply --server-side -f https://raw.githubusercontent.com/percona/percona-server-mongodb-operator/v1.16.0/deploy/bundle.yaml 2>&1 || {
-                log_error "Failed to install Percona Operator"
-            }
-            
-            # Create databases namespace
-            kubectl create namespace databases --dry-run=client -o yaml | kubectl apply -f - 2>/dev/null || true
-            
-            # Install operator in databases namespace too
-            kubectl apply --server-side -f https://raw.githubusercontent.com/percona/percona-server-mongodb-operator/v1.16.0/deploy/bundle.yaml -n databases 2>&1 || true
-            
-            log_success "Percona Operator installed"
-        fi
-        
-        # Get K3s token and update .env
-        K3S_TOKEN=$(cat /var/lib/rancher/k3s/server/node-token 2>/dev/null || echo "")
-        PUBLIC_IP=$(curl -4s --max-time 5 https://ifconfig.io 2>/dev/null || hostname -I | awk '{print $1}')
-        K3S_SERVER_URL="https://${PUBLIC_IP}:6443"
-        
-        # Update .env with K8s configuration
-        update_env() {
-            local key="$1"
-            local value="$2"
-            if grep -q "^${key}=" "$ENV_FILE"; then
-                sed -i "s|^${key}=.*|${key}=${value}|" "$ENV_FILE"
-            else
-                echo "${key}=${value}" >> "$ENV_FILE"
-            fi
-        }
-        
-        update_env "K8S_ENABLED" "true"
-        update_env "K8S_KUBECONFIG" "/etc/rancher/k3s/k3s.yaml"
-        update_env "K3S_SERVER_URL" "$K3S_SERVER_URL"
-        update_env "K3S_TOKEN" "$K3S_TOKEN"
-        
-        log_success "K8s configuration added to .env"
-        log "K3s Server URL: $K3S_SERVER_URL"
-    fi
+# Check if K3s is already installed and running
+if command -v k3s >/dev/null 2>&1 && systemctl is-active --quiet k3s 2>/dev/null; then
+    log_success "K3s is already installed and running"
 else
-    # Ensure K8S_ENABLED is set to false if not using K8s
+    log "Installing K3s server..."
+    
+    # Get public IP for K3s TLS SAN
+    PUBLIC_IP=$(curl -4s --max-time 5 https://ifconfig.io 2>/dev/null || hostname -I | awk '{print $1}')
+    
+    curl -sfL https://get.k3s.io | sh -s - server \
+        --disable traefik \
+        --disable servicelb \
+        --write-kubeconfig-mode 644 \
+        --tls-san "$PUBLIC_IP" 2>&1 || {
+        log_error "K3s installation failed"
+        log "Continuing without K3s - will use Ansible for database provisioning"
+        ENABLE_K8S="false"
+    }
+    
+    if [ "$ENABLE_K8S" = "true" ]; then
+        # Wait for K3s to be ready
+        log "Waiting for K3s to be ready..."
+        sleep 10
+        WAITED=0
+        while ! kubectl get nodes >/dev/null 2>&1 && [ $WAITED -lt 60 ]; do
+            sleep 5
+            WAITED=$((WAITED + 5))
+        done
+        
+        if kubectl get nodes >/dev/null 2>&1; then
+            log_success "K3s server installed"
+        else
+            log_error "K3s did not become ready"
+            ENABLE_K8S="false"
+        fi
+    fi
+fi
+
+# Install Percona Operator if K3s is running
+if [ "$ENABLE_K8S" = "true" ]; then
+    # Check if Percona Operator is already installed
+    if kubectl get deployment percona-server-mongodb-operator >/dev/null 2>&1; then
+        log_success "Percona Operator is already installed"
+    else
+        log "Installing Percona MongoDB Operator..."
+        
+        kubectl apply --server-side -f https://raw.githubusercontent.com/percona/percona-server-mongodb-operator/v1.16.0/deploy/bundle.yaml 2>&1 || {
+            log_error "Failed to install Percona Operator"
+        }
+        
+        # Create databases namespace
+        kubectl create namespace databases --dry-run=client -o yaml | kubectl apply -f - 2>/dev/null || true
+        
+        # Install operator in databases namespace too
+        kubectl apply --server-side -f https://raw.githubusercontent.com/percona/percona-server-mongodb-operator/v1.16.0/deploy/bundle.yaml -n databases 2>&1 || true
+        
+        log_success "Percona Operator installed"
+    fi
+    
+    # Get K3s token and update .env
+    K3S_TOKEN=$(cat /var/lib/rancher/k3s/server/node-token 2>/dev/null || echo "")
+    PUBLIC_IP=$(curl -4s --max-time 5 https://ifconfig.io 2>/dev/null || hostname -I | awk '{print $1}')
+    K3S_SERVER_URL="https://${PUBLIC_IP}:6443"
+    
+    # Update .env with K8s configuration
+    update_env() {
+        local key="$1"
+        local value="$2"
+        if grep -q "^${key}=" "$ENV_FILE"; then
+            sed -i "s|^${key}=.*|${key}=${value}|" "$ENV_FILE"
+        else
+            echo "${key}=${value}" >> "$ENV_FILE"
+        fi
+    }
+    
+    update_env "K8S_ENABLED" "true"
+    update_env "K8S_KUBECONFIG" "/etc/rancher/k3s/k3s.yaml"
+    update_env "K3S_SERVER_URL" "$K3S_SERVER_URL"
+    update_env "K3S_TOKEN" "$K3S_TOKEN"
+    
+    log_success "K8s configuration added to .env"
+    log "K3s Server URL: $K3S_SERVER_URL"
+else
+    # K3s failed - use Ansible as fallback
     if ! grep -q "^K8S_ENABLED=" "$ENV_FILE"; then
         echo "K8S_ENABLED=false" >> "$ENV_FILE"
     fi

@@ -565,11 +565,15 @@ else
     # Get public IP for K3s TLS SAN
     PUBLIC_IP=$(curl -4s --max-time 5 https://ifconfig.io 2>/dev/null || hostname -I | awk '{print $1}')
     
+    # Install K3s with TLS SANs for public IP and Docker gateway IPs
+    # Docker containers need to access K3s via the Docker network gateway (172.18.0.1, 172.17.0.1)
     curl -sfL https://get.k3s.io | sh -s - server \
         --disable traefik \
         --disable servicelb \
         --write-kubeconfig-mode 644 \
-        --tls-san "$PUBLIC_IP" 2>&1 || {
+        --tls-san "$PUBLIC_IP" \
+        --tls-san "172.18.0.1" \
+        --tls-san "172.17.0.1" 2>&1 || {
         log_error "K3s installation failed"
         log_warn "Continuing without K3s - will use Ansible for database provisioning"
         ENABLE_K8S="false"
@@ -611,7 +615,30 @@ if [ "$ENABLE_K8S" = "true" ]; then
     
     # Get K3s token for agent nodes
     K3S_TOKEN=$(cat /var/lib/rancher/k3s/server/node-token 2>/dev/null || echo "")
-    K3S_SERVER_URL="https://${PUBLIC_IP}:6443"
+    
+    # Configure K3s access for Docker containers
+    # Docker containers can't use 127.0.0.1 - they need to use the Docker network gateway
+    # The control-plane network uses 172.18.0.0/16 by default, gateway is 172.18.0.1
+    DOCKER_GATEWAY="172.18.0.1"
+    K3S_SERVER_URL="https://${DOCKER_GATEWAY}:6443"
+    
+    # Update kubeconfig to use Docker gateway instead of localhost
+    log "Configuring K3s for Docker container access..."
+    sed -i "s|127.0.0.1:6443|${DOCKER_GATEWAY}:6443|g" /etc/rancher/k3s/k3s.yaml
+    
+    # Add firewall rules to allow Docker containers to reach K3s API
+    # This is needed because the default firewall blocks access from Docker networks
+    if command -v iptables >/dev/null 2>&1; then
+        log "Adding firewall rules for Docker-to-K3s communication..."
+        iptables -I INPUT 1 -s 172.18.0.0/16 -p tcp --dport 6443 -j ACCEPT 2>/dev/null || true
+        iptables -I INPUT 1 -s 172.17.0.0/16 -p tcp --dport 6443 -j ACCEPT 2>/dev/null || true
+        # Persist iptables rules
+        if [ -d /etc/iptables ]; then
+            iptables-save > /etc/iptables/rules.v4 2>/dev/null || true
+        else
+            iptables-save > /etc/iptables.rules 2>/dev/null || true
+        fi
+    fi
     
     # Update .env with K8s configuration
     update_env "K8S_ENABLED" "true"
@@ -620,7 +647,7 @@ if [ "$ENABLE_K8S" = "true" ]; then
     update_env "K3S_TOKEN" "$K3S_TOKEN"
     
     log_success "Percona Operator installed"
-    log "K3s Server URL: $K3S_SERVER_URL"
+    log "K3s Server URL: $K3S_SERVER_URL (accessible from Docker containers)"
 else
     # K8s failed to install - use Ansible provisioning as fallback
     update_env "K8S_ENABLED" "false"

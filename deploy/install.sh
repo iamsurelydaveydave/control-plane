@@ -285,8 +285,12 @@ skaffold_build() {
 
     local src_dir="${DATA_DIR}/source"
 
+    # Skaffold resolves artifact contexts relative to the working directory,
+    # so we must cd into the source tree where skaffold.yaml lives.
+    cd "$src_dir" || { log_error "Cannot cd to ${src_dir}"; exit 1; }
+
     # skaffold build -p k3s runs the customBuild for each artifact:
-    #   docker build -t "$IMAGE" ... && docker save "$IMAGE" | k3s ctr images import -
+    #   nerdctl build -t "$IMAGE" ... (directly into K3s containerd)
     # --tag pins the image tag to $VERSION (default: latest) so the
     # Kubernetes manifests that reference :${VERSION} resolve correctly.
     log "Running: skaffold build --profile k3s --tag ${VERSION}"
@@ -294,8 +298,6 @@ skaffold_build() {
         skaffold build \
             --profile k3s \
             --tag "${VERSION}" \
-            --filename "${src_dir}/skaffold.yaml" \
-            --default-repo "" \
             2>&1
 
     log_success "Images built and imported into K3s containerd"

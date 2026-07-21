@@ -416,9 +416,13 @@ preflight_checks() {
     log_success "Running as root"
     
     # Check OS
+    # Note: /etc/os-release contains a VERSION variable that would clobber ours,
+    # so we save and restore it.
     if [ -f /etc/os-release ]; then
+        local _cp_version="$VERSION"
         . /etc/os-release
         log_success "OS: $NAME $VERSION_ID"
+        VERSION="$_cp_version"
     else
         log_warn "Could not detect OS"
     fi

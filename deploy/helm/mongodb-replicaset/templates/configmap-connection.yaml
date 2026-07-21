@@ -1,0 +1,73 @@
+{{/*
+ConfigMap with connection info for Control Plane discovery.
+The Control Plane API reads this to provide connection details to users.
+*/}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "mongodb-replicaset.fullname" . }}-connection
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "mongodb-replicaset.labels" . | nindent 4 }}
+    app.kubernetes.io/component: connection-info
+    control-plane.dev/resource-type: mongodb
+  annotations:
+    {{- with .Values.controlPlane.annotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+data:
+  # Resource type for Control Plane categorization
+  type: "mongodb"
+  
+  # Architecture
+  architecture: {{ .Values.mongodb.architecture | quote }}
+  
+  # Replica set info
+  replica-set-name: {{ .Values.mongodb.replicaSetName | quote }}
+  replica-count: {{ .Values.mongodb.replicaCount | quote }}
+  
+  # Service names
+  service-name: {{ include "mongodb-replicaset.mongodb.fullname" . | quote }}
+  headless-service: {{ include "mongodb-replicaset.mongodb.headless" . | quote }}
+  
+  # Port
+  port: "27017"
+  
+  # Internal connection string (without auth)
+  connection-string: {{ include "mongodb-replicaset.connectionString" . | quote }}
+  
+  # TLS status
+  tls-enabled: {{ .Values.mongodb.tls.enabled | quote }}
+  
+  # Metrics status
+  metrics-enabled: {{ .Values.mongodb.metrics.enabled | quote }}
+  
+  {{- if .Values.mongodb.externalAccess.enabled }}
+  # External access
+  external-access-enabled: "true"
+  external-access-type: {{ .Values.mongodb.externalAccess.service.type | quote }}
+  {{- else }}
+  external-access-enabled: "false"
+  {{- end }}
+  
+  # DNS configuration (MongoDB Atlas-style)
+  {{- if .Values.dns.enabled }}
+  dns-enabled: "true"
+  dns-subdomain: {{ .Values.dns.subdomain | default .Release.Name | quote }}
+  dns-base-domain: {{ .Values.dns.baseDomain | quote }}
+  dns-cluster-host: {{ printf "%s.%s" (.Values.dns.subdomain | default .Release.Name) .Values.dns.baseDomain | quote }}
+  dns-srv-connection-string: {{ printf "mongodb+srv://%s.%s/" (.Values.dns.subdomain | default .Release.Name) .Values.dns.baseDomain | quote }}
+  {{- else }}
+  dns-enabled: "false"
+  {{- end }}
+  
+  # Backup configuration
+  {{- if .Values.backup.enabled }}
+  backup-enabled: "true"
+  backup-schedule: {{ .Values.backup.schedule | quote }}
+  backup-s3-bucket: {{ .Values.backup.s3.bucket | quote }}
+  backup-s3-prefix: {{ .Values.backup.s3.prefix | quote }}
+  backup-retention: {{ .Values.backup.retention | quote }}
+  {{- else }}
+  backup-enabled: "false"
+  {{- end }}

@@ -44,6 +44,17 @@ type TResourceCatalogItem = {
 const catalog: TResourceCatalogItem[] = [
   // ── Databases ──────────────────────────────────────────────────────────────
   {
+    type: 'mongodb-replicaset',
+    name: 'MongoDB Replica Set',
+    description: 'Production-grade 3-node replica set with TLS, backups, and automatic failover.',
+    icon: 'i-simple-icons-mongodb',
+    iconColor: 'text-green-600',
+    category: 'database',
+    tags: ['nosql', 'document', 'replica set', 'production', 'ha'],
+    defaultPort: 27017,
+    hasConfig: true
+  },
+  {
     type: 'mongodb',
     name: 'MongoDB',
     description: 'Document database with replica set support for high availability.',
@@ -555,7 +566,19 @@ const deployForm = reactive({
   database: '',
   // Redis-specific
   clusterMode: false,
-  redisPassword: ''
+  redisPassword: '',
+  // MongoDB Replica Set — DNS
+  dnsEnabled: false,
+  dnsSubdomain: '',
+  // MongoDB Replica Set — S3 Backup
+  backupEnabled: false,
+  backupSchedule: '0 2 * * *',
+  backupRetention: 7,
+  backupS3Bucket: '',
+  backupS3Region: 'us-east-1',
+  backupS3AccessKeyId: '',
+  backupS3SecretAccessKey: '',
+  backupS3Endpoint: ''
 })
 
 function generatePassword(length = 24): string {
@@ -568,7 +591,7 @@ function openDeploy(item: TResourceCatalogItem) {
   deployForm.name = item.type
   deployForm.namespace = 'cp-resources'
   // Reset all config
-  deployForm.replicas = item.type === 'mongodb' ? 3 : 1
+  deployForm.replicas = item.type === 'mongodb-replicaset' ? 3 : item.type === 'mongodb' ? 3 : 1
   deployForm.tls = true
   deployForm.rootPassword = generatePassword()
   deployForm.createUser = false
@@ -577,6 +600,16 @@ function openDeploy(item: TResourceCatalogItem) {
   deployForm.database = ''
   deployForm.clusterMode = false
   deployForm.redisPassword = generatePassword(32)
+  deployForm.dnsEnabled = false
+  deployForm.dnsSubdomain = ''
+  deployForm.backupEnabled = false
+  deployForm.backupSchedule = '0 2 * * *'
+  deployForm.backupRetention = 7
+  deployForm.backupS3Bucket = ''
+  deployForm.backupS3Region = 'us-east-1'
+  deployForm.backupS3AccessKeyId = ''
+  deployForm.backupS3SecretAccessKey = ''
+  deployForm.backupS3Endpoint = ''
   dialogDeploy.value = true
 }
 
@@ -636,6 +669,37 @@ async function submitDeploy() {
       config.clusterMode = deployForm.clusterMode
       if (deployForm.clusterMode) {
         config.replicas = deployForm.replicas
+      }
+    }
+
+    // MongoDB Replica Set config
+    if (type === 'mongodb-replicaset') {
+      config.replicas = deployForm.replicas
+      config.tls = deployForm.tls
+      config.rootPassword = deployForm.rootPassword
+      if (deployForm.createUser && deployForm.username && deployForm.password && deployForm.database) {
+        config.users = [{
+          username: deployForm.username,
+          password: deployForm.password,
+          database: deployForm.database
+        }]
+      }
+      if (deployForm.dnsEnabled) {
+        config.dns = { enabled: true, subdomain: deployForm.dnsSubdomain || undefined }
+      }
+      if (deployForm.backupEnabled && deployForm.backupS3Bucket) {
+        config.backup = {
+          enabled: true,
+          schedule: deployForm.backupSchedule,
+          retention: deployForm.backupRetention,
+          s3: {
+            bucket: deployForm.backupS3Bucket,
+            region: deployForm.backupS3Region,
+            accessKeyId: deployForm.backupS3AccessKeyId,
+            secretAccessKey: deployForm.backupS3SecretAccessKey,
+            ...(deployForm.backupS3Endpoint ? { endpoint: deployForm.backupS3Endpoint } : {})
+          }
+        }
       }
     }
 
@@ -806,13 +870,15 @@ function getCatalogItem(type: string): TResourceCatalogItem | undefined {
 // Check if type is a database that needs config
 const isDatabaseType = computed(() => {
   const t = deployTarget.value?.type
-  return t === 'mongodb' || t === 'postgresql' || t === 'mysql' || t === 'mariadb'
+  return t === 'mongodb' || t === 'mongodb-replicaset' || t === 'postgresql' || t === 'mysql' || t === 'mariadb'
 })
 
 const isRedisType = computed(() => {
   const t = deployTarget.value?.type
   return t === 'redis' || t === 'keydb' || t === 'dragonfly'
 })
+
+const isMongoReplicaset = computed(() => deployTarget.value?.type === 'mongodb-replicaset')
 
 useHead({ title: 'Resources · Control Plane' })
 </script>
@@ -1262,6 +1328,111 @@ useHead({ title: 'Resources · Control Plane' })
             </template>
           </template>
 
+          <!-- MongoDB Replica Set — DNS + Backup -->
+          <template v-if="isMongoReplicaset">
+            <USeparator label="DNS (Atlas-style mongodb+srv://)" />
+
+            <div class="flex items-center justify-between rounded-lg border border-default bg-default/30 px-4 py-3">
+              <div>
+                <p class="font-medium text-sm">Enable DNS Integration</p>
+                <p class="text-xs text-muted">Creates Cloudflare A + SRV records for mongodb+srv://</p>
+              </div>
+              <USwitch v-model="deployForm.dnsEnabled" />
+            </div>
+
+            <UFormField
+              v-if="deployForm.dnsEnabled"
+              label="Subdomain"
+              description="e.g. 'mydb' creates mydb.db.example.com"
+            >
+              <UInput
+                v-model="deployForm.dnsSubdomain"
+                placeholder="mydb"
+                class="w-full"
+              />
+            </UFormField>
+
+            <USeparator label="S3 Backup" />
+
+            <div class="flex items-center justify-between rounded-lg border border-default bg-default/30 px-4 py-3">
+              <div>
+                <p class="font-medium text-sm">Enable Automated Backups</p>
+                <p class="text-xs text-muted">Scheduled mongodump uploads to S3 or S3-compatible storage</p>
+              </div>
+              <USwitch v-model="deployForm.backupEnabled" />
+            </div>
+
+            <template v-if="deployForm.backupEnabled">
+              <UFormField label="S3 Bucket" required>
+                <UInput
+                  v-model="deployForm.backupS3Bucket"
+                  placeholder="my-backup-bucket"
+                  class="w-full"
+                />
+              </UFormField>
+
+              <div class="grid grid-cols-2 gap-3">
+                <UFormField label="Region">
+                  <UInput
+                    v-model="deployForm.backupS3Region"
+                    placeholder="us-east-1"
+                    class="w-full"
+                  />
+                </UFormField>
+
+                <UFormField label="Retention (backups)">
+                  <UInput
+                    v-model.number="deployForm.backupRetention"
+                    type="number"
+                    min="1"
+                    max="90"
+                    placeholder="7"
+                    class="w-full"
+                  />
+                </UFormField>
+
+                <UFormField label="Access Key ID">
+                  <UInput
+                    v-model="deployForm.backupS3AccessKeyId"
+                    placeholder="AKIAIOSFODNN7EXAMPLE"
+                    class="w-full"
+                  />
+                </UFormField>
+
+                <UFormField label="Secret Access Key">
+                  <UInput
+                    v-model="deployForm.backupS3SecretAccessKey"
+                    type="password"
+                    placeholder="••••••••"
+                    class="w-full"
+                  />
+                </UFormField>
+              </div>
+
+              <UFormField
+                label="Schedule (cron)"
+                description="When to run backups. Default: daily at 2 AM UTC."
+              >
+                <UInput
+                  v-model="deployForm.backupSchedule"
+                  placeholder="0 2 * * *"
+                  class="w-full"
+                />
+              </UFormField>
+
+              <UFormField
+                label="Endpoint (optional)"
+                description="Leave empty for AWS S3. Set for MinIO or other S3-compatible storage."
+              >
+                <UInput
+                  v-model="deployForm.backupS3Endpoint"
+                  placeholder="https://s3.example.com"
+                  class="w-full"
+                />
+              </UFormField>
+            </template>
+          </template>
+
           <!-- Redis config -->
           <template v-if="isRedisType">
             <USeparator label="Redis Configuration" />
@@ -1468,6 +1639,24 @@ useHead({ title: 'Resources · Control Plane' })
                   variant="ghost"
                   size="sm"
                   @click="copyToClipboard(connectionInfo.connectionString!)"
+                />
+              </div>
+            </UFormField>
+
+            <UFormField
+              v-if="(connectionInfo as any).srvConnectionString"
+              label="Connection String (Atlas-style)"
+            >
+              <div class="flex items-center gap-2">
+                <code class="flex-1 text-xs bg-muted px-3 py-2 rounded font-mono break-all">
+                  {{ (connectionInfo as any).srvConnectionString }}
+                </code>
+                <UButton
+                  icon="i-lucide-copy"
+                  color="neutral"
+                  variant="ghost"
+                  size="sm"
+                  @click="copyToClipboard((connectionInfo as any).srvConnectionString)"
                 />
               </div>
             </UFormField>

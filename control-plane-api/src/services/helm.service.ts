@@ -124,6 +124,32 @@ export function useHelmService() {
       await ensureBitnamiRepo();
     }
 
+    // Resolve local chart paths (control-plane/* charts)
+    let resolvedChart = chart;
+    if (chart.startsWith("control-plane/")) {
+      const chartName = chart.replace("control-plane/", "");
+      // Local charts are in deploy/helm/<chart-name>
+      const localChartPath = path.join(__dirname, "../../..", "deploy/helm", chartName);
+      if (fs.existsSync(localChartPath)) {
+        resolvedChart = localChartPath;
+        logger.log({
+          level: "info",
+          message: `[Helm] Using local chart: ${localChartPath}`,
+        });
+        // Run helm dependency update for local charts
+        try {
+          await runHelmCommand(["dependency", "update", resolvedChart]);
+        } catch (depError: any) {
+          logger.log({
+            level: "warn",
+            message: `[Helm] Dependency update warning: ${depError.message}`,
+          });
+        }
+      } else {
+        throw new InternalServerError(`Local chart not found: ${localChartPath}`);
+      }
+    }
+
     // Create temporary values file
     const valuesFile = await writeValuesFile(values);
 
@@ -131,7 +157,7 @@ export function useHelmService() {
       const args: string[] = [
         "install",
         releaseName,
-        chart,
+        resolvedChart,
         "--namespace",
         namespace,
         "--values",
@@ -140,7 +166,7 @@ export function useHelmService() {
         "json",
       ];
 
-      if (options.version) {
+      if (options.version && !chart.startsWith("control-plane/")) {
         args.push("--version", options.version);
       }
 
@@ -194,6 +220,30 @@ export function useHelmService() {
       await ensureBitnamiRepo();
     }
 
+    // Resolve local chart paths (control-plane/* charts)
+    let resolvedChart = chart;
+    if (chart.startsWith("control-plane/")) {
+      const chartName = chart.replace("control-plane/", "");
+      const localChartPath = path.join(__dirname, "../../..", "deploy/helm", chartName);
+      if (fs.existsSync(localChartPath)) {
+        resolvedChart = localChartPath;
+        logger.log({
+          level: "info",
+          message: `[Helm] Using local chart: ${localChartPath}`,
+        });
+        try {
+          await runHelmCommand(["dependency", "update", resolvedChart]);
+        } catch (depError: any) {
+          logger.log({
+            level: "warn",
+            message: `[Helm] Dependency update warning: ${depError.message}`,
+          });
+        }
+      } else {
+        throw new InternalServerError(`Local chart not found: ${localChartPath}`);
+      }
+    }
+
     // Create temporary values file
     const valuesFile = await writeValuesFile(values);
 
@@ -201,7 +251,7 @@ export function useHelmService() {
       const args: string[] = [
         "upgrade",
         releaseName,
-        chart,
+        resolvedChart,
         "--namespace",
         namespace,
         "--values",
@@ -210,7 +260,7 @@ export function useHelmService() {
         "json",
       ];
 
-      if (options.version) {
+      if (options.version && !chart.startsWith("control-plane/")) {
         args.push("--version", options.version);
       }
 

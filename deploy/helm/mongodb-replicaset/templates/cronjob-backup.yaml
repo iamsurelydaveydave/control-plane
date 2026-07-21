@@ -1,0 +1,152 @@
+{{- if .Values.backup.enabled }}
+{{- $fullname := include "mongodb-replicaset.fullname" . -}}
+{{- $namespace := .Release.Namespace -}}
+---
+# Secret for S3 credentials (only if not using existingSecret)
+{{- if and (not .Values.backup.s3.existingSecret) .Values.backup.s3.accessKeyId }}
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ $fullname }}-backup-s3
+  namespace: {{ $namespace }}
+  labels:
+    {{- include "mongodb-replicaset.labels" . | nindent 4 }}
+    app.kubernetes.io/component: backup
+type: Opaque
+stringData:
+  AWS_ACCESS_KEY_ID: {{ .Values.backup.s3.accessKeyId | quote }}
+  AWS_SECRET_ACCESS_KEY: {{ .Values.backup.s3.secretAccessKey | quote }}
+{{- end }}
+---
+# ConfigMap with backup script
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $fullname }}-backup-script
+  namespace: {{ $namespace }}
+  labels:
+    {{- include "mongodb-replicaset.labels" . | nindent 4 }}
+    app.kubernetes.io/component: backup
+data:
+  backup.sh: |
+    #!/bin/bash
+    set -euo pipefail
+    
+    echo "$(date '+%Y-%m-%d %H:%M:%S') Starting MongoDB backup..."
+    
+    # Generate backup filename with timestamp
+    TIMESTAMP=$(date +%Y%m%d-%H%M%S)
+    BACKUP_NAME="{{ $fullname }}-${TIMESTAMP}"
+    BACKUP_FILE="/tmp/${BACKUP_NAME}.archive.gz"
+    
+    # Build connection string
+    MONGODB_URI="mongodb://${MONGODB_ROOT_USER}:${MONGODB_ROOT_PASSWORD}@{{ include "mongodb-replicaset.mongodb.fullname" . }}-0.{{ include "mongodb-replicaset.mongodb.headless" . }}.{{ $namespace }}.svc.cluster.local:27017,{{ include "mongodb-replicaset.mongodb.fullname" . }}-1.{{ include "mongodb-replicaset.mongodb.headless" . }}.{{ $namespace }}.svc.cluster.local:27017,{{ include "mongodb-replicaset.mongodb.fullname" . }}-2.{{ include "mongodb-replicaset.mongodb.headless" . }}.{{ $namespace }}.svc.cluster.local:27017/?replicaSet={{ .Values.mongodb.replicaSetName }}&authSource=admin"
+    
+    # Run mongodump
+    echo "Running mongodump..."
+    mongodump --uri="${MONGODB_URI}" --archive="${BACKUP_FILE}" --gzip
+    
+    BACKUP_SIZE=$(du -h "${BACKUP_FILE}" | cut -f1)
+    echo "Backup created: ${BACKUP_FILE} (${BACKUP_SIZE})"
+    
+    # Upload to S3
+    echo "Uploading to S3..."
+    S3_PATH="s3://{{ .Values.backup.s3.bucket }}/{{ .Values.backup.s3.prefix }}/${BACKUP_NAME}.archive.gz"
+    
+    {{- if .Values.backup.s3.endpoint }}
+    aws s3 cp "${BACKUP_FILE}" "${S3_PATH}" --endpoint-url "{{ .Values.backup.s3.endpoint }}"
+    {{- else }}
+    aws s3 cp "${BACKUP_FILE}" "${S3_PATH}"
+    {{- end }}
+    
+    echo "Uploaded to: ${S3_PATH}"
+    
+    # Cleanup old backups (keep last N)
+    echo "Cleaning up old backups (keeping last {{ .Values.backup.retention }})..."
+    {{- if .Values.backup.s3.endpoint }}
+    aws s3 ls "s3://{{ .Values.backup.s3.bucket }}/{{ .Values.backup.s3.prefix }}/" --endpoint-url "{{ .Values.backup.s3.endpoint }}" | \
+    {{- else }}
+    aws s3 ls "s3://{{ .Values.backup.s3.bucket }}/{{ .Values.backup.s3.prefix }}/" | \
+    {{- end }}
+      grep "{{ $fullname }}" | \
+      sort -r | \
+      tail -n +{{ add .Values.backup.retention 1 }} | \
+      awk '{print $4}' | \
+      while read -r old_backup; do
+        if [ -n "$old_backup" ]; then
+          echo "Deleting old backup: $old_backup"
+          {{- if .Values.backup.s3.endpoint }}
+          aws s3 rm "s3://{{ .Values.backup.s3.bucket }}/{{ .Values.backup.s3.prefix }}/$old_backup" --endpoint-url "{{ .Values.backup.s3.endpoint }}"
+          {{- else }}
+          aws s3 rm "s3://{{ .Values.backup.s3.bucket }}/{{ .Values.backup.s3.prefix }}/$old_backup"
+          {{- end }}
+        fi
+      done
+    
+    # Cleanup local file
+    rm -f "${BACKUP_FILE}"
+    
+    echo "$(date '+%Y-%m-%d %H:%M:%S') Backup completed successfully!"
+---
+# CronJob for scheduled backups
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ $fullname }}-backup
+  namespace: {{ $namespace }}
+  labels:
+    {{- include "mongodb-replicaset.labels" . | nindent 4 }}
+    app.kubernetes.io/component: backup
+spec:
+  schedule: {{ .Values.backup.schedule | quote }}
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      template:
+        metadata:
+          labels:
+            {{- include "mongodb-replicaset.selectorLabels" . | nindent 12 }}
+            app.kubernetes.io/component: backup
+        spec:
+          restartPolicy: OnFailure
+          containers:
+            - name: backup
+              image: "{{ .Values.backup.image.repository }}:{{ .Values.backup.image.tag }}"
+              imagePullPolicy: {{ .Values.backup.image.pullPolicy | default "IfNotPresent" }}
+              command:
+                - /bin/bash
+                - /scripts/backup.sh
+              env:
+                - name: MONGODB_ROOT_USER
+                  value: {{ .Values.mongodb.auth.rootUser | default "root" | quote }}
+                - name: MONGODB_ROOT_PASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ $fullname }}-mongodb
+                      key: mongodb-root-password
+                - name: AWS_DEFAULT_REGION
+                  value: {{ .Values.backup.s3.region | quote }}
+                - name: AWS_ACCESS_KEY_ID
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ .Values.backup.s3.existingSecret | default (printf "%s-backup-s3" $fullname) }}
+                      key: AWS_ACCESS_KEY_ID
+                - name: AWS_SECRET_ACCESS_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ .Values.backup.s3.existingSecret | default (printf "%s-backup-s3" $fullname) }}
+                      key: AWS_SECRET_ACCESS_KEY
+              volumeMounts:
+                - name: scripts
+                  mountPath: /scripts
+              resources:
+                {{- toYaml .Values.backup.resources | nindent 16 }}
+          volumes:
+            - name: scripts
+              configMap:
+                name: {{ $fullname }}-backup-script
+                defaultMode: 0755
+{{- end }}

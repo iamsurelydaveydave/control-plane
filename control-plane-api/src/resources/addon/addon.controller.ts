@@ -292,6 +292,111 @@ export function useAddonController() {
     }
   }
 
+  // ---------------------------------------------------------------------------
+  // DNS Operations
+  // ---------------------------------------------------------------------------
+
+  /**
+   * POST /addons/:id/dns
+   * Configure DNS for a mongodb-replicaset (Atlas-style subdomain)
+   */
+  async function configureDNS(req: Request, res: Response, next: NextFunction) {
+    try {
+      const id = req.params.id as string;
+      const { subdomain } = req.body;
+
+      const result = await service.configureDNS(id, { subdomain });
+
+      res.status(201).json(result);
+    } catch (error) {
+      next(error);
+    }
+  }
+
+  /**
+   * DELETE /addons/:id/dns
+   * Remove DNS configuration
+   */
+  async function removeDNS(req: Request, res: Response, next: NextFunction) {
+    try {
+      const id = req.params.id as string;
+
+      const result = await service.removeDNS(id);
+
+      res.json(result);
+    } catch (error) {
+      next(error);
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Backup Operations
+  // ---------------------------------------------------------------------------
+
+  /**
+   * POST /addons/:id/backup/config
+   * Configure S3 backup for a mongodb-replicaset
+   */
+  async function configureBackup(req: Request, res: Response, next: NextFunction) {
+    try {
+      const id = req.params.id as string;
+      const { enabled, schedule, retention, s3 } = req.body;
+
+      if (enabled && (!s3 || !s3.bucket)) {
+        next(new BadRequestError("S3 bucket is required when backup is enabled."));
+        return;
+      }
+
+      if (enabled && (!s3.accessKeyId || !s3.secretAccessKey)) {
+        next(new BadRequestError("S3 credentials are required when backup is enabled."));
+        return;
+      }
+
+      const result = await service.configureBackup(id, {
+        enabled: enabled === true,
+        schedule,
+        retention,
+        s3,
+      });
+
+      res.json(result);
+    } catch (error) {
+      next(error);
+    }
+  }
+
+  /**
+   * POST /addons/:id/backup
+   * Trigger an on-demand backup
+   */
+  async function triggerBackup(req: Request, res: Response, next: NextFunction) {
+    try {
+      const id = req.params.id as string;
+
+      const result = await service.triggerBackup(id);
+
+      res.status(201).json(result);
+    } catch (error) {
+      next(error);
+    }
+  }
+
+  /**
+   * GET /addons/:id/backups
+   * List backup jobs
+   */
+  async function listBackups(req: Request, res: Response, next: NextFunction) {
+    try {
+      const id = req.params.id as string;
+
+      const result = await service.listBackups(id);
+
+      res.json(result);
+    } catch (error) {
+      next(error);
+    }
+  }
+
   return {
     list,
     getCatalog,
@@ -306,5 +411,13 @@ export function useAddonController() {
     restart,
     getLogs,
     getEvents,
+    scale,
+    // DNS
+    configureDNS,
+    removeDNS,
+    // Backup
+    configureBackup,
+    triggerBackup,
+    listBackups,
   };
 }

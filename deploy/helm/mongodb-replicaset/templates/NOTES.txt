@@ -1,0 +1,159 @@
+MongoDB Replica Set deployed!
+
+{{- $fullname := include "mongodb-replicaset.fullname" . }}
+{{- $namespace := .Release.Namespace }}
+{{- $replicaCount := int .Values.mongodb.replicaCount }}
+{{- $rsName := .Values.mongodb.replicaSetName }}
+
+==============================================================================
+ MONGODB REPLICA SET: {{ $fullname }}
+==============================================================================
+
+Architecture: {{ .Values.mongodb.architecture }}
+Replicas:     {{ $replicaCount }}
+Replica Set:  {{ $rsName }}
+
+------------------------------------------------------------------------------
+ CONNECTION
+------------------------------------------------------------------------------
+
+1. Internal Connection String (within the cluster):
+
+   {{ include "mongodb-replicaset.connectionString" . }}
+
+2. Get the root password:
+
+   export MONGODB_ROOT_PASSWORD=$(kubectl get secret --namespace {{ $namespace }} {{ $fullname }}-mongodb -o jsonpath="{.data.mongodb-root-password}" | base64 -d)
+
+3. Connect using mongosh:
+
+   kubectl run --namespace {{ $namespace }} {{ $fullname }}-client --rm --tty -i --restart='Never' \
+     --image docker.io/bitnami/mongodb:{{ .Chart.AppVersion }} \
+     --command -- mongosh "{{ include "mongodb-replicaset.connectionString" . }}" \
+     --username root --password $MONGODB_ROOT_PASSWORD
+
+{{- if .Values.mongodb.externalAccess.enabled }}
+
+4. External Access:
+   {{- if eq .Values.mongodb.externalAccess.service.type "NodePort" }}
+   
+   The replica set is exposed via NodePort services.
+   Get the node ports:
+   
+   kubectl get svc --namespace {{ $namespace }} -l "app.kubernetes.io/instance={{ .Release.Name }}"
+   
+   {{- else if eq .Values.mongodb.externalAccess.service.type "LoadBalancer" }}
+   
+   The replica set is exposed via LoadBalancer services.
+   Get the external IPs:
+   
+   kubectl get svc --namespace {{ $namespace }} -l "app.kubernetes.io/instance={{ .Release.Name }}" -o wide
+   
+   {{- end }}
+{{- end }}
+
+{{- if .Values.dns.enabled }}
+
+------------------------------------------------------------------------------
+ DNS (MongoDB Atlas-style)
+------------------------------------------------------------------------------
+
+DNS is configured for this cluster.
+
+Cluster Host: {{ .Values.dns.subdomain | default .Release.Name }}.{{ .Values.dns.baseDomain }}
+
+SRV Connection String (recommended):
+
+   mongodb+srv://<username>:<password>@{{ .Values.dns.subdomain | default .Release.Name }}.{{ .Values.dns.baseDomain }}/
+
+This connection string will automatically discover all replica set members.
+
+{{- end }}
+
+{{- if .Values.mongodb.tls.enabled }}
+
+------------------------------------------------------------------------------
+ TLS
+------------------------------------------------------------------------------
+
+TLS is enabled. To connect with TLS:
+
+1. Get the CA certificate:
+
+   kubectl get secret --namespace {{ $namespace }} {{ $fullname }}-mongodb-ca -o jsonpath="{.data.ca\.crt}" | base64 -d > ca.crt
+
+2. Connect with TLS:
+
+   mongosh "{{ include "mongodb-replicaset.connectionString" . }}" \
+     --username root --password $MONGODB_ROOT_PASSWORD \
+     --tls --tlsCAFile ca.crt
+
+{{- end }}
+
+{{- if .Values.backup.enabled }}
+
+------------------------------------------------------------------------------
+ BACKUPS (S3)
+------------------------------------------------------------------------------
+
+Automated backups are configured:
+
+  Schedule:   {{ .Values.backup.schedule }}
+  Retention:  {{ .Values.backup.retention }} backups
+  S3 Bucket:  {{ .Values.backup.s3.bucket }}
+  S3 Prefix:  {{ .Values.backup.s3.prefix }}
+
+To trigger a manual backup:
+
+   kubectl create job --from=cronjob/{{ $fullname }}-backup {{ $fullname }}-backup-manual-$(date +%s) -n {{ $namespace }}
+
+To list backup jobs:
+
+   kubectl get jobs -n {{ $namespace }} -l "app.kubernetes.io/component=backup"
+
+To check backup logs:
+
+   kubectl logs job/{{ $fullname }}-backup-<suffix> -n {{ $namespace }}
+
+{{- end }}
+
+{{- if .Values.mongodb.metrics.enabled }}
+
+------------------------------------------------------------------------------
+ METRICS
+------------------------------------------------------------------------------
+
+Prometheus metrics are available at:
+  http://{{ $fullname }}-mongodb-metrics:9216/metrics
+
+{{- if .Values.mongodb.metrics.serviceMonitor.enabled }}
+A ServiceMonitor has been created for Prometheus Operator.
+{{- end }}
+{{- end }}
+
+------------------------------------------------------------------------------
+ NEXT STEPS
+------------------------------------------------------------------------------
+
+• Verify replica set health:
+  kubectl exec -it {{ $fullname }}-mongodb-0 -n {{ $namespace }} -- mongosh --eval "rs.status()"
+
+• Check pod status:
+  kubectl get pods -n {{ $namespace }} -l "app.kubernetes.io/instance={{ .Release.Name }}"
+
+• View logs:
+  kubectl logs -f {{ $fullname }}-mongodb-0 -n {{ $namespace }}
+
+{{- if not .Values.mongodb.auth.rootPassword }}
+
+⚠️  WARNING: No root password was provided. A random password was generated.
+    Make sure to retrieve it using the command above before the secret is lost!
+
+{{- end }}
+
+{{- if and .Values.backup.enabled (not .Values.backup.s3.bucket) }}
+
+⚠️  WARNING: Backup is enabled but no S3 bucket is configured.
+    The backup CronJob will fail until you configure S3 settings.
+
+{{- end }}

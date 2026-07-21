@@ -447,6 +447,111 @@ export function useK8sService() {
     return response.items || [];
   }
 
+  /**
+   * Get a single Pod
+   */
+  async function getPod(namespace: string, name: string): Promise<TK8sResource | null> {
+    try {
+      return await request<TK8sResource>(
+        "GET",
+        `/api/v1/namespaces/${namespace}/pods/${name}`
+      );
+    } catch (err: any) {
+      if (err.message?.includes("404")) return null;
+      throw err;
+    }
+  }
+
+  /**
+   * Get a Kubernetes Service
+   */
+  async function getService(namespace: string, name: string): Promise<TK8sResource | null> {
+    try {
+      return await request<TK8sResource>(
+        "GET",
+        `/api/v1/namespaces/${namespace}/services/${name}`
+      );
+    } catch (err: any) {
+      if (err.statusCode === 404 || err.message?.includes("404")) return null;
+      throw err;
+    }
+  }
+
+  /**
+   * Get a CronJob
+   */
+  async function getCronJob(namespace: string, name: string): Promise<TK8sResource | null> {
+    try {
+      return await request<TK8sResource>(
+        "GET",
+        `/apis/batch/v1/namespaces/${namespace}/cronjobs/${name}`
+      );
+    } catch (err: any) {
+      if (err.message?.includes("404")) return null;
+      throw err;
+    }
+  }
+
+  /**
+   * List Jobs in a namespace with optional label selector
+   */
+  async function listJobs(
+    namespace: string,
+    options: { labelSelector?: string } = {}
+  ): Promise<TK8sResource[]> {
+    const query = options.labelSelector
+      ? "?labelSelector=" + encodeURIComponent(options.labelSelector)
+      : "";
+    const response = await request<TK8sListResponse<TK8sResource>>(
+      "GET",
+      `/apis/batch/v1/namespaces/${namespace}/jobs${query}`
+    );
+    return response.items || [];
+  }
+
+  /**
+   * Create a Job from a CronJob template
+   */
+  async function createJobFromCronJob(
+    namespace: string,
+    cronJobName: string,
+    jobName: string
+  ): Promise<TK8sResource> {
+    const cronJob = await getCronJob(namespace, cronJobName);
+    if (!cronJob) {
+      throw new Error("CronJob not found: " + cronJobName);
+    }
+
+    const jobTemplate = (cronJob as any).spec?.jobTemplate;
+    if (!jobTemplate) {
+      throw new Error("CronJob has no jobTemplate");
+    }
+
+    // Build a Job from the CronJob template
+    const job: TK8sResource = {
+      apiVersion: "batch/v1",
+      kind: "Job",
+      metadata: {
+        name: jobName,
+        namespace,
+        labels: {
+          ...(jobTemplate.metadata?.labels || {}),
+          "created-by": "manual-trigger",
+        },
+        annotations: {
+          "cronjob.kubernetes.io/instantiate": "manual",
+        },
+      },
+      spec: jobTemplate.spec,
+    };
+
+    return await request<TK8sResource>(
+      "POST",
+      `/apis/batch/v1/namespaces/${namespace}/jobs`,
+      job
+    );
+  }
+
   return {
     loadKubeconfig,
     request,
@@ -462,6 +567,11 @@ export function useK8sService() {
     createSecret,
     getPodLogs,
     getEvents,
+    getPod,
+    getService,
+    getCronJob,
+    listJobs,
+    createJobFromCronJob,
   };
 }
 

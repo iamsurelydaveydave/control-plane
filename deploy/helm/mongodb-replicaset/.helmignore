@@ -1,0 +1,31 @@
+# Patterns to ignore when building packages
+.git
+.gitignore
+.DS_Store
+*.swp
+*.bak
+*.tmp
+*.orig
+*~
+
+# IDE directories
+.idea
+.vscode
+*.code-workspace
+
+# CI/CD
+.github
+.gitlab-ci.yml
+.travis.yml
+
+# Documentation source files (README.md is included)
+docs/
+
+# Test files
+tests/
+test/
+*_test.yaml
+*_test.yml
+
+# Example values (these are for documentation, not packaging)
+# examples/

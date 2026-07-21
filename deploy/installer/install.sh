@@ -81,11 +81,11 @@ prompt() {
   
   if [[ "$is_secret" == "true" ]]; then
     echo -ne "${GREEN}▸${NC} "
-    read -s value
+    read -s value < /dev/tty
     echo "****"
   else
     echo -ne "${GREEN}▸${NC} "
-    read value
+    read value < /dev/tty
   fi
   
   if [[ -z "$value" && -n "$default" ]]; then
@@ -101,7 +101,7 @@ prompt_confirm() {
   
   echo ""
   echo -ne "${prompt_text} ${DIM}[Y/n]${NC} ${GREEN}▸${NC} "
-  read -n 1 value
+  read -n 1 value < /dev/tty
   echo ""
   
   value=${value:-$default}

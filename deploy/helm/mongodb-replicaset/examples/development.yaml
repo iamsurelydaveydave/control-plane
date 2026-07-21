@@ -1,0 +1,57 @@
+# Development MongoDB Replica Set
+# ================================
+#
+# Minimal 3-node replica set for development/testing.
+# Reduced resources, no TLS, no monitoring.
+#
+# Usage:
+#   helm install dev-mongodb ./mongodb-replicaset \
+#     -f examples/development.yaml \
+#     --namespace dev --create-namespace
+
+mongodb:
+  architecture: replicaset
+  replicaCount: 3
+  replicaSetName: rs0
+
+  # Simple auth
+  auth:
+    enabled: true
+    rootPassword: devpassword123
+    # Create an app user
+    usernames:
+      - appuser
+    passwords:
+      - apppassword123
+    databases:
+      - myapp
+
+  # No TLS for dev
+  tls:
+    enabled: false
+
+  # Minimal resources
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+  # Small storage
+  persistence:
+    enabled: true
+    size: 5Gi
+
+  # No PDB for dev
+  pdb:
+    create: false
+
+  # No metrics for dev
+  metrics:
+    enabled: false
+
+controlPlane:
+  labels:
+    environment: development

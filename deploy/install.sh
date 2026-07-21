@@ -78,10 +78,10 @@ prompt() {
     echo -ne "${GREEN}→${NC} $prompt_text: "
     
     if [ "$is_secret" = "true" ]; then
-        read -rs value
+        read -rs value < /dev/tty
         echo ""
     else
-        read -r value
+        read -r value < /dev/tty
     fi
     
     value="${value:-$default_value}"
@@ -399,6 +399,11 @@ install_redis() {
     # Check if already installed
     if helm status redis -n $NAMESPACE &>/dev/null; then
         log_success "Redis already installed"
+        # Re-read the existing password from the secret so REDIS_URL stays valid
+        REDIS_PASSWORD=$(kubectl get secret control-plane-secrets -n $NAMESPACE \
+            -o jsonpath='{.data.redis-url}' 2>/dev/null \
+            | base64 -d | sed -E 's|.*:([^@]+)@.*|\1|' || echo "$REDIS_PASSWORD")
+        REDIS_URL="redis://:${REDIS_PASSWORD}@redis-master.${NAMESPACE}.svc.cluster.local:6379"
         return
     fi
     
@@ -583,7 +588,7 @@ spec:
             - name: COOKIE_DOMAIN
               value: "$DOMAIN"
             - name: ALLOWED_ORIGINS
-              value: "https://$DOMAIN"
+              value: "$(if [[ "$DOMAIN" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then echo "http://$DOMAIN"; else echo "https://$DOMAIN"; fi)"
             - name: K8S_ENABLED
               value: "true"
           volumeMounts:

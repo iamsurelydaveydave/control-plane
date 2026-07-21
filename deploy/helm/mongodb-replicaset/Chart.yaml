@@ -1,0 +1,24 @@
+apiVersion: v2
+name: mongodb-replicaset
+description: Production-grade MongoDB replica set for Control Plane managed resources
+type: application
+version: 1.0.0
+appVersion: "7.0"
+
+keywords:
+  - mongodb
+  - database
+  - replicaset
+  - nosql
+
+home: https://github.com/yourorg/control-plane
+maintainers:
+  - name: Control Plane Team
+    email: team@example.com
+
+# Use Bitnami MongoDB as a dependency with replicaset architecture
+dependencies:
+  - name: mongodb
+    version: "~15.x"
+    repository: https://charts.bitnami.com/bitnami
+    condition: mongodb.enabled

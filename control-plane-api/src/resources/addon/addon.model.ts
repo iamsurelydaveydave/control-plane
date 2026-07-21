@@ -9,6 +9,7 @@ import { BadRequestError } from "../../utils/error";
 export const addonTypes = [
   // Databases
   "mongodb",
+  "mongodb-replicaset",  // Production MongoDB replica set
   "postgresql",
   "mysql",
   "mariadb",
@@ -94,6 +95,40 @@ export const ADDON_CATALOG: Record<TAddonType, TAddonCatalogEntry> = {
     connectionTemplate: {
       usernameKey: "auth.rootUser",
       passwordKey: "auth.rootPassword",
+      defaultUsername: "root",
+    },
+  },
+  "mongodb-replicaset": {
+    chart: "control-plane/mongodb-replicaset",  // Local chart at deploy/helm/mongodb-replicaset
+    version: "1.0.0",
+    defaultPort: 27017,
+    defaultValues: {
+      mongodb: {
+        architecture: "replicaset",
+        replicaCount: 3,
+        replicaSetName: "rs0",
+        auth: { enabled: true },
+        tls: { enabled: false },
+        persistence: { enabled: true, size: "20Gi" },
+        pdb: { create: true, minAvailable: 2 },
+      },
+      dns: {
+        enabled: false,
+      },
+      backup: {
+        enabled: false,
+        schedule: "0 2 * * *",
+        retention: 7,
+        s3: {
+          bucket: "",
+          region: "us-east-1",
+          prefix: "mongodb-backups",
+        },
+      },
+    },
+    connectionTemplate: {
+      usernameKey: "mongodb.auth.rootUser",
+      passwordKey: "mongodb.auth.rootPassword",
       defaultUsername: "root",
     },
   },
@@ -641,7 +676,7 @@ export function getAddonDefaultPort(type: TAddonType): number {
  * Check if an addon type is a database type (needs replica/TLS config).
  */
 export function isDatabaseType(type: TAddonType): boolean {
-  return ["mongodb", "postgresql", "mysql", "mariadb", "clickhouse"].includes(type);
+  return ["mongodb", "mongodb-replicaset", "postgresql", "mysql", "mariadb", "clickhouse"].includes(type);
 }
 
 /**

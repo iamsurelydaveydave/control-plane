@@ -17,8 +17,9 @@ on:
 
 env:
   REGISTRY: ghcr.io
-  API_IMAGE_NAME: ${{ github.repository_owner }}/control-plane-api
-  WEB_IMAGE_NAME: ${{ github.repository_owner }}/control-plane-web
+  IMAGE_ORG: goweekdays
+  API_IMAGE_NAME: goweekdays/control-plane-api
+  WEB_IMAGE_NAME: goweekdays/control-plane-web
 
 jobs:
   # ================================

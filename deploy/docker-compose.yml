@@ -6,7 +6,7 @@ services:
   # Control Plane API
   # ================================
   control-plane-api:
-    image: ${REGISTRY_URL:-ghcr.io}/iamsurelydaveydave/control-plane-api:${VERSION:-latest}
+    image: ${REGISTRY_URL:-ghcr.io}/goweekdays/control-plane-api:${VERSION:-latest}
     container_name: control-plane-api
     restart: unless-stopped
     networks:
@@ -48,7 +48,7 @@ services:
   # Control Plane Web (Nuxt)
   # ================================
   control-plane-web:
-    image: ${REGISTRY_URL:-ghcr.io}/iamsurelydaveydave/control-plane-web:${VERSION:-latest}
+    image: ${REGISTRY_URL:-ghcr.io}/goweekdays/control-plane-web:${VERSION:-latest}
     container_name: control-plane-web
     restart: unless-stopped
     networks:

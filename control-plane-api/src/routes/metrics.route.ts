@@ -1,5 +1,5 @@
 import express from "express";
-import { requireAuth, requirePermission } from "../utils/auth.middleware";
+import { requireAuth } from "../utils/auth.middleware";
 import { useMetricsService } from "../services/metrics.service";
 
 const router = express.Router();
@@ -11,7 +11,7 @@ router.use(requireAuth);
  * GET /api/metrics/system
  * System metrics (CPU, memory, disk of the control plane server)
  */
-router.get("/system", requirePermission("settings:read"), async (_req, res, next) => {
+router.get("/system", async (_req, res, next) => {
   try {
     const metrics = useMetricsService();
     const data = await metrics.getSystemMetrics();
@@ -25,7 +25,7 @@ router.get("/system", requirePermission("settings:read"), async (_req, res, next
  * GET /api/metrics/cluster
  * K8s cluster resource usage
  */
-router.get("/cluster", requirePermission("nodes:read"), async (_req, res, next) => {
+router.get("/cluster", async (_req, res, next) => {
   try {
     const metrics = useMetricsService();
     const data = await metrics.getClusterMetrics();
@@ -36,13 +36,13 @@ router.get("/cluster", requirePermission("nodes:read"), async (_req, res, next) 
 });
 
 /**
- * GET /api/metrics/databases
- * All databases metrics summary
+ * GET /api/metrics/resources
+ * All deployed resources metrics summary
  */
-router.get("/databases", requirePermission("databases:read"), async (_req, res, next) => {
+router.get("/resources", async (_req, res, next) => {
   try {
     const metrics = useMetricsService();
-    const data = await metrics.getDatabaseMetrics();
+    const data = await metrics.getResourceMetrics();
     res.json(data);
   } catch (error) {
     next(error);
@@ -53,7 +53,7 @@ router.get("/databases", requirePermission("databases:read"), async (_req, res, 
  * GET /api/metrics/apps
  * All apps metrics summary
  */
-router.get("/apps", requirePermission("apps:read"), async (_req, res, next) => {
+router.get("/apps", async (_req, res, next) => {
   try {
     const metrics = useMetricsService();
     const data = await metrics.getAppMetrics();
@@ -67,7 +67,7 @@ router.get("/apps", requirePermission("apps:read"), async (_req, res, next) => {
  * GET /api/metrics/overview
  * Combined dashboard data
  */
-router.get("/overview", requirePermission("apps:read"), async (_req, res, next) => {
+router.get("/overview", async (_req, res, next) => {
   try {
     const metrics = useMetricsService();
     const data = await metrics.getOverview();

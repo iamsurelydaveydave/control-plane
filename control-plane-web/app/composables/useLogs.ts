@@ -18,8 +18,8 @@ export default function useLogs() {
     })
   }
 
-  function getDatabaseLogs(id: string, options: Omit<TLogFilters, 'source' | 'sourceId'> = {}) {
-    return useNuxtApp().$api<{ items: TLogEntry[], pages: number, total: number }>(`/databases/${id}/logs`, {
+  function getResourceLogs(id: string, options: Omit<TLogFilters, 'source' | 'sourceId'> = {}) {
+    return useNuxtApp().$api<{ items: TLogEntry[], pages: number, total: number }>(`/addons/${id}/logs`, {
       method: 'GET',
       query: {
         page: options.page ?? 1,
@@ -89,7 +89,7 @@ export default function useLogs() {
 
   return {
     getAppLogs,
-    getDatabaseLogs,
+    getResourceLogs,
     getSystemLogs,
     getOperatorLogs,
     searchLogs,

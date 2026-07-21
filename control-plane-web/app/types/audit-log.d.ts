@@ -8,7 +8,7 @@ declare type TAuditAction =
   | 'restart' | 'stop' | 'start'
 
 declare type TAuditResource =
-  | 'user' | 'server' | 'app' | 'database' | 'instance'
+  | 'user' | 'server' | 'app' | 'addon' | 'instance'
   | 'deployment' | 'settings' | 'cluster' | 'node'
   | 'api_token' | 'ssh_key' | 'secret' | 'alert' | 'audit_log'
 
@@ -78,7 +78,7 @@ declare type TSecurityEvents = {
 
 declare type TResourceChanges = {
   apps: { created: number; deleted: number; deployed: number }
-  databases: { created: number; deleted: number; backed_up: number }
+  resources: { created: number; deleted: number; backed_up: number }
   users: { created: number; deleted: number; permission_changes: number }
 }
 

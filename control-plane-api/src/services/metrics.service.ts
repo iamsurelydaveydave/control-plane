@@ -60,7 +60,7 @@ export type TClusterMetrics = {
   };
 };
 
-export type TDatabaseMetrics = {
+export type TResourceMetrics = {
   total: number;
   byType: Record<string, number>;
   byStatus: Record<string, number>;
@@ -69,7 +69,6 @@ export type TDatabaseMetrics = {
     name: string;
     type: string;
     status: string;
-    nodeCount: number;
   }>;
 };
 
@@ -98,9 +97,9 @@ export type TMetricsOverview = {
     nodesReady: number;
     podsRunning: number;
   };
-  databases: {
+  resources: {
     total: number;
-    healthy: number;
+    running: number;
   };
   apps: {
     total: number;
@@ -192,7 +191,7 @@ export function useMetricsService() {
   const k8s = useK8sService();
 
   // Repos for counting resources
-  const dbRepo = useRepo("cp_databases");
+  const addonRepo = useRepo("cp_addons");
   const appRepo = useRepo("cp_apps");
 
   /**
@@ -242,7 +241,7 @@ export function useMetricsService() {
    */
   async function getClusterMetrics(): Promise<TClusterMetrics> {
     const cacheKey = makeCacheKey("metrics", { tag: "cluster" });
-    const cached = await dbRepo.getCache<TClusterMetrics>(cacheKey);
+    const cached = await addonRepo.getCache<TClusterMetrics>(cacheKey);
     if (cached) return cached;
 
     const k8sEnabled = process.env.K8S_ENABLED === "true";
@@ -408,7 +407,7 @@ export function useMetricsService() {
             : undefined,
       };
 
-      dbRepo.setCache(cacheKey, result, CACHE_TTL);
+      addonRepo.setCache(cacheKey, result, CACHE_TTL);
       return result;
     } catch (err: any) {
       logger.log({ level: "error", message: `[Metrics] Cluster metrics error: ${err.message}` });
@@ -421,50 +420,49 @@ export function useMetricsService() {
   }
 
   /**
-   * Get database metrics summary
+   * Get resource (addons) metrics summary
    */
-  async function getDatabaseMetrics(): Promise<TDatabaseMetrics> {
-    const cacheKey = makeCacheKey("metrics", { tag: "databases" });
-    const cached = await dbRepo.getCache<TDatabaseMetrics>(cacheKey);
+  async function getResourceMetrics(): Promise<TResourceMetrics> {
+    const cacheKey = makeCacheKey("metrics", { tag: "resources" });
+    const cached = await addonRepo.getCache<TResourceMetrics>(cacheKey);
     if (cached) return cached;
 
     try {
-      const databases = await dbRepo.collection
+      const resources = await addonRepo.collection
         .find({})
-        .project({ name: 1, type: 1, status: 1, nodes: 1 })
+        .project({ name: 1, type: 1, status: 1 })
         .toArray();
 
       const byType: Record<string, number> = {};
       const byStatus: Record<string, number> = {};
 
-      const items = databases.map((db) => {
-        const type = db.type || "unknown";
-        const status = db.status || "unknown";
+      const items = resources.map((resource) => {
+        const type = resource.type || "unknown";
+        const status = resource.status || "unknown";
 
         byType[type] = (byType[type] || 0) + 1;
         byStatus[status] = (byStatus[status] || 0) + 1;
 
         return {
-          _id: db._id.toString(),
-          name: db.name,
+          _id: resource._id.toString(),
+          name: resource.name,
           type,
           status,
-          nodeCount: (db.nodes || []).length,
         };
       });
 
-      const result: TDatabaseMetrics = {
-        total: databases.length,
+      const result: TResourceMetrics = {
+        total: resources.length,
         byType,
         byStatus,
         items,
       };
 
-      dbRepo.setCache(cacheKey, result, CACHE_TTL);
+      addonRepo.setCache(cacheKey, result, CACHE_TTL);
       return result;
     } catch (err: any) {
-      logger.log({ level: "error", message: `[Metrics] Database metrics error: ${err.message}` });
-      throw new InternalServerError("Failed to get database metrics");
+      logger.log({ level: "error", message: `[Metrics] Resource metrics error: ${err.message}` });
+      throw new InternalServerError("Failed to get resource metrics");
     }
   }
 
@@ -516,20 +514,17 @@ export function useMetricsService() {
    */
   async function getOverview(): Promise<TMetricsOverview> {
     const cacheKey = makeCacheKey("metrics", { tag: "overview" });
-    const cached = await dbRepo.getCache<TMetricsOverview>(cacheKey);
+    const cached = await addonRepo.getCache<TMetricsOverview>(cacheKey);
     if (cached) return cached;
 
-    const [system, cluster, databases, apps] = await Promise.all([
+    const [system, cluster, resources, apps] = await Promise.all([
       getSystemMetrics(),
       getClusterMetrics(),
-      getDatabaseMetrics(),
+      getResourceMetrics(),
       getAppMetrics(),
     ]);
 
-    const healthyDbCount = Object.entries(databases.byStatus)
-      .filter(([status]) => status === "running" || status === "ready")
-      .reduce((sum, [, count]) => sum + count, 0);
-
+    const runningResourceCount = resources.byStatus["running"] || 0;
     const runningAppCount = apps.byStatus["running"] || 0;
 
     const result: TMetricsOverview = {
@@ -545,9 +540,9 @@ export function useMetricsService() {
         nodesReady: cluster.nodes.ready,
         podsRunning: cluster.pods.running,
       },
-      databases: {
-        total: databases.total,
-        healthy: healthyDbCount,
+      resources: {
+        total: resources.total,
+        running: runningResourceCount,
       },
       apps: {
         total: apps.total,
@@ -555,14 +550,14 @@ export function useMetricsService() {
       },
     };
 
-    dbRepo.setCache(cacheKey, result, CACHE_TTL);
+    addonRepo.setCache(cacheKey, result, CACHE_TTL);
     return result;
   }
 
   return {
     getSystemMetrics,
     getClusterMetrics,
-    getDatabaseMetrics,
+    getResourceMetrics,
     getAppMetrics,
     getOverview,
   };

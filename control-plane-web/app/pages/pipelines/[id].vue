@@ -122,7 +122,7 @@ async function submitDelete() {
       color: 'success',
       icon: 'i-lucide-check-circle'
     })
-    await router.push('/dashboard/pipelines')
+    await router.push('/pipelines')
   } catch (error: unknown) {
     const err = error as { data?: { message?: string } }
     toast.add({
@@ -178,7 +178,7 @@ useHead({
           icon="i-lucide-arrow-left"
           color="neutral"
           variant="ghost"
-          to="/dashboard/pipelines"
+          to="/pipelines"
         />
         <div v-if="pipeline">
           <div class="flex items-center gap-2">
@@ -414,7 +414,7 @@ useHead({
       </p>
       <UButton
         class="mt-4"
-        to="/dashboard/pipelines"
+        to="/pipelines"
         icon="i-lucide-arrow-left"
       >
         Back to Pipelines

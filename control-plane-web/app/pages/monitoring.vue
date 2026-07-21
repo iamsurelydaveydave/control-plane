@@ -8,7 +8,7 @@ definePageMeta({
   secured: true
 })
 
-const { getOverview, getSystemMetrics, getClusterMetrics, getDatabaseMetrics, getAppMetrics } = useMetrics()
+const { getOverview, getSystemMetrics, getClusterMetrics, getResourceMetrics, getAppMetrics } = useMetrics()
 
 // Auto-refresh interval (30 seconds)
 const refreshInterval = 30000
@@ -33,9 +33,9 @@ const { data: cluster, status: clusterStatus, refresh: refreshCluster } = await 
   { immediate: true, server: false }
 )
 
-const { data: databases, status: databasesStatus, refresh: refreshDatabases } = await useLazyAsyncData(
-  'metrics-databases',
-  () => getDatabaseMetrics(),
+const { data: resources, status: resourcesStatus, refresh: refreshResources } = await useLazyAsyncData(
+  'metrics-resources',
+  () => getResourceMetrics(),
   { immediate: true, server: false }
 )
 
@@ -57,7 +57,7 @@ async function refreshAll() {
     refreshOverview(),
     refreshSystem(),
     refreshCluster(),
-    refreshDatabases(),
+    refreshResources(),
     refreshApps()
   ])
 }
@@ -173,31 +173,31 @@ useHead({ title: 'Monitoring · Control Plane' })
         </p>
       </div>
 
-      <!-- Databases Card -->
+      <!-- Resources Card -->
       <div class="rounded-lg border border-default bg-elevated p-4">
         <div class="flex items-center justify-between">
           <div>
             <p class="text-sm text-muted">
-              Databases
+              Resources
             </p>
             <p class="text-2xl font-semibold text-highlighted">
               <template v-if="overviewStatus === 'pending'">
                 <span class="inline-block w-8 h-7 bg-muted rounded animate-pulse" />
               </template>
               <template v-else>
-                {{ overview?.databases?.total ?? 0 }}
+                {{ overview?.resources?.total ?? 0 }}
               </template>
             </p>
           </div>
           <div class="flex size-12 items-center justify-center rounded-lg bg-info/10">
             <UIcon
-              name="i-lucide-database"
+              name="i-lucide-puzzle"
               class="size-6 text-info"
             />
           </div>
         </div>
         <p class="mt-2 text-xs text-muted">
-          <span class="text-success">{{ overview?.databases?.healthy ?? 0 }}</span> healthy
+          <span class="text-success">{{ overview?.resources?.running ?? 0 }}</span> running
         </p>
       </div>
 
@@ -447,7 +447,7 @@ useHead({ title: 'Monitoring · Control Plane' })
                 {{ cluster?.available === false ? 'Kubernetes not configured' : 'No nodes in cluster' }}
               </p>
               <UButton
-                to="/dashboard/nodes"
+                to="/nodes"
                 variant="link"
                 size="sm"
                 label="Manage Nodes"
@@ -459,16 +459,16 @@ useHead({ title: 'Monitoring · Control Plane' })
       </div>
     </div>
 
-    <!-- Databases & Apps Lists -->
+    <!-- Resources & Apps Lists -->
     <div class="grid gap-6 lg:grid-cols-2">
-      <!-- Databases Health -->
+      <!-- Resources Health -->
       <div class="rounded-lg border border-default bg-elevated">
         <div class="flex items-center justify-between border-b border-default p-4">
           <h2 class="font-semibold text-highlighted">
-            Databases
+            Resources
           </h2>
           <UButton
-            to="/dashboard/databases"
+            to="/resources"
             variant="link"
             color="neutral"
             label="View all"
@@ -477,7 +477,7 @@ useHead({ title: 'Monitoring · Control Plane' })
           />
         </div>
         <div class="divide-y divide-default">
-          <template v-if="databasesStatus === 'pending'">
+          <template v-if="resourcesStatus === 'pending'">
             <div
               v-for="i in 3"
               :key="i"
@@ -492,50 +492,51 @@ useHead({ title: 'Monitoring · Control Plane' })
               </div>
             </div>
           </template>
-          <template v-else-if="databases?.items?.length">
-            <div
-              v-for="db in databases.items.slice(0, 5)"
-              :key="db._id"
-              class="flex items-center gap-3 p-4"
+          <template v-else-if="resources?.items?.length">
+            <NuxtLink
+              v-for="resource in resources.items.slice(0, 5)"
+              :key="resource._id"
+              :to="`/resources/${resource._id}`"
+              class="flex items-center gap-3 p-4 hover:bg-muted/50 transition-colors"
             >
               <div class="flex size-8 items-center justify-center rounded bg-muted">
                 <UIcon
-                  name="i-lucide-database"
+                  name="i-lucide-puzzle"
                   class="size-4 text-muted"
                 />
               </div>
               <div class="flex-1 min-w-0">
                 <p class="font-medium text-highlighted truncate">
-                  {{ db.name }}
+                  {{ resource.name }}
                 </p>
                 <p class="text-xs text-muted">
-                  {{ db.type }} · {{ db.nodeCount }} node{{ db.nodeCount !== 1 ? 's' : '' }}
+                  {{ resource.type }}
                 </p>
               </div>
               <UBadge
-                :color="getStatusColor(db.status)"
-                :label="db.status"
+                :color="getStatusColor(resource.status)"
+                :label="resource.status"
                 variant="subtle"
                 size="sm"
               />
-            </div>
+            </NuxtLink>
           </template>
           <div
             v-else
             class="p-8 text-center"
           >
             <UIcon
-              name="i-lucide-database"
+              name="i-lucide-puzzle"
               class="size-8 text-muted mx-auto mb-2"
             />
             <p class="text-sm text-muted">
-              No databases provisioned
+              No resources deployed
             </p>
             <UButton
-              to="/dashboard/databases"
+              to="/resources"
               variant="link"
               size="sm"
-              label="Create Database"
+              label="Deploy Resource"
               class="mt-2"
             />
           </div>
@@ -549,7 +550,7 @@ useHead({ title: 'Monitoring · Control Plane' })
             Apps
           </h2>
           <UButton
-            to="/dashboard/apps"
+            to="/apps"
             variant="link"
             color="neutral"
             label="View all"
@@ -613,7 +614,7 @@ useHead({ title: 'Monitoring · Control Plane' })
               No apps deployed
             </p>
             <UButton
-              to="/dashboard/apps"
+              to="/apps"
               variant="link"
               size="sm"
               label="Deploy App"

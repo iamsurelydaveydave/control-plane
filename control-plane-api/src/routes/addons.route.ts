@@ -44,4 +44,19 @@ router.get("/:id/connection", requirePermission("addons:update"), controller.get
 // Refresh addon status from Helm
 router.post("/:id/refresh", requirePermission("addons:read"), controller.refresh);
 
+// Start addon
+router.post("/:id/start", requirePermission("addons:update"), auditMiddleware("start", "addon"), controller.start);
+
+// Stop addon
+router.post("/:id/stop", requirePermission("addons:update"), auditMiddleware("stop", "addon"), controller.stop);
+
+// Restart addon
+router.post("/:id/restart", requirePermission("addons:update"), auditMiddleware("restart", "addon"), controller.restart);
+
+// Get addon logs
+router.get("/:id/logs", requirePermission("addons:read"), controller.getLogs);
+
+// Get addon events
+router.get("/:id/events", requirePermission("addons:read"), controller.getEvents);
+
 export default router;

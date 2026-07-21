@@ -60,22 +60,21 @@ declare type TClusterMetrics = {
 }
 
 // =============================================================================
-// Database Metrics
+// Resource (Addon) Metrics
 // =============================================================================
 
-declare type TDatabaseMetricItem = {
+declare type TResourceMetricItem = {
   _id: string
   name: string
   type: string
   status: string
-  nodeCount: number
 }
 
-declare type TDatabaseMetrics = {
+declare type TResourceMetrics = {
   total: number
   byType: Record<string, number>
   byStatus: Record<string, number>
-  items: TDatabaseMetricItem[]
+  items: TResourceMetricItem[]
 }
 
 // =============================================================================
@@ -113,9 +112,9 @@ declare type TMetricsOverview = {
     nodesReady: number
     podsRunning: number
   }
-  databases: {
+  resources: {
     total: number
-    healthy: number
+    running: number
   }
   apps: {
     total: number

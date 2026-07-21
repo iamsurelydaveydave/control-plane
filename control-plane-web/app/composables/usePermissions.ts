@@ -36,7 +36,7 @@ export default function usePermissions() {
    *
    * @example
    * can('read', 'apps') // checks 'apps:read'
-   * can('create', 'databases') // checks 'databases:create'
+   * can('create', 'addons') // checks 'addons:create'
    */
   function can(action: string, resource: string): boolean {
     return hasPermission(`${resource}:${action}` as TPermission)
@@ -71,21 +71,17 @@ export default function usePermissions() {
   const canDeployApps = computed(() => hasPermission('apps:deploy'))
 
   // ---------------------------------------------------------------------------
-  // Databases
-  // ---------------------------------------------------------------------------
-  const canReadDatabases = computed(() => hasPermission('databases:read'))
-  const canCreateDatabases = computed(() => hasPermission('databases:create'))
-  const canUpdateDatabases = computed(() => hasPermission('databases:update'))
-  const canDeleteDatabases = computed(() => hasPermission('databases:delete'))
-  const canBackupDatabases = computed(() => hasPermission('databases:backup'))
-
-  // ---------------------------------------------------------------------------
-  // Addons (Helm-deployed services)
+  // Addons / Resources (Helm-deployed services — databases, caches, analytics)
   // ---------------------------------------------------------------------------
   const canReadAddons = computed(() => hasPermission('addons:read'))
   const canCreateAddons = computed(() => hasPermission('addons:create'))
   const canUpdateAddons = computed(() => hasPermission('addons:update'))
   const canDeleteAddons = computed(() => hasPermission('addons:delete'))
+  // Aliases for backwards compatibility
+  const canReadResources = canReadAddons
+  const canCreateResources = canCreateAddons
+  const canUpdateResources = canUpdateAddons
+  const canDeleteResources = canDeleteAddons
 
   // ---------------------------------------------------------------------------
   // Pipelines (deployment stages and promotions)
@@ -181,18 +177,15 @@ export default function usePermissions() {
     canDeleteApps,
     canDeployApps,
 
-    // Databases
-    canReadDatabases,
-    canCreateDatabases,
-    canUpdateDatabases,
-    canDeleteDatabases,
-    canBackupDatabases,
-
-    // Addons
+    // Addons / Resources
     canReadAddons,
     canCreateAddons,
     canUpdateAddons,
     canDeleteAddons,
+    canReadResources,
+    canCreateResources,
+    canUpdateResources,
+    canDeleteResources,
 
     // Pipelines
     canReadPipelines,

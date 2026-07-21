@@ -7,22 +7,33 @@ definePageMeta({ layout: false })
 const { checkStatus } = useSetup()
 const { loggedInUser } = useAuth()
 
+// Use a timeout to ensure we don't hang forever
 onMounted(async () => {
+  // Add a timeout fallback
+  const timeout = setTimeout(() => {
+    console.warn('[index] Redirect timeout, falling back to login')
+    navigateTo('/login')
+  }, 5000)
+
   try {
     const initialized = await checkStatus()
+    clearTimeout(timeout)
+    
     if (!initialized) {
-      navigateTo('/setup')
+      await navigateTo('/setup')
       return
     }
 
     // Check cookie hint — if present, go to dashboard
     if (loggedInUser()) {
-      navigateTo('/dashboard')
+      await navigateTo('/dashboard')
     } else {
-      navigateTo('/login')
+      await navigateTo('/login')
     }
-  } catch {
-    navigateTo('/login')
+  } catch (err) {
+    clearTimeout(timeout)
+    console.error('[index] Error checking status:', err)
+    await navigateTo('/login')
   }
 })
 </script>

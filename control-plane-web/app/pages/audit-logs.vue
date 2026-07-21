@@ -61,7 +61,7 @@ const resourceOptions = [
   { label: 'All Resources', value: 'all' },
   { label: 'User', value: 'user' },
   { label: 'App', value: 'app' },
-  { label: 'Database', value: 'database' },
+  { label: 'Resource', value: 'addon' },
   { label: 'Deployment', value: 'deployment' },
   { label: 'Cluster', value: 'cluster' },
   { label: 'Node', value: 'node' },
@@ -277,7 +277,7 @@ function getResourceIcon(resource: TAuditResource): string {
   switch (resource) {
     case 'user': return 'i-lucide-user'
     case 'app': return 'i-lucide-box'
-    case 'database': return 'i-lucide-database'
+    case 'addon': return 'i-lucide-puzzle'
     case 'deployment': return 'i-lucide-rocket'
     case 'cluster': return 'i-lucide-layers'
     case 'node': return 'i-lucide-hard-drive'
@@ -866,11 +866,11 @@ useHead({ title: 'Audit Logs' })
                   </span>
                 </div>
                 <div class="flex items-center justify-between text-sm">
-                  <span>Databases</span>
+                  <span>Resources</span>
                   <span>
-                    <span class="text-success">+{{ complianceReport.resourceChanges.databases.created }}</span>
-                    <span class="text-error mx-1">-{{ complianceReport.resourceChanges.databases.deleted }}</span>
-                    <span class="text-info">{{ complianceReport.resourceChanges.databases.backed_up }} backed up</span>
+                    <span class="text-success">+{{ complianceReport.resourceChanges.resources.created }}</span>
+                    <span class="text-error mx-1">-{{ complianceReport.resourceChanges.resources.deleted }}</span>
+                    <span class="text-info">{{ complianceReport.resourceChanges.resources.backed_up }} backed up</span>
                   </span>
                 </div>
                 <div class="flex items-center justify-between text-sm">

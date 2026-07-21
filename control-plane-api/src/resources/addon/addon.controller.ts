@@ -164,45 +164,13 @@ export function useAddonController() {
         return;
       }
 
-      // Build connection string examples based on addon type
+      // Get addon to include type-specific info
       const addon = await repo.getById(id);
-      const connectionStrings: Record<string, string> = {};
-
-      if (addon) {
-        switch (addon.type) {
-          case "redis":
-            connectionStrings.redis = connectionInfo.password
-              ? `redis://:${connectionInfo.password}@${connectionInfo.host}:${connectionInfo.port}`
-              : `redis://${connectionInfo.host}:${connectionInfo.port}`;
-            break;
-
-          case "postgresql":
-            connectionStrings.postgresql = connectionInfo.password
-              ? `postgresql://${connectionInfo.username}:${connectionInfo.password}@${connectionInfo.host}:${connectionInfo.port}/postgres`
-              : `postgresql://${connectionInfo.username}@${connectionInfo.host}:${connectionInfo.port}/postgres`;
-            break;
-
-          case "mysql":
-            connectionStrings.mysql = connectionInfo.password
-              ? `mysql://${connectionInfo.username}:${connectionInfo.password}@${connectionInfo.host}:${connectionInfo.port}`
-              : `mysql://${connectionInfo.username}@${connectionInfo.host}:${connectionInfo.port}`;
-            break;
-
-          case "rabbitmq":
-            connectionStrings.amqp = connectionInfo.password
-              ? `amqp://${connectionInfo.username}:${connectionInfo.password}@${connectionInfo.host}:${connectionInfo.port}`
-              : `amqp://${connectionInfo.username}@${connectionInfo.host}:${connectionInfo.port}`;
-            break;
-
-          case "elasticsearch":
-            connectionStrings.elasticsearch = `http://${connectionInfo.host}:${connectionInfo.port}`;
-            break;
-        }
-      }
-
+      
       res.json({
         connectionInfo,
-        connectionStrings,
+        connectionString: connectionInfo.connectionString,
+        type: addon?.type,
       });
     } catch (error) {
       next(error);
@@ -228,6 +196,102 @@ export function useAddonController() {
     }
   }
 
+  /**
+   * POST /addons/:id/start
+   * Start a stopped addon
+   */
+  async function start(req: Request, res: Response, next: NextFunction) {
+    try {
+      const id = req.params.id as string;
+      const result = await service.start(id);
+      res.json(result);
+    } catch (error) {
+      next(error);
+    }
+  }
+
+  /**
+   * POST /addons/:id/stop
+   * Stop a running addon
+   */
+  async function stop(req: Request, res: Response, next: NextFunction) {
+    try {
+      const id = req.params.id as string;
+      const result = await service.stop(id);
+      res.json(result);
+    } catch (error) {
+      next(error);
+    }
+  }
+
+  /**
+   * POST /addons/:id/restart
+   * Restart an addon
+   */
+  async function restart(req: Request, res: Response, next: NextFunction) {
+    try {
+      const id = req.params.id as string;
+      const result = await service.restart(id);
+      res.json(result);
+    } catch (error) {
+      next(error);
+    }
+  }
+
+  /**
+   * GET /addons/:id/logs
+   * Get pod logs for the addon
+   */
+  async function getLogs(req: Request, res: Response, next: NextFunction) {
+    try {
+      const id = req.params.id as string;
+      const tailLines = req.query.tailLines ? Number(req.query.tailLines) : 100;
+      const sinceSeconds = req.query.sinceSeconds
+        ? Number(req.query.sinceSeconds)
+        : undefined;
+
+      const result = await service.getLogs(id, { tailLines, sinceSeconds });
+      res.json(result);
+    } catch (error) {
+      next(error);
+    }
+  }
+
+  /**
+   * GET /addons/:id/events
+   * Get Kubernetes events for the addon
+   */
+  async function getEvents(req: Request, res: Response, next: NextFunction) {
+    try {
+      const id = req.params.id as string;
+      const result = await service.getEvents(id);
+      res.json(result);
+    } catch (error) {
+      next(error);
+    }
+  }
+
+  /**
+   * POST /addons/:id/scale
+   * Scale addon replicas
+   */
+  async function scale(req: Request, res: Response, next: NextFunction) {
+    try {
+      const id = req.params.id as string;
+      const { replicas } = req.body;
+
+      if (typeof replicas !== "number") {
+        next(new BadRequestError("replicas must be a number"));
+        return;
+      }
+
+      const result = await service.scale(id, replicas);
+      res.json(result);
+    } catch (error) {
+      next(error);
+    }
+  }
+
   return {
     list,
     getCatalog,
@@ -237,5 +301,10 @@ export function useAddonController() {
     remove,
     getConnection,
     refresh,
+    start,
+    stop,
+    restart,
+    getLogs,
+    getEvents,
   };
 }

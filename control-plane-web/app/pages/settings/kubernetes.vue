@@ -1,14 +1,13 @@
 <script setup lang="ts">
 /**
- * Kubernetes (K3s) Settings — view and manage K8s-based database provisioning.
+ * Kubernetes Settings — view and manage K8s cluster configuration.
  *
- * K3s is the lightweight Kubernetes distribution used for database provisioning.
- * When enabled, new databases are provisioned via K8s operators (Percona MongoDB Operator)
- * rather than Ansible playbooks.
+ * K3s is the lightweight Kubernetes distribution used for running all workloads:
+ * - Apps (containerized applications)
+ * - Resources (databases, caches, etc. via Helm)
  *
  * This page shows:
  * - Whether K8s is enabled
- * - The current provisioner type
  * - K3s cluster status and nodes
  * - The command to join a server as a K3s agent
  */
@@ -28,7 +27,6 @@ const { data: configData, refresh: refreshConfig, status: configStatus } = await
   'k8s-config',
   () => getK8sConfig().catch(() => ({
     kubernetes: { enabled: false, available: false, nodes: 0, error: undefined as string | undefined },
-    provisioner: 'ansible' as const,
     hasK3sToken: false
   })),
   { server: false, immediate: true }
@@ -142,14 +140,14 @@ useHead({ title: 'Kubernetes Settings · Control Plane' })
           icon="i-lucide-arrow-left"
           color="neutral"
           variant="ghost"
-          to="/dashboard/settings"
+          to="/settings"
         />
         <div>
           <h1 class="text-2xl font-bold text-highlighted">
             Kubernetes Settings
           </h1>
           <p class="text-sm text-muted">
-            K3s-based database provisioning with operators
+            K3s cluster configuration for apps and resources
           </p>
         </div>
       </div>
@@ -170,7 +168,7 @@ useHead({ title: 'Kubernetes Settings · Control Plane' })
             Cluster Status
           </h2>
           <p class="text-sm text-muted mt-0.5">
-            K3s server and Percona MongoDB Operator
+            K3s server and Helm deployments
           </p>
         </div>
         <UBadge
@@ -202,7 +200,7 @@ useHead({ title: 'Kubernetes Settings · Control Plane' })
       </div>
       <div
         v-else
-        class="grid grid-cols-2 sm:grid-cols-4 gap-4"
+        class="grid grid-cols-2 sm:grid-cols-3 gap-4"
       >
         <div class="rounded-lg bg-default/50 border border-default p-3">
           <p class="text-xs text-muted uppercase tracking-wide">
@@ -210,14 +208,6 @@ useHead({ title: 'Kubernetes Settings · Control Plane' })
           </p>
           <p class="text-lg font-semibold text-highlighted">
             {{ config?.kubernetes.enabled ? 'Yes' : 'No' }}
-          </p>
-        </div>
-        <div class="rounded-lg bg-default/50 border border-default p-3">
-          <p class="text-xs text-muted uppercase tracking-wide">
-            Provisioner
-          </p>
-          <p class="text-lg font-semibold text-highlighted capitalize">
-            {{ config?.provisioner || '-' }}
           </p>
         </div>
         <div class="rounded-lg bg-default/50 border border-default p-3">
@@ -254,7 +244,7 @@ useHead({ title: 'Kubernetes Settings · Control Plane' })
         variant="subtle"
         icon="i-lucide-info"
         title="Kubernetes is not enabled"
-        description="Set K8S_ENABLED=true in your environment and restart the API to enable K8s-based provisioning. You can enable K8s during installation by choosing 'Yes' when prompted, or by re-running the installer with ENABLE_K8S=true."
+        description="Set K8S_ENABLED=true in your environment and restart the API to enable K8s. You can enable K8s during installation by choosing 'Yes' when prompted, or by re-running the installer with ENABLE_K8S=true."
       />
     </div>
 
@@ -349,10 +339,10 @@ useHead({ title: 'Kubernetes Settings · Control Plane' })
       <div class="flex items-center justify-between">
         <div>
           <h2 class="text-base font-semibold text-highlighted">
-            Join a Server
+            Join a Node
           </h2>
           <p class="text-sm text-muted mt-0.5">
-            Run this command on a database server to join it to the cluster
+            Run this command on a server to join it as a K3s worker node
           </p>
         </div>
         <div class="flex items-center gap-2">
@@ -454,21 +444,21 @@ useHead({ title: 'Kubernetes Settings · Control Plane' })
             K3s (Lightweight Kubernetes)
           </p>
           <p class="text-muted">
-            K3s runs on the control plane server and database servers. It provides
-            the orchestration layer for database provisioning with operators.
+            K3s runs on the control plane server and worker nodes. It provides
+            the orchestration layer for running apps and resources.
           </p>
         </div>
         <div class="space-y-1">
           <p class="font-medium flex items-center gap-2">
             <UIcon
-              name="i-lucide-database"
+              name="i-lucide-box"
               class="size-4 text-muted"
             />
-            Percona MongoDB Operator
+            Helm Charts
           </p>
           <p class="text-muted">
-            Handles MongoDB cluster lifecycle: provisioning, replica set setup,
-            TLS, backups, and automatic failover recovery.
+            Resources (databases, caches, etc.) are deployed via Helm charts.
+            This provides consistent, repeatable deployments with easy configuration.
           </p>
         </div>
       </div>
@@ -477,9 +467,13 @@ useHead({ title: 'Kubernetes Settings · Control Plane' })
 
       <div class="text-sm text-muted space-y-2">
         <p>
-          <strong class="text-highlighted">K8s vs Ansible:</strong>
-          When K8s is enabled, new databases are provisioned via the Percona Operator.
-          Existing databases (created with Ansible) continue to use Ansible for management.
+          <strong class="text-highlighted">Apps:</strong>
+          Your containerized applications run as K8s Deployments with configurable replicas.
+        </p>
+        <p>
+          <strong class="text-highlighted">Resources:</strong>
+          One-click services (MongoDB, PostgreSQL, Redis, etc.) deployed via Helm with
+          stable service DNS for connection strings that don't change when pods move.
         </p>
         <p>
           <strong class="text-highlighted">Enabling K8s:</strong>

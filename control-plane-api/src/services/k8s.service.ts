@@ -339,9 +339,118 @@ export function useK8sService() {
     return apply(secret);
   }
 
+  /**
+   * Make a raw text request (for logs)
+   */
+  async function requestRaw(method: string, path: string): Promise<string> {
+    if (!config) {
+      loadKubeconfig();
+    }
+
+    const url = new URL(path, config!.server);
+    const isHttps = url.protocol === "https:";
+
+    const options: https.RequestOptions = {
+      method,
+      hostname: url.hostname,
+      port: url.port || (isHttps ? 443 : 80),
+      path: url.pathname + url.search,
+      headers: {
+        Accept: "text/plain",
+      },
+    };
+
+    // Auth
+    if (config!.token) {
+      (options.headers as Record<string, string>)["Authorization"] = `Bearer ${config!.token}`;
+    }
+
+    // TLS
+    if (isHttps) {
+      if (config!.caCert) {
+        options.ca = config!.caCert;
+      }
+      if (config!.clientCert && config!.clientKey) {
+        options.cert = config!.clientCert;
+        options.key = config!.clientKey;
+      }
+      // K3s uses self-signed certs by default
+      options.rejectUnauthorized = !!config!.caCert;
+    }
+
+    return new Promise((resolve, reject) => {
+      const protocol = isHttps ? https : http;
+      const req = protocol.request(options, (res) => {
+        let data = "";
+        res.on("data", (chunk) => (data += chunk));
+        res.on("end", () => {
+          if (res.statusCode && res.statusCode >= 400) {
+            const error = new Error(
+              `K8s API error: ${res.statusCode} - ${data}`
+            ) as any;
+            error.statusCode = res.statusCode;
+            reject(error);
+          } else {
+            resolve(data);
+          }
+        });
+      });
+
+      req.on("error", reject);
+      req.end();
+    });
+  }
+
+  /**
+   * Get pod logs
+   */
+  async function getPodLogs(
+    name: string,
+    namespace: string,
+    options: {
+      container?: string;
+      tailLines?: number;
+      sinceSeconds?: number;
+    } = {}
+  ): Promise<string> {
+    if (!config) {
+      loadKubeconfig();
+    }
+
+    let query = "?";
+    if (options.container) query += `container=${options.container}&`;
+    if (options.tailLines) query += `tailLines=${options.tailLines}&`;
+    if (options.sinceSeconds) query += `sinceSeconds=${options.sinceSeconds}&`;
+
+    const path = `/api/v1/namespaces/${namespace}/pods/${name}/log${query}`;
+
+    // Logs are returned as plain text, not JSON
+    return requestRaw("GET", path);
+  }
+
+  /**
+   * Get events for a resource
+   */
+  async function getEvents(
+    namespace: string,
+    fieldSelector?: string
+  ): Promise<TK8sResource[]> {
+    let query = "";
+    if (fieldSelector) {
+      query = `?fieldSelector=${encodeURIComponent(fieldSelector)}`;
+    }
+
+    const response = await request<TK8sListResponse<TK8sResource>>(
+      "GET",
+      `/api/v1/namespaces/${namespace}/events${query}`
+    );
+    return response.items || [];
+  }
+
   return {
     loadKubeconfig,
     request,
+    requestRaw,
     apply,
     get,
     list,
@@ -351,6 +460,8 @@ export function useK8sService() {
     getNodes,
     isAvailable,
     createSecret,
+    getPodLogs,
+    getEvents,
   };
 }
 

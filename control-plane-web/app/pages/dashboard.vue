@@ -75,14 +75,14 @@ useHead({ title: 'Dashboard · Control Plane' })
       </div>
       <div class="flex gap-2">
         <UButton
-          to="/dashboard/resources"
+          to="/resources"
           variant="soft"
           color="neutral"
           icon="i-lucide-puzzle"
           label="Add Resource"
         />
         <UButton
-          to="/dashboard/apps"
+          to="/apps"
           icon="i-lucide-plus"
           label="Deploy App"
         />
@@ -92,7 +92,7 @@ useHead({ title: 'Dashboard · Control Plane' })
     <!-- Stats Grid -->
     <div class="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
       <NuxtLink
-        to="/dashboard/nodes"
+        to="/nodes"
         class="rounded-lg border border-default bg-elevated p-4 hover:border-primary/50 transition-colors"
       >
         <div class="flex items-center justify-between">
@@ -122,7 +122,7 @@ useHead({ title: 'Dashboard · Control Plane' })
       </NuxtLink>
 
       <NuxtLink
-        to="/dashboard/apps"
+        to="/apps"
         class="rounded-lg border border-default bg-elevated p-4 hover:border-primary/50 transition-colors"
       >
         <div class="flex items-center justify-between">
@@ -152,7 +152,7 @@ useHead({ title: 'Dashboard · Control Plane' })
       </NuxtLink>
 
       <NuxtLink
-        to="/dashboard/resources"
+        to="/resources"
         class="rounded-lg border border-default bg-elevated p-4 hover:border-primary/50 transition-colors"
       >
         <div class="flex items-center justify-between">
@@ -182,7 +182,7 @@ useHead({ title: 'Dashboard · Control Plane' })
       </NuxtLink>
 
       <NuxtLink
-        to="/dashboard/monitoring"
+        to="/monitoring"
         class="rounded-lg border border-default bg-elevated p-4 hover:border-primary/50 transition-colors"
       >
         <div class="flex items-center justify-between">
@@ -219,7 +219,7 @@ useHead({ title: 'Dashboard · Control Plane' })
           Recent Apps
         </h2>
         <UButton
-          to="/dashboard/apps"
+          to="/apps"
           variant="link"
           color="neutral"
           label="View all"
@@ -247,7 +247,7 @@ useHead({ title: 'Dashboard · Control Plane' })
           <NuxtLink
             v-for="app in recentApps"
             :key="app._id"
-            :to="`/dashboard/apps/${app._id}`"
+            :to="`/apps/${app._id}`"
             class="flex items-center gap-3 p-4 hover:bg-muted transition-colors"
           >
             <div class="flex size-8 items-center justify-center rounded bg-muted">
@@ -284,7 +284,7 @@ useHead({ title: 'Dashboard · Control Plane' })
             No apps deployed yet
           </p>
           <UButton
-            to="/dashboard/apps"
+            to="/apps"
             variant="link"
             size="sm"
             label="Deploy your first app"
@@ -315,7 +315,7 @@ useHead({ title: 'Dashboard · Control Plane' })
               Provision K8s worker nodes to run your workloads.
             </p>
             <UButton
-              to="/dashboard/nodes"
+              to="/nodes"
               variant="link"
               size="sm"
               label="Add Node →"
@@ -336,7 +336,7 @@ useHead({ title: 'Dashboard · Control Plane' })
               Add databases, caches, or other services from the catalog.
             </p>
             <UButton
-              to="/dashboard/resources"
+              to="/resources"
               variant="link"
               size="sm"
               label="Browse Catalog →"
@@ -357,7 +357,7 @@ useHead({ title: 'Dashboard · Control Plane' })
               Deploy containers to your Kubernetes cluster.
             </p>
             <UButton
-              to="/dashboard/apps"
+              to="/apps"
               variant="link"
               size="sm"
               label="Deploy App →"

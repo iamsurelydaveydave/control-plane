@@ -5,14 +5,14 @@ declare type TOrganizationPlan = 'free' | 'starter' | 'pro' | 'enterprise'
 
 declare type TOrganizationLimits = {
   maxApps: number
-  maxDatabases: number
+  maxResources: number
   maxUsers: number
   maxStorage: number // GB, -1 = unlimited
 }
 
 declare type TOrganizationUsage = {
   apps: number
-  databases: number
+  resources: number
   users: number
   storage: number // GB
 }
@@ -81,7 +81,7 @@ declare type TOrganizationUsageStats = {
   plan: TOrganizationPlan
   percentages: {
     apps: number
-    databases: number
+    resources: number
     users: number
     storage: number
   }

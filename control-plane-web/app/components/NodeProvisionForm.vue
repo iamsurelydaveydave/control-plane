@@ -180,7 +180,7 @@ defineExpose({ setTestResult })
           <span class="text-xs text-muted">
             The private key will be used to connect to the VM.
             <NuxtLink
-              to="/dashboard/settings/secrets"
+              to="/settings/secrets"
               class="text-primary hover:underline"
             >
               Manage SSH keys

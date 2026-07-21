@@ -33,10 +33,10 @@ export default function useMetrics() {
   }
 
   /**
-   * Get database metrics summary
+   * Get deployed resources (addons) metrics summary
    */
-  function getDatabaseMetrics() {
-    return useNuxtApp().$api<TDatabaseMetrics>('/metrics/databases', {
+  function getResourceMetrics() {
+    return useNuxtApp().$api<TResourceMetrics>('/metrics/resources', {
       method: 'GET'
     })
   }
@@ -54,7 +54,7 @@ export default function useMetrics() {
     getOverview,
     getSystemMetrics,
     getClusterMetrics,
-    getDatabaseMetrics,
+    getResourceMetrics,
     getAppMetrics
   }
 }

@@ -107,7 +107,7 @@ useHead({ title: 'Account · Settings · Control Plane' })
             color="neutral"
             variant="ghost"
             size="sm"
-            to="/dashboard/settings"
+            to="/settings"
           />
           <h1 class="text-xl font-bold text-highlighted">
             Account

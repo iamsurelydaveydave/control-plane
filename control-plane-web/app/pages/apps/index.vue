@@ -186,7 +186,7 @@ async function handleStop(app: TApp) {
 }
 
 function handleRowClick(_e: Event, row: { original: TApp }) {
-  navigateTo(`/dashboard/apps/${row.original._id}`)
+  navigateTo(`/apps/${row.original._id}`)
 }
 
 // Status helpers
@@ -310,7 +310,7 @@ useHead({ title: 'Apps · Control Plane' })
             <UDropdownMenu
               :items="[
                 [
-                  { label: 'View Details', icon: 'i-lucide-eye', onSelect: () => navigateTo(`/dashboard/apps/${row.original._id}`) },
+                  { label: 'View Details', icon: 'i-lucide-eye', onSelect: () => navigateTo(`/apps/${row.original._id}`) },
                   { label: 'Deploy', icon: 'i-lucide-rocket', onSelect: () => handleDeploy(row.original) },
                   { label: 'Stop', icon: 'i-lucide-square', onSelect: () => handleStop(row.original), disabled: row.original.status !== 'running' }
                 ],

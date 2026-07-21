@@ -18,49 +18,49 @@ const items = [
     title: 'SSH Keys',
     description: 'Manage SSH keys for server access.',
     icon: 'i-lucide-key',
-    to: '/dashboard/settings/ssh-keys',
+    to: '/settings/ssh-keys',
     status: 'active' as const
   },
   {
     title: 'API Tokens',
     description: 'Manage API tokens for programmatic access.',
     icon: 'i-lucide-code',
-    to: '/dashboard/settings/api-tokens',
+    to: '/settings/api-tokens',
     status: 'active' as const
   },
   {
     title: 'DNS',
     description: 'Connect Cloudflare to get mongodb+srv:// URLs for replica sets.',
     icon: 'i-lucide-globe',
-    to: '/dashboard/settings/dns',
+    to: '/settings/dns',
     status: 'active' as const
   },
   {
     title: 'Kubernetes',
     description: 'K3s cluster status and database provisioning settings.',
     icon: 'i-lucide-ship',
-    to: '/dashboard/settings/kubernetes',
+    to: '/settings/kubernetes',
     status: 'active' as const
   },
   {
     title: 'Single Sign-On',
     description: 'Configure SAML or OIDC for enterprise authentication.',
     icon: 'i-lucide-shield-check',
-    to: '/dashboard/settings/sso',
+    to: '/settings/sso',
     status: 'active' as const
   },
   {
     title: 'Account',
     description: 'Manage your account and preferences.',
     icon: 'i-lucide-user',
-    to: '/dashboard/settings/account',
+    to: '/settings/account',
     status: 'active' as const
   },
   {
     title: 'Appearance',
     description: 'Customize theme and display settings.',
     icon: 'i-lucide-palette',
-    to: '/dashboard/settings/appearance',
+    to: '/settings/appearance',
     status: 'active' as const
   }
 ]

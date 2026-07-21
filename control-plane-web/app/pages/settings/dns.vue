@@ -185,7 +185,7 @@ useHead({ title: 'DNS Settings · Control Plane' })
         icon="i-lucide-arrow-left"
         color="neutral"
         variant="ghost"
-        to="/dashboard/settings"
+        to="/settings"
       />
       <div>
         <h1 class="text-2xl font-bold text-highlighted">

@@ -74,7 +74,7 @@ const apiBaseUrl = computed(() => {
     <!-- Header -->
     <div class="flex items-center gap-4">
       <NuxtLink
-        :to="`/dashboard/apps/${appId}`"
+        :to="`/apps/${appId}`"
         class="text-muted hover:text-default"
       >
         <UIcon
@@ -150,7 +150,7 @@ const apiBaseUrl = computed(() => {
                   color="neutral"
                   variant="outline"
                   icon="i-lucide-key"
-                  to="/dashboard/settings/api-tokens"
+                  to="/settings/api-tokens"
                 >
                   View tokens
                 </UButton>
@@ -169,7 +169,7 @@ const apiBaseUrl = computed(() => {
                   <p>
                     No API token found with <code class="text-xs">deployments:write</code> scope.
                     <NuxtLink
-                      to="/dashboard/settings/api-tokens"
+                      to="/settings/api-tokens"
                       class="underline font-medium"
                     >
                       Create one

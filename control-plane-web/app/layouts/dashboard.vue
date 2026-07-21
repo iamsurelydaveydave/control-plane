@@ -28,48 +28,48 @@ const navigationItems = computed(() => [
   {
     label: 'Monitoring',
     icon: 'i-lucide-activity',
-    to: '/dashboard/monitoring'
+    to: '/monitoring'
   },
   {
     label: 'Alerts',
     icon: 'i-lucide-bell',
-    to: '/dashboard/alerts',
+    to: '/alerts',
     badge: activeAlertCount.value > 0 ? String(activeAlertCount.value) : undefined
   },
   {
     label: 'Logs',
     icon: 'i-lucide-scroll-text',
-    to: '/dashboard/logs'
+    to: '/logs'
   },
   {
     label: 'Nodes',
     icon: 'i-lucide-hard-drive',
-    to: '/dashboard/nodes'
+    to: '/nodes'
   },
   {
     label: 'Apps',
     icon: 'i-lucide-box',
-    to: '/dashboard/apps'
+    to: '/apps'
   },
   {
     label: 'Resources',
     icon: 'i-lucide-puzzle',
-    to: '/dashboard/resources'
+    to: '/resources'
   },
   {
     label: 'Pipelines',
     icon: 'i-lucide-git-branch',
-    to: '/dashboard/pipelines'
+    to: '/pipelines'
   },
   {
     label: 'Registries',
     icon: 'i-lucide-container',
-    to: '/dashboard/registries'
+    to: '/registries'
   },
   {
     label: 'Settings',
     icon: 'i-lucide-settings',
-    to: '/dashboard/settings'
+    to: '/settings'
   }
 ])
 </script>

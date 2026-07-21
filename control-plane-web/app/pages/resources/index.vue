@@ -1022,10 +1022,14 @@ useHead({ title: 'Resources · Control Plane' })
         <div
           v-for="resource in deployedResources"
           :key="resource._id"
-          class="rounded-xl border border-default bg-elevated/50 p-5"
+          class="rounded-xl border border-default bg-elevated/50 p-5 hover:border-primary/50 cursor-pointer transition-colors"
+          @click.self="navigateTo(`/resources/${resource._id}`)"
         >
           <div class="flex items-start justify-between">
-            <div class="flex items-start gap-3">
+            <NuxtLink
+              :to="`/resources/${resource._id}`"
+              class="flex items-start gap-3 hover:opacity-80"
+            >
               <div
                 class="flex size-10 shrink-0 items-center justify-center rounded-lg bg-default border border-default"
               >
@@ -1042,7 +1046,7 @@ useHead({ title: 'Resources · Control Plane' })
                   {{ getCatalogItem(resource.type)?.name ?? resource.type }}
                 </p>
               </div>
-            </div>
+            </NuxtLink>
 
             <div class="flex items-center gap-1">
               <UBadge

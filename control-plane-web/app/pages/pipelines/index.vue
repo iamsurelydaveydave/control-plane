@@ -104,7 +104,7 @@ async function submitAdd() {
       icon: 'i-lucide-check-circle'
     })
     dialogAdd.value = false
-    await navigateTo(`/dashboard/pipelines/${result.pipelineId}`)
+    await navigateTo(`/pipelines/${result.pipelineId}`)
   } catch (error: unknown) {
     const err = error as { data?: { message?: string } }
     message.value = err?.data?.message ?? 'Failed to create pipeline.'
@@ -148,7 +148,7 @@ async function submitDelete() {
 }
 
 function handleRowClick(_e: Event, row: { original: TPipeline }) {
-  navigateTo(`/dashboard/pipelines/${row.original._id}`)
+  navigateTo(`/pipelines/${row.original._id}`)
 }
 
 // Status helpers
@@ -268,7 +268,7 @@ useHead({ title: 'Pipelines · Control Plane' })
             <UDropdownMenu
               :items="[
                 [
-                  { label: 'View Details', icon: 'i-lucide-eye', onSelect: () => navigateTo(`/dashboard/pipelines/${row.original._id}`) }
+                  { label: 'View Details', icon: 'i-lucide-eye', onSelect: () => navigateTo(`/pipelines/${row.original._id}`) }
                 ],
                 [{ label: 'Delete', icon: 'i-lucide-trash', color: 'error' as const, onSelect: () => openDelete(row.original) }]
               ]"
@@ -357,7 +357,7 @@ useHead({ title: 'Pipelines · Control Plane' })
               >
                 No applications available.
                 <NuxtLink
-                  to="/dashboard/apps"
+                  to="/apps"
                   class="text-primary underline"
                 >Create an app</NuxtLink> first.
               </span>

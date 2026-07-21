@@ -199,8 +199,8 @@ describe("Database Resource", function () {
       const result = await repo.getAll({ page: 1, limit: 50 });
       const found = result.items.find((db: any) => db._id.toString() === id.toString());
       expect(found).to.exist;
-      expect(found.credentials?.adminPassword).to.be.undefined;
-      expect(found.credentials?.connectionString).to.be.undefined;
+      expect((found as any).credentials?.adminPassword).to.be.undefined;
+      expect((found as any).credentials?.connectionString).to.be.undefined;
     });
   });
 

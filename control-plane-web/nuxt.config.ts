@@ -47,8 +47,8 @@ export default defineNuxtConfig({
     "/api/apps/**": {
       proxy: `${process.env.API_URL || "http://localhost:5005"}/api/apps/**`,
     },
-    "/api/databases/**": {
-      proxy: `${process.env.API_URL || "http://localhost:5005"}/api/databases/**`,
+    "/api/addons/**": {
+      proxy: `${process.env.API_URL || "http://localhost:5005"}/api/addons/**`,
     },
     "/api/ssh-keys/**": {
       proxy: `${process.env.API_URL || "http://localhost:5005"}/api/ssh-keys/**`,
@@ -74,6 +74,21 @@ export default defineNuxtConfig({
     },
     "/api/nodes/**": {
       proxy: `${process.env.API_URL || "http://localhost:5005"}/api/nodes/**`,
+    },
+    "/api/metrics/**": {
+      proxy: `${process.env.API_URL || "http://localhost:5005"}/api/metrics/**`,
+    },
+    "/api/logs/**": {
+      proxy: `${process.env.API_URL || "http://localhost:5005"}/api/logs/**`,
+    },
+    "/api/pipelines/**": {
+      proxy: `${process.env.API_URL || "http://localhost:5005"}/api/pipelines/**`,
+    },
+    "/api/registries/**": {
+      proxy: `${process.env.API_URL || "http://localhost:5005"}/api/registries/**`,
+    },
+    "/api/approvals/**": {
+      proxy: `${process.env.API_URL || "http://localhost:5005"}/api/approvals/**`,
     },
   },
 

@@ -9,7 +9,7 @@
             color="neutral"
             variant="ghost"
             size="sm"
-            to="/dashboard/settings"
+            to="/settings"
           />
           <h1 class="text-xl font-bold text-highlighted">
             SSH Keys

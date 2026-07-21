@@ -9,7 +9,7 @@
             color="neutral"
             variant="ghost"
             size="sm"
-            to="/dashboard/settings"
+            to="/settings"
           />
           <h1 class="text-xl font-bold text-highlighted">
             API Tokens
@@ -265,8 +265,8 @@ const availableScopes = [
   { value: 'servers:write', label: 'Servers (Write)' },
   { value: 'apps:read', label: 'Apps (Read)' },
   { value: 'apps:write', label: 'Apps (Write)' },
-  { value: 'databases:read', label: 'Databases (Read)' },
-  { value: 'databases:write', label: 'Databases (Write)' },
+  { value: 'addons:read', label: 'Resources (Read)' },
+  { value: 'addons:write', label: 'Resources (Write)' },
   { value: 'deployments:read', label: 'Deployments (Read)' },
   { value: 'deployments:write', label: 'Deployments (Write)' }
 ]

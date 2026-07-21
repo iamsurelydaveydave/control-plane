@@ -193,7 +193,7 @@ async function submitDelete() {
       color: 'success',
       icon: 'i-lucide-check-circle'
     })
-    router.push('/dashboard/apps')
+    router.push('/apps')
   } catch (error: unknown) {
     const err = error as { data?: { message?: string } }
     toast.add({
@@ -245,7 +245,7 @@ useHead({ title: computed(() => app.value ? `${app.value.name} · Control Plane`
           color="neutral"
           variant="ghost"
           size="sm"
-          @click="router.push('/dashboard/apps')"
+          @click="router.push('/apps')"
         />
         <div v-if="app">
           <div class="flex items-center gap-2">
@@ -588,7 +588,7 @@ useHead({ title: computed(() => app.value ? `${app.value.name} · Control Plane`
         class="mt-4"
         icon="i-lucide-arrow-left"
         variant="subtle"
-        @click="router.push('/dashboard/apps')"
+        @click="router.push('/apps')"
       >
         Back to Apps
       </UButton>

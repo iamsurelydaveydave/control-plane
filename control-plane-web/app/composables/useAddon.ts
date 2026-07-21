@@ -40,10 +40,10 @@ export default function useAddon() {
   }
 
   function getConnectionInfo(id: string) {
-    return useNuxtApp().$api<{ connectionInfo: TAddonConnectionInfo }>(`/addons/${id}/connection-info`, {
-      method: 'GET'
-    })
-  }
+      return useNuxtApp().$api<{ connectionInfo: TAddonConnectionInfo, connectionString?: string }>(`/addons/${id}/connection`, {
+        method: 'GET'
+      })
+    }
 
   function start(id: string) {
     return useNuxtApp().$api<{ message: string }>(`/addons/${id}/start`, {
@@ -63,6 +63,29 @@ export default function useAddon() {
     })
   }
 
+  function scale(id: string, replicas: number) {
+    return useNuxtApp().$api<{ message: string }>(`/addons/${id}/scale`, {
+      method: 'POST',
+      body: { replicas }
+    })
+  }
+
+  function getLogs(id: string, options: { tailLines?: number, sinceSeconds?: number } = {}) {
+    return useNuxtApp().$api<{ logs: string[] }>(`/addons/${id}/logs`, {
+      method: 'GET',
+      query: {
+        tailLines: options.tailLines ?? 100,
+        sinceSeconds: options.sinceSeconds
+      }
+    })
+  }
+
+  function getEvents(id: string) {
+    return useNuxtApp().$api<{ events: TK8sEvent[] }>(`/addons/${id}/events`, {
+      method: 'GET'
+    })
+  }
+
   return {
     addon,
     getAll,
@@ -72,6 +95,9 @@ export default function useAddon() {
     getConnectionInfo,
     start,
     stop,
-    restart
+    restart,
+    scale,
+    getLogs,
+    getEvents
   }
 }

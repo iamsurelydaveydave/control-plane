@@ -9,13 +9,7 @@ declare type TPermission =
   | 'apps:update'
   | 'apps:delete'
   | 'apps:deploy'
-  // Databases
-  | 'databases:read'
-  | 'databases:create'
-  | 'databases:update'
-  | 'databases:delete'
-  | 'databases:backup'
-  // Addons (Helm-deployed services)
+  // Addons / Resources (Helm-deployed services — databases, caches, analytics)
   | 'addons:read'
   | 'addons:create'
   | 'addons:update'

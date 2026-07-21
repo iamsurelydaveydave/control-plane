@@ -1,21 +1,18 @@
 #!/bin/bash
-## Control Plane Installation Script
-## One-liner: curl -fsSL https://get.controlplane.dev/install.sh | bash
+## Control Plane Installation Script (K8s-Native with Caddy)
+## One-liner: curl -fsSL https://get.goweekdays.com/install.sh | bash
 ##
-## If Control Plane is already running, this script automatically
-## delegates to upgrade.sh to perform an in-place update.
+## Installs K3s and deploys Control Plane via Helm chart.
+## Uses Caddy for automatic HTTPS.
 ##
 ## Environment variables:
-## MONGODB_URI          - MongoDB Atlas connection string (production)
-## DOMAIN               - Domain for HTTPS (optional, uses IP if not set)
-## ACME_EMAIL           - Email for Let's Encrypt SSL certificates (defaults to ROOT_USER_EMAIL)
-## ROOT_USERNAME        - Initial admin username
+## DOMAIN               - Domain for HTTPS (required for production)
+## MONGODB_URI          - External MongoDB URI (optional, installs in-cluster if not set)
+## ACME_EMAIL           - Email for Let's Encrypt SSL certificates
 ## ROOT_USER_EMAIL      - Initial admin email
 ## ROOT_USER_PASSWORD   - Initial admin password
 ## VERSION              - Specific version to install (default: latest)
-## REGISTRY_URL         - Custom Docker registry (default: ghcr.io)
-## AUTOUPDATE           - Set to "false" to disable auto-updates
-## ENABLE_K8S           - Set to "true" to install K3s for database provisioning
+## SKIP_K3S             - Set to "true" to skip K3s installation (use existing cluster)
 
 set -e
 set -o pipefail
@@ -25,10 +22,9 @@ set -o pipefail
 # ================================
 
 CDN="https://get.goweekdays.com"
-DATE=$(date +"%Y%m%d-%H%M%S")
+NAMESPACE="control-plane"
+RELEASE_NAME="control-plane"
 DATA_DIR="/data/control-plane"
-SOURCE_DIR="$DATA_DIR/source"
-ENV_FILE="$SOURCE_DIR/.env"
 
 # Colors for output
 RED='\033[0;31m'
@@ -79,718 +75,681 @@ prompt() {
     echo -ne "${GREEN}→${NC} $prompt_text: "
     
     if [ "$is_secret" = "true" ]; then
-        read -s value
+        read -rs value
         echo ""
     else
-        read value
+        read -r value
     fi
     
-    if [ -z "$value" ] && [ -n "$default_value" ]; then
-        value="$default_value"
+    value="${value:-$default_value}"
+    eval "$var_name='$value'"
+}
+
+generate_password() {
+    openssl rand -base64 32 | tr -dc 'a-zA-Z0-9' | head -c 24
+}
+
+check_command() {
+    if ! command -v "$1" &> /dev/null; then
+        return 1
     fi
-    
-    eval "$var_name=\"$value\""
+    return 0
+}
+
+get_public_ip() {
+    curl -s https://api.ipify.org 2>/dev/null || curl -s https://ifconfig.me 2>/dev/null || echo "localhost"
 }
 
 # ================================
 # Pre-flight Checks
 # ================================
 
-if [ "$EUID" -ne 0 ]; then
-    log_error "Please run this script as root or with sudo"
-    exit 1
-fi
-
-# Detect OS
-OS_TYPE=$(grep -w "ID" /etc/os-release 2>/dev/null | cut -d "=" -f 2 | tr -d '"' || echo "unknown")
-OS_VERSION=$(grep -w "VERSION_ID" /etc/os-release 2>/dev/null | cut -d "=" -f 2 | tr -d '"' || echo "unknown")
-
-# Map similar distros
-case "$OS_TYPE" in
-    manjaro|manjaro-arm|endeavouros|cachyos) OS_TYPE="arch" ;;
-    fedora-asahi-remix) OS_TYPE="fedora" ;;
-    pop|linuxmint|zorin) OS_TYPE="ubuntu" ;;
-esac
-
-# Check supported OS
-case "$OS_TYPE" in
-    arch|ubuntu|debian|raspbian|centos|fedora|rhel|ol|rocky|sles|opensuse-leap|opensuse-tumbleweed|almalinux|amzn|alpine) ;;
-    *)
-        log_error "Unsupported OS: $OS_TYPE"
-        log_error "This script supports: Debian, Ubuntu, RHEL, Arch, Alpine, and SLES-based distributions"
+preflight_checks() {
+    log_section "Pre-flight Checks"
+    
+    # Check if running as root
+    if [ "$EUID" -ne 0 ]; then
+        log_error "Please run as root (sudo)"
         exit 1
-        ;;
-esac
-
-# ================================
-# Check for Existing Installation
-# ================================
-
-# If Control Plane is already running, delegate to upgrade script
-if docker ps --format '{{.Names}}' 2>/dev/null | grep -q '^control-plane-api$'; then
-    log "Control Plane is already running - switching to upgrade mode"
-    
-    # Ensure upgrade script exists
-    if [ -f "$SOURCE_DIR/upgrade.sh" ]; then
-        exec "$SOURCE_DIR/upgrade.sh" "${VERSION:-latest}"
-    else
-        # Download upgrade script if missing
-        log "Downloading upgrade script..."
-        mkdir -p "$SOURCE_DIR"
-        curl -fsSL "$CDN/upgrade.sh" -o "$SOURCE_DIR/upgrade.sh"
-        chmod +x "$SOURCE_DIR/upgrade.sh"
-        exec "$SOURCE_DIR/upgrade.sh" "${VERSION:-latest}"
     fi
-fi
-
-# ================================
-# Banner
-# ================================
-
-echo -e "${PURPLE}"
-cat << 'EOF'
-   ____            _             _   ____  _                  
-  / ___|___  _ __ | |_ _ __ ___ | | |  _ \| | __ _ _ __   ___ 
- | |   / _ \| '_ \| __| '__/ _ \| | | |_) | |/ _` | '_ \ / _ \
- | |__| (_) | | | | |_| | | (_) | | |  __/| | (_| | | | |  __/
-  \____\___/|_| |_|\__|_|  \___/|_| |_|   |_|\__,_|_| |_|\___|
-                                                               
-EOF
-echo -e "${NC}"
-
-echo "Welcome to Control Plane Installer!"
-echo "Source: https://github.com/iamsurelydaveydave/control-plane"
-echo ""
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo "| Operating System  | $OS_TYPE $OS_VERSION"
-echo "| Install Date      | $DATE"
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-
-# ================================
-# Interactive Configuration
-# ================================
-
-log_section "Configuration"
-
-echo "Please provide your database credentials."
-echo "You can get free MongoDB at: https://mongodb.com/atlas"
-echo "You can get free Redis at: https://upstash.com or https://redis.com"
-echo ""
-
-# MongoDB URI (required)
-if [ -z "${MONGODB_URI:-}" ]; then
-    echo -e "${YELLOW}MongoDB Connection (required)${NC}"
-    echo "  Example: mongodb+srv://user:pass@cluster.mongodb.net/control-plane"
-    echo ""
+    log_success "Running as root"
     
-    while [ -z "${MONGODB_URI:-}" ]; do
-        echo -ne "${GREEN}→${NC} MongoDB URI: "
-        read MONGODB_URI < /dev/tty
-        if [ -z "$MONGODB_URI" ]; then
-            echo -e "${RED}  MongoDB URI is required${NC}"
-        fi
-    done
-    echo ""
-fi
-
-# Redis URL (required)
-if [ -z "${REDIS_URL:-}" ]; then
-    echo -e "${YELLOW}Redis Connection (required)${NC}"
-    echo "  Example: redis://default:password@host:port"
-    echo "  Upstash: rediss://default:xxx@xxx.upstash.io:6379"
-    echo ""
+    # Check OS
+    if [ -f /etc/os-release ]; then
+        . /etc/os-release
+        log_success "OS: $NAME $VERSION_ID"
+    else
+        log_warn "Could not detect OS"
+    fi
     
-    while [ -z "${REDIS_URL:-}" ]; do
-        echo -ne "${GREEN}→${NC} Redis URL: "
-        read REDIS_URL < /dev/tty
-        if [ -z "$REDIS_URL" ]; then
-            echo -e "${RED}  Redis URL is required${NC}"
-        fi
-    done
-    echo ""
-fi
-
-# Domain (optional)
-if [ -z "${DOMAIN:-}" ]; then
-    echo -e "${YELLOW}Domain Configuration (optional)${NC}"
-    echo "  Enter your domain for HTTPS (e.g., cp.example.com)"
-    echo "  Leave empty to access via IP address (HTTP only)"
-    echo ""
-    echo -ne "${GREEN}→${NC} Domain: "
-    read DOMAIN < /dev/tty
-    echo ""
-fi
-
-# Admin credentials
-if [ -z "${ROOT_USER_EMAIL:-}" ]; then
-    echo -e "${YELLOW}Admin Account${NC}"
-    echo "  Create the initial administrator account"
-    echo ""
-    
-    echo -ne "${GREEN}→${NC} Admin email: "
-    read ROOT_USER_EMAIL < /dev/tty
-    
-    while [ -z "$ROOT_USER_EMAIL" ]; do
-        echo -e "${RED}  Email is required${NC}"
-        echo -ne "${GREEN}→${NC} Admin email: "
-        read ROOT_USER_EMAIL < /dev/tty
-    done
-    
-    echo -ne "${GREEN}→${NC} Admin password: "
-    read -s ROOT_USER_PASSWORD < /dev/tty
-    echo ""
-    
-    while [ -z "$ROOT_USER_PASSWORD" ] || [ ${#ROOT_USER_PASSWORD} -lt 8 ]; do
-        echo -e "${RED}  Password must be at least 8 characters${NC}"
-        echo -ne "${GREEN}→${NC} Admin password: "
-        read -s ROOT_USER_PASSWORD < /dev/tty
-        echo ""
-    done
-    
-    echo -ne "${GREEN}→${NC} Confirm password: "
-    read -s ROOT_USER_PASSWORD_CONFIRM < /dev/tty
-    echo ""
-    
-    while [ "$ROOT_USER_PASSWORD" != "$ROOT_USER_PASSWORD_CONFIRM" ]; do
-        echo -e "${RED}  Passwords do not match${NC}"
-        echo -ne "${GREEN}→${NC} Admin password: "
-        read -s ROOT_USER_PASSWORD < /dev/tty
-        echo ""
-        echo -ne "${GREEN}→${NC} Confirm password: "
-        read -s ROOT_USER_PASSWORD_CONFIRM < /dev/tty
-        echo ""
-    done
-    
-    ROOT_USERNAME=${ROOT_USER_EMAIL%%@*}
-    echo ""
-fi
-
-# Confirmation
-echo ""
-echo -e "${BLUE}━━━ Configuration Summary ━━━${NC}"
-echo -e "  MongoDB:  ${MONGODB_URI:0:50}..."
-echo -e "  Redis:    ${REDIS_URL:0:50}..."
-echo -e "  Domain:   ${DOMAIN:-${YELLOW}IP access only${NC}}"
-echo -e "  Admin:    $ROOT_USER_EMAIL"
-echo ""
-echo -ne "${GREEN}→${NC} Proceed with installation? [Y/n]: "
-read CONFIRM < /dev/tty
-if [[ "$CONFIRM" =~ ^[Nn] ]]; then
-    echo "Installation cancelled."
-    exit 0
-fi
-
-# ================================
-# Check Disk Space
-# ================================
-
-TOTAL_SPACE=$(df -BG / | awk 'NR==2 {print $2}' | sed 's/G//')
-AVAILABLE_SPACE=$(df -BG / | awk 'NR==2 {print $4}' | sed 's/G//')
-REQUIRED_AVAILABLE=10
-
-if [ "$AVAILABLE_SPACE" -lt "$REQUIRED_AVAILABLE" ]; then
-    log_warn "Low disk space: ${AVAILABLE_SPACE}GB available, ${REQUIRED_AVAILABLE}GB recommended"
-    log_warn "Continuing in 5 seconds..."
-    sleep 5
-fi
-
-# ================================
-# Create Directories
-# ================================
-
-log_section "Step 1/7: Creating directories"
-
-mkdir -p "$DATA_DIR"/{source,ssh,logs,backups,ansible}
-mkdir -p "$DATA_DIR"/ssh/{keys,mux}
-
-# Set permissions (9999 is the controlplane user in the container)
-chown -R 9999:root "$DATA_DIR" 2>/dev/null || true
-chmod -R 700 "$DATA_DIR"
-
-log_success "Directories created at $DATA_DIR"
-
-# Start logging to file
-INSTALL_LOG="$DATA_DIR/source/install-${DATE}.log"
-exec > >(tee -a "$INSTALL_LOG") 2>&1
-
-# ================================
-# Install Dependencies
-# ================================
-
-log_section "Step 2/7: Installing dependencies"
-
-install_packages() {
-    case "$OS_TYPE" in
-        arch)
-            pacman -Sy --noconfirm --needed curl wget git jq openssl >/dev/null
+    # Check architecture
+    ARCH=$(uname -m)
+    case $ARCH in
+        x86_64|amd64)
+            ARCH="amd64"
             ;;
-        alpine)
-            apk update >/dev/null
-            apk add curl wget git jq openssl bash >/dev/null
+        aarch64|arm64)
+            ARCH="arm64"
             ;;
-        ubuntu|debian|raspbian)
-            apt-get update -y >/dev/null
-            apt-get install -y curl wget git jq openssl ca-certificates >/dev/null
-            ;;
-        centos|fedora|rhel|ol|rocky|almalinux|amzn)
-            if command -v dnf >/dev/null; then
-                dnf install -y curl wget git jq openssl >/dev/null
-            else
-                yum install -y curl wget git jq openssl >/dev/null
-            fi
-            ;;
-        sles|opensuse-leap|opensuse-tumbleweed)
-            zypper refresh >/dev/null
-            zypper install -y curl wget git jq openssl >/dev/null
+        *)
+            log_error "Unsupported architecture: $ARCH"
+            exit 1
             ;;
     esac
-}
-
-# Check if packages are already installed
-ALL_INSTALLED=true
-for pkg in curl wget git jq openssl; do
-    if ! command -v "$pkg" >/dev/null 2>&1; then
-        ALL_INSTALLED=false
-        break
-    fi
-done
-
-if [ "$ALL_INSTALLED" = true ]; then
-    log_success "All required packages already installed"
-else
-    log "Installing curl, wget, git, jq, openssl..."
-    install_packages
-    log_success "Dependencies installed"
-fi
-
-# ================================
-# Install Docker
-# ================================
-
-log_section "Step 3/7: Installing Docker"
-
-install_docker() {
-    log "Installing Docker..."
-    curl -fsSL https://get.docker.com | sh 2>&1 || {
-        log_error "Docker installation failed"
-        log_error "Please install Docker manually: https://docs.docker.com/engine/install/"
-        exit 1
-    }
-}
-
-if ! command -v docker >/dev/null 2>&1; then
-    install_docker
+    log_success "Architecture: $ARCH"
     
-    # Enable and start Docker
-    if command -v systemctl >/dev/null 2>&1; then
-        systemctl enable docker >/dev/null 2>&1
-        systemctl start docker >/dev/null 2>&1
-    elif command -v service >/dev/null 2>&1; then
-        service docker start >/dev/null 2>&1
+    # Check minimum requirements
+    TOTAL_MEM=$(free -m | awk '/^Mem:/{print $2}')
+    if [ "$TOTAL_MEM" -lt 2048 ]; then
+        log_warn "Less than 2GB RAM detected. Recommended: 4GB+"
+    else
+        log_success "Memory: ${TOTAL_MEM}MB"
     fi
     
-    log_success "Docker installed and started"
-else
-    log_success "Docker is already installed"
-fi
-
-# Verify Docker is running
-if ! docker info >/dev/null 2>&1; then
-    log_error "Docker is installed but not running"
-    log_error "Please start Docker and try again"
-    exit 1
-fi
-
-# Check Docker version
-DOCKER_VERSION=$(docker version --format '{{.Server.Version}}' 2>/dev/null | cut -d. -f1)
-if [ -n "$DOCKER_VERSION" ] && [ "$DOCKER_VERSION" -lt 24 ]; then
-    log_warn "Docker version $DOCKER_VERSION is old. Version 24+ is recommended."
-fi
-
-# ================================
-# Download Configuration Files
-# ================================
-
-log_section "Step 4/7: Downloading configuration files"
-
-# Fetch latest version info
-log "Fetching version information..."
-VERSIONS_JSON=$(curl -fsSL "$CDN/versions.json" 2>/dev/null || echo '{"version":"latest"}')
-LATEST_VERSION=$(echo "$VERSIONS_JSON" | jq -r '.version // "latest"')
-
-# Allow version override
-VERSION=${VERSION:-$LATEST_VERSION}
-REGISTRY_URL=${REGISTRY_URL:-ghcr.io}
-
-log "| Version           | $VERSION"
-log "| Registry          | $REGISTRY_URL"
-
-# Download files
-log "Downloading docker-compose.yml..."
-curl -fsSL "$CDN/docker-compose.yml" -o "$SOURCE_DIR/docker-compose.yml"
-
-log "Downloading Caddyfile..."
-curl -fsSL "$CDN/Caddyfile" -o "$SOURCE_DIR/Caddyfile"
-
-log "Downloading .env.template..."
-curl -fsSL "$CDN/.env.template" -o "$SOURCE_DIR/.env.template"
-
-log "Downloading upgrade.sh..."
-curl -fsSL "$CDN/upgrade.sh" -o "$SOURCE_DIR/upgrade.sh"
-chmod +x "$SOURCE_DIR/upgrade.sh"
-
-log_success "Configuration files downloaded"
-
-# ================================
-# Configure Environment
-# ================================
-
-log_section "Step 5/7: Configuring environment"
-
-# Generate secrets if not provided
-generate_secret() {
-    openssl rand -base64 32 | tr -d '\n/+=' | cut -c1-32
-}
-
-# Create or update .env file
-if [ -f "$ENV_FILE" ]; then
-    log "Backing up existing .env to .env-$DATE"
-    cp "$ENV_FILE" "$ENV_FILE-$DATE"
-fi
-
-# Start with template
-cp "$SOURCE_DIR/.env.template" "$ENV_FILE"
-
-# Update environment variable (add if missing, update if empty)
-update_env() {
-    local key="$1"
-    local value="$2"
-    
-    if grep -q "^${key}=$" "$ENV_FILE"; then
-        # Variable exists but is empty
-        sed -i "s|^${key}=$|${key}=${value}|" "$ENV_FILE"
-    elif ! grep -q "^${key}=" "$ENV_FILE"; then
-        # Variable doesn't exist
-        echo "${key}=${value}" >> "$ENV_FILE"
+    # Check if curl is available
+    if ! check_command curl; then
+        log "Installing curl..."
+        apt-get update -qq && apt-get install -y -qq curl
     fi
+    log_success "curl available"
+    
+    # Create data directory
+    mkdir -p "$DATA_DIR"
+    log_success "Data directory: $DATA_DIR"
 }
 
-# Set version and registry
-update_env "VERSION" "$VERSION"
-update_env "REGISTRY_URL" "$REGISTRY_URL"
-
-# Generate secrets
-log "Generating secrets..."
-update_env "JWT_SECRET" "$(generate_secret)"
-update_env "SESSION_SECRET" "$(generate_secret)"
-
-# MongoDB (user provided)
-update_env "MONGODB_URI" "$MONGODB_URI"
-log_success "MongoDB configured"
-
-# Redis (user provided)
-update_env "REDIS_URL" "$REDIS_URL"
-log_success "Redis configured"
-
-# Optional: Domain configuration
-if [ -n "${DOMAIN:-}" ]; then
-    update_env "DOMAIN" "$DOMAIN"
-    update_env "COOKIE_DOMAIN" ".$DOMAIN"
-    update_env "ALLOWED_ORIGINS" "https://$DOMAIN"
-    # Use admin email for ACME/Let's Encrypt SSL certificates
-    update_env "ACME_EMAIL" "${ROOT_USER_EMAIL:-admin@${DOMAIN}}"
-    log_success "Domain configured: $DOMAIN"
-else
-    log "No DOMAIN set - will use HTTP on public IP"
-fi
-
-# Admin credentials
-if [ -n "${ROOT_USER_EMAIL:-}" ] && [ -n "${ROOT_USER_PASSWORD:-}" ]; then
-    update_env "ROOT_USERNAME" "${ROOT_USERNAME:-admin}"
-    update_env "ROOT_USER_EMAIL" "$ROOT_USER_EMAIL"
-    update_env "ROOT_USER_PASSWORD" "$ROOT_USER_PASSWORD"
-    log_success "Admin credentials saved"
-fi
-
-# Auto-update setting
-update_env "AUTOUPDATE" "${AUTOUPDATE:-true}"
-
-# K8s settings will be configured after K3s installation (Step 6b)
-
-log_success "Environment configured"
-
 # ================================
-# Generate SSH Key
+# Install K3s
 # ================================
 
-log_section "Step 6/7: Setting up SSH access"
-
-SSH_KEY_FILE="$DATA_DIR/ssh/keys/id.controlplane"
-
-if [ ! -f "$SSH_KEY_FILE" ]; then
-    log "Generating SSH key for server management..."
-    ssh-keygen -t ed25519 -a 100 -f "$SSH_KEY_FILE" -q -N "" -C "control-plane"
-    chown 9999:root "$SSH_KEY_FILE" 2>/dev/null || true
-    chmod 600 "$SSH_KEY_FILE"
+install_k3s() {
+    log_section "Installing K3s (Lightweight Kubernetes)"
     
-    # Add to authorized_keys for localhost access
-    mkdir -p ~/.ssh
-    chmod 700 ~/.ssh
-    touch ~/.ssh/authorized_keys
-    chmod 600 ~/.ssh/authorized_keys
+    if [ "$SKIP_K3S" = "true" ]; then
+        log "Skipping K3s installation (SKIP_K3S=true)"
+        if ! check_command kubectl; then
+            log_error "kubectl not found. Please ensure you have a working Kubernetes cluster."
+            exit 1
+        fi
+        return
+    fi
     
-    # Remove old control-plane key and add new one
-    sed -i '/control-plane$/d' ~/.ssh/authorized_keys
-    cat "${SSH_KEY_FILE}.pub" >> ~/.ssh/authorized_keys
-    
-    log_success "SSH key generated and added to authorized_keys"
-else
-    log_success "SSH key already exists"
-fi
-
-# ================================
-# Install K3s (for K8s-based database provisioning)
-# ================================
-
-log_section "Step 6b/7: Installing K3s + Percona Operator"
-
-# Check if K3s is already installed
-if command -v k3s >/dev/null 2>&1; then
-    log_success "K3s is already installed"
-    ENABLE_K8S="true"
-else
-    log "Installing K3s server..."
-    ENABLE_K8S="true"
-    
-    # Get public IP for K3s TLS SAN
-    PUBLIC_IP=$(curl -4s --max-time 5 https://ifconfig.io 2>/dev/null || hostname -I | awk '{print $1}')
-    
-    # Install K3s with TLS SANs for public IP and Docker gateway IPs
-    # Docker containers need to access K3s via the Docker network gateway (172.18.0.1, 172.17.0.1)
-    curl -sfL https://get.k3s.io | sh -s - server \
-        --disable traefik \
-        --disable servicelb \
-        --write-kubeconfig-mode 644 \
-        --tls-san "$PUBLIC_IP" \
-        --tls-san "172.18.0.1" \
-        --tls-san "172.17.0.1" 2>&1 || {
-        log_error "K3s installation failed"
-        log_warn "Continuing without K3s - will use Ansible for database provisioning"
-        ENABLE_K8S="false"
-    }
-    
-    if [ "$ENABLE_K8S" = "true" ]; then
+    if check_command k3s; then
+        log_success "K3s already installed"
+        K3S_VERSION=$(k3s --version | head -1)
+        log "Version: $K3S_VERSION"
+    else
+        log "Installing K3s..."
+        curl -sfL https://get.k3s.io | sh -s - \
+            --write-kubeconfig-mode 644 \
+            --disable traefik \
+            --disable servicelb
+        
         # Wait for K3s to be ready
         log "Waiting for K3s to be ready..."
         sleep 10
-        WAITED=0
-        while ! kubectl get nodes >/dev/null 2>&1 && [ $WAITED -lt 60 ]; do
+        
+        until kubectl get nodes &>/dev/null; do
+            log "Waiting for Kubernetes API..."
             sleep 5
-            WAITED=$((WAITED + 5))
         done
         
-        if kubectl get nodes >/dev/null 2>&1; then
-            log_success "K3s server installed"
+        log_success "K3s installed successfully"
+    fi
+    
+    # Set KUBECONFIG for this session
+    export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+    
+    # Verify cluster is ready
+    kubectl wait --for=condition=Ready nodes --all --timeout=120s
+    log_success "Kubernetes cluster is ready"
+}
+
+# ================================
+# Install Helm
+# ================================
+
+install_helm() {
+    log_section "Installing Helm"
+    
+    if check_command helm; then
+        log_success "Helm already installed"
+        HELM_VERSION=$(helm version --short)
+        log "Version: $HELM_VERSION"
+        return
+    fi
+    
+    log "Installing Helm..."
+    curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+    
+    log_success "Helm installed successfully"
+}
+
+# ================================
+# Collect Configuration
+# ================================
+
+collect_config() {
+    log_section "Configuration"
+    
+    PUBLIC_IP=$(get_public_ip)
+    
+    # Domain
+    if [ -z "$DOMAIN" ]; then
+        prompt DOMAIN "Enter domain for Control Plane (or press Enter to use IP)" "$PUBLIC_IP"
+    fi
+    log "Domain: $DOMAIN"
+    
+    # ACME Email for Let's Encrypt
+    if [ -z "$ACME_EMAIL" ]; then
+        prompt ACME_EMAIL "Enter email for Let's Encrypt SSL (optional)" ""
+    fi
+    
+    # MongoDB URI
+    if [ -z "$MONGODB_URI" ]; then
+        log ""
+        log "MongoDB Options:"
+        log "  1. Use external MongoDB (Atlas recommended for production)"
+        log "  2. Install MongoDB in-cluster (for testing only)"
+        log ""
+        prompt MONGODB_CHOICE "Choose option" "1"
+        
+        if [ "$MONGODB_CHOICE" = "1" ]; then
+            prompt MONGODB_URI "Enter MongoDB connection URI" ""
+            if [ -z "$MONGODB_URI" ]; then
+                log_error "MongoDB URI is required for external MongoDB"
+                exit 1
+            fi
         else
-            log_error "K3s did not become ready"
-            ENABLE_K8S="false"
+            INSTALL_MONGODB="true"
+            log_warn "In-cluster MongoDB is for testing only. Use MongoDB Atlas for production."
         fi
     fi
-fi
-
-# Install Percona Operator
-if [ "$ENABLE_K8S" = "true" ]; then
-    log "Installing Percona MongoDB Operator..."
     
-    # Apply Percona Operator
-    kubectl apply --server-side -f https://raw.githubusercontent.com/percona/percona-server-mongodb-operator/v1.16.0/deploy/bundle.yaml 2>&1 || {
-        log_warn "Failed to install Percona Operator - continuing anyway"
+    # Admin credentials
+    if [ -z "$ROOT_USER_EMAIL" ]; then
+        prompt ROOT_USER_EMAIL "Enter admin email" "admin@$DOMAIN"
+    fi
+    log "Admin email: $ROOT_USER_EMAIL"
+    
+    if [ -z "$ROOT_USER_PASSWORD" ]; then
+        DEFAULT_PASSWORD=$(generate_password)
+        prompt ROOT_USER_PASSWORD "Enter admin password" "$DEFAULT_PASSWORD" "true"
+    fi
+    
+    # Generate secrets
+    JWT_SECRET=$(generate_password)
+    SESSION_SECRET=$(generate_password)
+    REDIS_PASSWORD=$(generate_password)
+}
+
+# ================================
+# Install MongoDB (Optional)
+# ================================
+
+install_mongodb() {
+    if [ "$INSTALL_MONGODB" != "true" ]; then
+        return
+    fi
+    
+    log_section "Installing MongoDB (In-Cluster)"
+    
+    # Add Bitnami repo
+    helm repo add bitnami https://charts.bitnami.com/bitnami 2>/dev/null || true
+    helm repo update
+    
+    # Create namespace
+    kubectl create namespace $NAMESPACE --dry-run=client -o yaml | kubectl apply -f -
+    
+    # Generate MongoDB password
+    MONGO_ROOT_PASSWORD=$(generate_password)
+    
+    # Install MongoDB
+    helm upgrade --install mongodb bitnami/mongodb \
+        --namespace $NAMESPACE \
+        --set auth.rootPassword="$MONGO_ROOT_PASSWORD" \
+        --set auth.database="controlplane" \
+        --set persistence.size=10Gi \
+        --wait
+    
+    # Set MongoDB URI for in-cluster
+    MONGODB_URI="mongodb://root:${MONGO_ROOT_PASSWORD}@mongodb.${NAMESPACE}.svc.cluster.local:27017/controlplane?authSource=admin"
+    
+    log_success "MongoDB installed successfully"
+}
+
+# ================================
+# Install Redis
+# ================================
+
+install_redis() {
+    log_section "Installing Redis"
+    
+    # Add Bitnami repo
+    helm repo add bitnami https://charts.bitnami.com/bitnami 2>/dev/null || true
+    helm repo update
+    
+    # Create namespace
+    kubectl create namespace $NAMESPACE --dry-run=client -o yaml | kubectl apply -f -
+    
+    # Check if already installed
+    if helm status redis -n $NAMESPACE &>/dev/null; then
+        log_success "Redis already installed"
+        return
+    fi
+    
+    # Install Redis
+    helm upgrade --install redis bitnami/redis \
+        --namespace $NAMESPACE \
+        --set architecture=standalone \
+        --set auth.password="$REDIS_PASSWORD" \
+        --set master.persistence.size=1Gi \
+        --wait
+    
+    REDIS_URL="redis://:${REDIS_PASSWORD}@redis-master.${NAMESPACE}.svc.cluster.local:6379"
+    
+    log_success "Redis installed successfully"
+}
+
+# ================================
+# Deploy Control Plane with Caddy
+# ================================
+
+deploy_control_plane() {
+    log_section "Deploying Control Plane"
+    
+    # Create namespace
+    kubectl create namespace $NAMESPACE --dry-run=client -o yaml | kubectl apply -f -
+    
+    # Create secrets
+    log "Creating secrets..."
+    kubectl create secret generic control-plane-secrets \
+        --namespace $NAMESPACE \
+        --from-literal=mongodb-uri="$MONGODB_URI" \
+        --from-literal=jwt-secret="$JWT_SECRET" \
+        --from-literal=session-secret="$SESSION_SECRET" \
+        --from-literal=redis-url="$REDIS_URL" \
+        --from-literal=root-user-email="$ROOT_USER_EMAIL" \
+        --from-literal=root-user-password="$ROOT_USER_PASSWORD" \
+        --dry-run=client -o yaml | kubectl apply -f -
+    
+    # Create Caddyfile ConfigMap
+    log "Creating Caddy configuration..."
+    
+    # Determine if we should use HTTPS
+    if [[ "$DOMAIN" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        # IP address - use HTTP only
+        CADDY_CONFIG="http://$DOMAIN {
+    handle /api/* {
+        reverse_proxy control-plane-api:5005
     }
-    
-    # Create databases namespace
-    kubectl create namespace databases --dry-run=client -o yaml | kubectl apply -f - 2>/dev/null || true
-    
-    # Install operator in databases namespace too
-    kubectl apply --server-side -f https://raw.githubusercontent.com/percona/percona-server-mongodb-operator/v1.16.0/deploy/bundle.yaml -n databases 2>&1 || true
-    
-    # Get K3s token for agent nodes
-    K3S_TOKEN=$(cat /var/lib/rancher/k3s/server/node-token 2>/dev/null || echo "")
-    
-    # Configure K3s access for Docker containers
-    # Docker containers can't use 127.0.0.1 - they need to use the Docker network gateway
-    # The control-plane network uses 172.18.0.0/16 by default, gateway is 172.18.0.1
-    DOCKER_GATEWAY="172.18.0.1"
-    K3S_SERVER_URL="https://${DOCKER_GATEWAY}:6443"
-    # External URL for agent nodes to join (must use public IP)
-    K3S_EXTERNAL_URL="https://${PUBLIC_IP}:6443"
-    
-    # Update kubeconfig to use Docker gateway instead of localhost
-    log "Configuring K3s for Docker container access..."
-    sed -i "s|127.0.0.1:6443|${DOCKER_GATEWAY}:6443|g" /etc/rancher/k3s/k3s.yaml
-    
-    # Add firewall rules to allow K3s API access
-    # - Docker containers need access via Docker gateway
-    # - External agent nodes need access via public IP
-    if command -v iptables >/dev/null 2>&1; then
-        log "Adding firewall rules for K3s API access..."
-        # Allow from Docker networks (for control-plane-api container)
-        iptables -I INPUT 1 -s 172.18.0.0/16 -p tcp --dport 6443 -j ACCEPT 2>/dev/null || true
-        iptables -I INPUT 1 -s 172.17.0.0/16 -p tcp --dport 6443 -j ACCEPT 2>/dev/null || true
-        # Allow from all (for external K3s agent nodes to join)
-        iptables -I INPUT 1 -p tcp --dport 6443 -j ACCEPT 2>/dev/null || true
-        # Persist iptables rules
-        if [ -d /etc/iptables ]; then
-            iptables-save > /etc/iptables/rules.v4 2>/dev/null || true
+    handle {
+        reverse_proxy control-plane-web:3000
+    }
+}"
+    else
+        # Domain - use HTTPS with automatic certs
+        if [ -n "$ACME_EMAIL" ]; then
+            CADDY_CONFIG="{
+    email $ACME_EMAIL
+}
+
+$DOMAIN {
+    handle /api/* {
+        reverse_proxy control-plane-api:5005
+    }
+    handle {
+        reverse_proxy control-plane-web:3000
+    }
+}"
         else
-            iptables-save > /etc/iptables.rules 2>/dev/null || true
+            CADDY_CONFIG="$DOMAIN {
+    handle /api/* {
+        reverse_proxy control-plane-api:5005
+    }
+    handle {
+        reverse_proxy control-plane-web:3000
+    }
+}"
         fi
     fi
     
-    # Update .env with K8s configuration
-    update_env "K8S_ENABLED" "true"
-    update_env "K8S_KUBECONFIG" "/etc/rancher/k3s/k3s.yaml"
-    update_env "K3S_SERVER_URL" "$K3S_SERVER_URL"
-    update_env "K3S_EXTERNAL_URL" "$K3S_EXTERNAL_URL"
-    update_env "K3S_TOKEN" "$K3S_TOKEN"
+    kubectl create configmap caddy-config \
+        --namespace $NAMESPACE \
+        --from-literal=Caddyfile="$CADDY_CONFIG" \
+        --dry-run=client -o yaml | kubectl apply -f -
     
-    log_success "Percona Operator installed"
-    log "K3s Server URL: $K3S_SERVER_URL (for Docker containers)"
-    log "K3s External URL: $K3S_EXTERNAL_URL (for agent nodes)"
-else
-    # K8s failed to install - use Ansible provisioning as fallback
-    update_env "K8S_ENABLED" "false"
-    
-    # Create empty kubeconfig placeholder so Docker volume mount doesn't fail
-    mkdir -p /etc/rancher/k3s
-    if [ ! -f /etc/rancher/k3s/k3s.yaml ]; then
-        echo "# K8s not enabled - placeholder file" > /etc/rancher/k3s/k3s.yaml
-    fi
-fi
-
-# ================================
-# Start Control Plane
-# ================================
-
-log_section "Step 7/7: Starting Control Plane"
-
-cd "$SOURCE_DIR"
-
-# Determine which compose file to use
-COMPOSE_CMD="docker compose"
-if ! docker compose version >/dev/null 2>&1; then
-    if command -v docker-compose >/dev/null 2>&1; then
-        COMPOSE_CMD="docker-compose"
-    else
-        log_error "Docker Compose not found. Please install Docker Compose."
-        exit 1
-    fi
-fi
-
-# Pull images
-log "Pulling Docker images (this may take a while)..."
-$COMPOSE_CMD pull
-
-# Start services
-log "Starting services..."
-$COMPOSE_CMD up -d
-
-# Wait for services to be healthy
-log "Waiting for services to be healthy..."
-MAX_WAIT=120
-WAITED=0
-
-while [ $WAITED -lt $MAX_WAIT ]; do
-    API_HEALTH=$(docker inspect --format='{{.State.Health.Status}}' control-plane-api 2>/dev/null || echo "starting")
-    WEB_HEALTH=$(docker inspect --format='{{.State.Health.Status}}' control-plane-web 2>/dev/null || echo "starting")
-    
-    if [ "$API_HEALTH" = "healthy" ] && [ "$WEB_HEALTH" = "healthy" ]; then
-        break
-    fi
-    
-    if [ $((WAITED % 10)) -eq 0 ]; then
-        log "API: $API_HEALTH, Web: $WEB_HEALTH (${WAITED}s)..."
-    fi
-    
-    sleep 2
-    WAITED=$((WAITED + 2))
-done
-
-if [ "$API_HEALTH" != "healthy" ] || [ "$WEB_HEALTH" != "healthy" ]; then
-    log_error "Services did not become healthy within ${MAX_WAIT}s"
-    log_error "API: $API_HEALTH, Web: $WEB_HEALTH"
-    log_error "Check logs: docker logs control-plane-api"
-    exit 1
-fi
-
-log_success "All services are running!"
-
-# ================================
-# Complete!
-# ================================
-
-echo ""
-echo -e "${GREEN}"
-cat << 'EOF'
-   ____                            _       _       _   _                 _ 
-  / ___|___  _ __   __ _ _ __ __ _| |_ ___| | __ _| |_(_) ___  _ __  ___| |
- | |   / _ \| '_ \ / _` | '__/ _` | __/ _ \ |/ _` | __| |/ _ \| '_ \/ __| |
- | |__| (_) | | | | (_| | | | (_| | ||  __/ | (_| | |_| | (_) | | | \__ \_|
-  \____\___/|_| |_|\__, |_|  \__,_|\__\___|_|\__,_|\__|_|\___/|_| |_|___(_)
-                   |___/                                                   
+    # Deploy Control Plane API
+    log "Deploying Control Plane API..."
+    cat <<EOF | kubectl apply -f -
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: control-plane-api
+  namespace: $NAMESPACE
+  labels:
+    app: control-plane-api
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: control-plane-api
+  template:
+    metadata:
+      labels:
+        app: control-plane-api
+    spec:
+      containers:
+        - name: api
+          image: ghcr.io/goweekdays/control-plane-api:${VERSION:-latest}
+          ports:
+            - containerPort: 5005
+          env:
+            - name: NODE_ENV
+              value: "production"
+            - name: PORT
+              value: "5005"
+            - name: MONGODB_URI
+              valueFrom:
+                secretKeyRef:
+                  name: control-plane-secrets
+                  key: mongodb-uri
+            - name: REDIS_URL
+              valueFrom:
+                secretKeyRef:
+                  name: control-plane-secrets
+                  key: redis-url
+            - name: JWT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: control-plane-secrets
+                  key: jwt-secret
+            - name: SESSION_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: control-plane-secrets
+                  key: session-secret
+            - name: ROOT_USER_EMAIL
+              valueFrom:
+                secretKeyRef:
+                  name: control-plane-secrets
+                  key: root-user-email
+            - name: ROOT_USER_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: control-plane-secrets
+                  key: root-user-password
+            - name: COOKIE_DOMAIN
+              value: "$DOMAIN"
+            - name: K8S_ENABLED
+              value: "true"
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          readinessProbe:
+            httpGet:
+              path: /api/health
+              port: 5005
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /api/health
+              port: 5005
+            initialDelaySeconds: 15
+            periodSeconds: 20
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: control-plane-api
+  namespace: $NAMESPACE
+spec:
+  selector:
+    app: control-plane-api
+  ports:
+    - port: 5005
+      targetPort: 5005
 EOF
-echo -e "${NC}"
 
-# Get public IPs
-IPV4=$(curl -4s --max-time 5 https://ifconfig.io 2>/dev/null || true)
-IPV6=$(curl -6s --max-time 5 https://ifconfig.io 2>/dev/null || true)
+    # Deploy Control Plane Web
+    log "Deploying Control Plane Web..."
+    cat <<EOF | kubectl apply -f -
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: control-plane-web
+  namespace: $NAMESPACE
+  labels:
+    app: control-plane-web
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: control-plane-web
+  template:
+    metadata:
+      labels:
+        app: control-plane-web
+    spec:
+      containers:
+        - name: web
+          image: ghcr.io/goweekdays/control-plane-web:${VERSION:-latest}
+          ports:
+            - containerPort: 3000
+          env:
+            - name: NODE_ENV
+              value: "production"
+            - name: NUXT_HOST
+              value: "0.0.0.0"
+            - name: NUXT_PORT
+              value: "3000"
+            - name: API_URL
+              value: "http://control-plane-api:5005"
+            - name: COOKIE_DOMAIN
+              value: "$DOMAIN"
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 200m
+              memory: 256Mi
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 3000
+            initialDelaySeconds: 10
+            periodSeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: control-plane-web
+  namespace: $NAMESPACE
+spec:
+  selector:
+    app: control-plane-web
+  ports:
+    - port: 3000
+      targetPort: 3000
+EOF
 
-echo "Your Control Plane is ready!"
-echo ""
+    # Deploy Caddy
+    log "Deploying Caddy (reverse proxy with auto-SSL)..."
+    cat <<EOF | kubectl apply -f -
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: caddy
+  namespace: $NAMESPACE
+  labels:
+    app: caddy
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: caddy
+  template:
+    metadata:
+      labels:
+        app: caddy
+    spec:
+      containers:
+        - name: caddy
+          image: caddy:2-alpine
+          ports:
+            - containerPort: 80
+            - containerPort: 443
+          volumeMounts:
+            - name: caddy-config
+              mountPath: /etc/caddy/Caddyfile
+              subPath: Caddyfile
+            - name: caddy-data
+              mountPath: /data
+            - name: caddy-config-storage
+              mountPath: /config
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+      volumes:
+        - name: caddy-config
+          configMap:
+            name: caddy-config
+        - name: caddy-data
+          emptyDir: {}
+        - name: caddy-config-storage
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: caddy
+  namespace: $NAMESPACE
+spec:
+  type: LoadBalancer
+  selector:
+    app: caddy
+  ports:
+    - name: http
+      port: 80
+      targetPort: 80
+    - name: https
+      port: 443
+      targetPort: 443
+EOF
+    
+    log_success "Control Plane deployed successfully"
+}
 
-if [ -n "${DOMAIN:-}" ]; then
-    echo -e "  ${GREEN}→${NC} https://$DOMAIN"
-else
-    if [ -n "$IPV4" ]; then
-        echo -e "  ${GREEN}→${NC} http://$IPV4:3000"
+# ================================
+# Print Summary
+# ================================
+
+print_summary() {
+    log_section "Installation Complete! 🎉"
+    
+    # Wait for pods to be ready
+    log "Waiting for pods to be ready..."
+    kubectl wait --for=condition=Ready pods --all -n $NAMESPACE --timeout=300s 2>/dev/null || true
+    
+    # Get external IP
+    EXTERNAL_IP=""
+    for i in {1..30}; do
+        EXTERNAL_IP=$(kubectl get svc caddy -n $NAMESPACE -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null)
+        if [ -n "$EXTERNAL_IP" ]; then
+            break
+        fi
+        sleep 2
+    done
+    
+    if [ -z "$EXTERNAL_IP" ]; then
+        EXTERNAL_IP=$(kubectl get svc caddy -n $NAMESPACE -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null)
     fi
-    if [ -n "$IPV6" ]; then
-        echo -e "  ${GREEN}→${NC} http://[$IPV6]:3000"
+    
+    if [ -z "$EXTERNAL_IP" ]; then
+        EXTERNAL_IP="<pending>"
     fi
-fi
-
-echo ""
-echo "Next steps:"
-echo "  1. Open the URL above in your browser"
-echo "  2. Complete the setup wizard"
-echo "  3. Add your first server"
-echo ""
-
-if [ "$ENABLE_K8S" = "true" ]; then
-    echo -e "${GREEN}Kubernetes Database Provisioning: ENABLED${NC}"
-    echo "  • K3s Server URL: $K3S_SERVER_URL"
-    echo "  • To add a database server as K3s agent:"
-    echo "    curl -sfL https://get.k3s.io | K3S_URL=$K3S_SERVER_URL K3S_TOKEN=<token> sh -"
-    echo "  • K3s token is stored in: /var/lib/rancher/k3s/server/node-token"
+    
+    # Determine URL
+    if [[ "$DOMAIN" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        URL="http://$DOMAIN"
+    else
+        URL="https://$DOMAIN"
+    fi
+    
     echo ""
-else
-    echo -e "${YELLOW}Kubernetes Database Provisioning: DISABLED${NC}"
-    echo "  Using Ansible-based database provisioning."
-    echo "  To enable K8s later, run the installer again with ENABLE_K8S=true"
+    echo -e "${GREEN}Control Plane is now running!${NC}"
     echo ""
-fi
-
-echo -e "${YELLOW}Important:${NC}"
-echo "  • Back up your .env file: $ENV_FILE"
-echo "  • Installation log: $INSTALL_LOG"
-echo ""
-
-if [ -z "${MONGODB_URI:-}" ]; then
-    echo -e "${YELLOW}Warning:${NC} Using local MongoDB. For production:"
-    echo "  • Create a MongoDB Atlas cluster"
-    echo "  • Update MONGODB_URI in $ENV_FILE"
-    echo "  • Restart: cd $SOURCE_DIR && docker compose up -d"
+    echo -e "  ${BLUE}URL:${NC}         $URL"
+    echo -e "  ${BLUE}External IP:${NC} $EXTERNAL_IP"
+    echo -e "  ${BLUE}Email:${NC}       $ROOT_USER_EMAIL"
+    echo -e "  ${BLUE}Password:${NC}    $ROOT_USER_PASSWORD"
     echo ""
-fi
+    echo -e "${YELLOW}Important:${NC}"
+    echo "  • Save your admin credentials securely"
+    if [[ ! "$DOMAIN" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        echo "  • Point your DNS A record for $DOMAIN to $EXTERNAL_IP"
+        echo "  • SSL certificate will be provisioned automatically once DNS propagates"
+    fi
+    echo ""
+    echo -e "${PURPLE}Useful Commands:${NC}"
+    echo "  • View pods:     kubectl get pods -n $NAMESPACE"
+    echo "  • View logs:     kubectl logs -n $NAMESPACE -l app=control-plane-api -f"
+    echo "  • Caddy logs:    kubectl logs -n $NAMESPACE -l app=caddy -f"
+    echo ""
+    
+    # Show pod status
+    echo -e "${BLUE}Pod Status:${NC}"
+    kubectl get pods -n $NAMESPACE
+    echo ""
+    
+    # Save credentials
+    CREDS_FILE="$DATA_DIR/credentials.txt"
+    cat > "$CREDS_FILE" <<EOF
+Control Plane Credentials
+========================
+URL:      $URL
+Email:    $ROOT_USER_EMAIL
+Password: $ROOT_USER_PASSWORD
 
-echo "Documentation: https://docs.controlplane.dev"
-echo "Support: https://github.com/iamsurelydaveydave/control-plane/issues"
+Generated: $(date)
+EOF
+    chmod 600 "$CREDS_FILE"
+    echo -e "${GREEN}Credentials saved to:${NC} $CREDS_FILE"
+    echo ""
+}
+
+# ================================
+# Main
+# ================================
+
+main() {
+    echo ""
+    echo -e "${PURPLE}╔═══════════════════════════════════════════════════════════╗${NC}"
+    echo -e "${PURPLE}║                                                           ║${NC}"
+    echo -e "${PURPLE}║   ${GREEN}Control Plane Installer${PURPLE}                               ║${NC}"
+    echo -e "${PURPLE}║   ${NC}Kubernetes-Native Self-Hosted PaaS${PURPLE}                    ║${NC}"
+    echo -e "${PURPLE}║                                                           ║${NC}"
+    echo -e "${PURPLE}╚═══════════════════════════════════════════════════════════╝${NC}"
+    echo ""
+    
+    preflight_checks
+    install_k3s
+    install_helm
+    collect_config
+    install_mongodb
+    install_redis
+    deploy_control_plane
+    print_summary
+}
+
+main "$@"

@@ -10,16 +10,27 @@ definePageMeta({
 
 const { getAll: getApps } = useApp()
 const { getAll: getResources } = useAddon()
+const { getAll: getClusters } = useCluster()
+const { getAllByCluster: getNodes } = useNode()
 
 // Fetch all stats in parallel
 const { data: statsData, status } = await useLazyAsyncData(
   'dashboard-stats',
   async () => {
-    const [apps, resources] = await Promise.all([
+    const [apps, resources, clusterResult] = await Promise.all([
       getApps({ page: 1 }).catch(() => ({ items: [], pages: 0 })),
-      getResources({ page: 1 }).catch(() => ({ items: [], pages: 0 }))
+      getResources({ page: 1 }).catch(() => ({ items: [], pages: 0 })),
+      getClusters({ page: 1 }).catch(() => ({ clusters: [] }))
     ])
-    return { apps, resources }
+
+    const localCluster = clusterResult.clusters?.find(c => c.type === 'local')
+    let nodes: TNode[] = []
+    if (localCluster?._id) {
+      const nodeResult = await getNodes(localCluster._id, { page: 1 }).catch(() => ({ items: [] as TNode[], pages: 0 }))
+      nodes = nodeResult.items || []
+    }
+
+    return { apps, resources, nodes, cluster: localCluster }
   },
   { immediate: true, server: false }
 )
@@ -27,6 +38,10 @@ const { data: statsData, status } = await useLazyAsyncData(
 const loading = computed(() => status.value === 'pending')
 
 // Compute stats
+const nodeCount = computed(() => statsData.value?.nodes?.length ?? 0)
+const readyNodes = computed(() =>
+  statsData.value?.nodes?.filter((n: TNode) => n.status === 'ready')?.length ?? 0
+)
 const appCount = computed(() => statsData.value?.apps?.items?.length ?? 0)
 const resourceCount = computed(() => statsData.value?.resources?.items?.length ?? 0)
 const runningApps = computed(() =>
@@ -105,7 +120,7 @@ useHead({ title: 'Dashboard · Control Plane' })
                 <span class="inline-block w-8 h-7 bg-muted rounded animate-pulse" />
               </template>
               <template v-else>
-                —
+                {{ nodeCount }}
               </template>
             </p>
           </div>
@@ -117,7 +132,7 @@ useHead({ title: 'Dashboard · Control Plane' })
           </div>
         </div>
         <p class="mt-2 text-xs text-muted">
-          K8s worker nodes
+          <span class="text-success">{{ readyNodes }}</span> ready
         </p>
       </NuxtLink>
 

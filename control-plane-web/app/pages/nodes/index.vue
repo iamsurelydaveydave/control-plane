@@ -66,7 +66,7 @@ const { data: clusterData, status: clusterStatus } = await useLazyAsyncData(
   'nodes-cluster',
   async () => {
     const result = await getClusters({ page: 1 })
-    const local = result.items?.find(c => c.type === 'local')
+    const local = result.clusters?.find(c => c.type === 'local')
     if (local) {
       clusterId.value = local._id
       clusterName.value = local.name || 'Local Cluster'

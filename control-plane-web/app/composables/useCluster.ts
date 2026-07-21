@@ -15,7 +15,7 @@ export default function useCluster() {
   })
 
   function getAll(options: { page?: number; search?: string } = {}) {
-    return useNuxtApp().$api<{ items: TCluster[]; pages: number }>('/clusters', {
+    return useNuxtApp().$api<{ clusters: TCluster[] }>('/clusters', {
       method: 'GET',
       query: { page: options.page ?? 1, search: options.search ?? '' }
     })

@@ -38,16 +38,16 @@ const app = computed(() => appData.value?.app)
 const loading = computed(() => status.value === 'pending')
 
 // Logs
-const logs = ref('')
+const podLogs = ref<Array<{ podName: string, logs: string }>>([])
 const logsLoading = ref(false)
 
 async function fetchLogs() {
   logsLoading.value = true
   try {
     const result = await getLogs(appId, 100)
-    logs.value = result.logs
+    podLogs.value = result.logs
   } catch {
-    logs.value = 'Failed to fetch logs.'
+    podLogs.value = [{ podName: 'error', logs: 'Failed to fetch logs.' }]
   } finally {
     logsLoading.value = false
   }
@@ -540,7 +540,7 @@ useHead({ title: computed(() => app.value ? `${app.value.name} · Control Plane`
           </UButton>
         </div>
         <div
-          v-if="logsLoading && !logs"
+          v-if="logsLoading && !podLogs.length"
           class="flex items-center justify-center py-8"
         >
           <UIcon
@@ -549,10 +549,21 @@ useHead({ title: computed(() => app.value ? `${app.value.name} · Control Plane`
           />
         </div>
         <div
-          v-else-if="logs"
-          class="relative"
+          v-else-if="podLogs.length"
+          class="space-y-4"
         >
-          <pre class="bg-gray-950 text-gray-200 rounded-lg p-4 text-xs font-mono overflow-auto max-h-96 whitespace-pre-wrap">{{ logs }}</pre>
+          <div
+            v-for="pod in podLogs"
+            :key="pod.podName"
+          >
+            <h3
+              v-if="podLogs.length > 1"
+              class="text-sm font-medium text-muted mb-1 font-mono"
+            >
+              {{ pod.podName }}
+            </h3>
+            <pre class="bg-gray-950 text-gray-200 rounded-lg p-4 text-xs font-mono overflow-auto max-h-96 whitespace-pre-wrap">{{ pod.logs }}</pre>
+          </div>
         </div>
         <div
           v-else

@@ -17,12 +17,13 @@ export const REDIS_PORT = Number(process.env.REDIS_PORT || 6379);
 export const REDIS_PASSWORD = process.env.REDIS_PASSWORD as string;
 
 // JWT settings
-export const ACCESS_TOKEN_SECRET = (process.env.ACCESS_TOKEN_SECRET as string) || "access_token_secret";
-export const REFRESH_TOKEN_SECRET = (process.env.REFRESH_TOKEN_SECRET as string) || "refresh_token_secret";
+export const ACCESS_TOKEN_SECRET = process.env.JWT_SECRET || process.env.ACCESS_TOKEN_SECRET || (isDev ? "dev_access_token_secret" : "");
+export const REFRESH_TOKEN_SECRET = process.env.REFRESH_TOKEN_SECRET || (isDev ? "dev_refresh_token_secret" : "");
 export const ACCESS_TOKEN_EXPIRY = (process.env.ACCESS_TOKEN_EXPIRY as string) || "15m";
 export const REFRESH_TOKEN_EXPIRY = (process.env.REFRESH_TOKEN_EXPIRY as string) || "30d";
 
 // Session
+export const SESSION_SECRET = process.env.SESSION_SECRET || (isDev ? "dev_session_secret" : "");
 export const SESSION_TTL_SECONDS = Number(process.env.SESSION_TTL_SECONDS || 14400);
 
 // Bcrypt
@@ -60,3 +61,38 @@ export const RATE_LIMIT_HEAVY_MAX = parseInt(process.env.RATE_LIMIT_HEAVY_MAX ||
 export const GITHUB_APP_ID = process.env.GITHUB_APP_ID as string;
 export const GITHUB_PRIVATE_KEY = process.env.GITHUB_PRIVATE_KEY as string;
 export const GITHUB_WEBHOOK_SECRET = process.env.GITHUB_WEBHOOK_SECRET as string;
+
+// --- Startup validation ---
+
+const DEV_DEFAULTS = ["dev_access_token_secret", "dev_refresh_token_secret", "dev_session_secret"];
+
+export function validateConfig(): void {
+  if (!isDev) {
+    // In production, secrets must not be empty or using dev fallbacks
+    const errors: string[] = [];
+
+    if (!ACCESS_TOKEN_SECRET || DEV_DEFAULTS.includes(ACCESS_TOKEN_SECRET)) {
+      errors.push("JWT_SECRET (or ACCESS_TOKEN_SECRET) is missing or using a dev default");
+    }
+    if (!REFRESH_TOKEN_SECRET || DEV_DEFAULTS.includes(REFRESH_TOKEN_SECRET)) {
+      errors.push("REFRESH_TOKEN_SECRET is missing or using a dev default");
+    }
+    if (!SESSION_SECRET || DEV_DEFAULTS.includes(SESSION_SECRET)) {
+      errors.push("SESSION_SECRET is missing or using a dev default");
+    }
+    if (!SECRET_KEY) {
+      errors.push("SECRET_KEY is not set");
+    }
+
+    if (errors.length) {
+      throw new Error(
+        `[config] Fatal: insecure configuration in production:\n  - ${errors.join("\n  - ")}`
+      );
+    }
+  }
+
+  // Warnings for optional vars (all environments)
+  if (!ALLOWED_ORIGINS.length) {
+    console.warn("[config] Warning: ALLOWED_ORIGINS is not set — CORS will reject cross-origin requests.");
+  }
+}

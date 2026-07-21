@@ -85,7 +85,7 @@ export default function useApp() {
   }
 
   function getLogs(id: string, lines?: number) {
-    return useNuxtApp().$api<{ logs: string }>(`/apps/${id}/logs`, {
+    return useNuxtApp().$api<{ appId: string, logs: Array<{ podName: string, logs: string }> }>(`/apps/${id}/logs`, {
       method: 'GET',
       query: lines ? { lines } : undefined
     })

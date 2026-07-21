@@ -1,5 +1,6 @@
 import express from "express";
-import { requireAuth, requireScope } from "../utils";
+import { requireAuth } from "../utils";
+import { requirePermission } from "../utils/auth.middleware";
 import { useDeploymentApprovalController } from "../resources/deployment-approval";
 
 const router = express.Router();
@@ -17,7 +18,7 @@ const approvalController = useDeploymentApprovalController();
 router.get(
   "/approvals/pending",
   requireAuth,
-  requireScope("deployments:read"),
+  requirePermission("deployments:read"),
   approvalController.getPending
 );
 
@@ -28,7 +29,7 @@ router.get(
 router.get(
   "/:id",
   requireAuth,
-  requireScope("deployments:read"),
+  requirePermission("deployments:read"),
   approvalController.getById
 );
 
@@ -39,7 +40,7 @@ router.get(
 router.post(
   "/:id/approve",
   requireAuth,
-  requireScope("deployments:write"),
+  requirePermission("deployments:update"),
   approvalController.approve
 );
 
@@ -50,7 +51,7 @@ router.post(
 router.post(
   "/:id/reject",
   requireAuth,
-  requireScope("deployments:write"),
+  requirePermission("deployments:update"),
   approvalController.reject
 );
 

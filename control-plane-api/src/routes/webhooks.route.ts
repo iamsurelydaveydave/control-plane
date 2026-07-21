@@ -1,6 +1,6 @@
 import express from "express";
 import { useWebhookController } from "../resources/webhook";
-import { requireAuth, requireScope } from "../utils/auth.middleware";
+import { requireAuth, requirePermission } from "../utils/auth.middleware";
 
 const router = express.Router();
 const controller = useWebhookController();
@@ -8,25 +8,25 @@ const controller = useWebhookController();
 // All webhook routes require authentication
 router.use(requireAuth);
 
-// List available webhook events (public to authenticated users)
-router.get("/events", controller.listEvents);
+// List available webhook events
+router.get("/events", requirePermission("settings:read"), controller.listEvents);
 
 // List webhooks
-router.get("/", controller.list);
+router.get("/", requirePermission("settings:read"), controller.list);
 
 // Get webhook by ID
-router.get("/:id", controller.getById);
+router.get("/:id", requirePermission("settings:read"), controller.getById);
 
-// Create webhook (requires settings:write scope for API tokens)
-router.post("/", requireScope("settings:write"), controller.create);
+// Create webhook
+router.post("/", requirePermission("settings:update"), controller.create);
 
-// Update webhook (requires settings:write scope for API tokens)
-router.patch("/:id", requireScope("settings:write"), controller.update);
+// Update webhook
+router.patch("/:id", requirePermission("settings:update"), controller.update);
 
-// Delete webhook (requires settings:write scope for API tokens)
-router.delete("/:id", requireScope("settings:write"), controller.remove);
+// Delete webhook
+router.delete("/:id", requirePermission("settings:update"), controller.remove);
 
-// Test webhook (requires settings:write scope for API tokens)
-router.post("/:id/test", requireScope("settings:write"), controller.test);
+// Test webhook
+router.post("/:id/test", requirePermission("settings:update"), controller.test);
 
 export default router;

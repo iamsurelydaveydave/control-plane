@@ -5,94 +5,42 @@
  * API functions return raw promises — pages handle useLazyAsyncData wrapping.
  */
 export default function useLogs() {
-  function getAppLogs(id: string, options: Omit<TLogFilters, 'source' | 'sourceId'> = {}) {
-    return useNuxtApp().$api<{ items: TLogEntry[], pages: number, total: number }>(`/apps/${id}/logs`, {
+  function getAppLogs(appId: string, options?: { tailLines?: number }) {
+    return useNuxtApp().$api<TAppLogsResponse>(`/logs/apps/${appId}`, {
       method: 'GET',
-      query: {
-        page: options.page ?? 1,
-        level: options.level,
-        search: options.search ?? '',
-        startTime: options.startTime,
-        endTime: options.endTime
-      }
+      query: options?.tailLines ? { tailLines: options.tailLines } : undefined
     })
   }
 
-  function getResourceLogs(id: string, options: Omit<TLogFilters, 'source' | 'sourceId'> = {}) {
-    return useNuxtApp().$api<{ items: TLogEntry[], pages: number, total: number }>(`/addons/${id}/logs`, {
+  function getSystemLogs(options?: { tailLines?: number }) {
+    return useNuxtApp().$api<TSystemLogsResponse>('/logs/system', {
       method: 'GET',
-      query: {
-        page: options.page ?? 1,
-        level: options.level,
-        search: options.search ?? '',
-        startTime: options.startTime,
-        endTime: options.endTime
-      }
+      query: options?.tailLines ? { tailLines: options.tailLines } : undefined
     })
   }
 
-  function getSystemLogs(options: Omit<TLogFilters, 'source' | 'sourceId'> = {}) {
-    return useNuxtApp().$api<{ items: TLogEntry[], pages: number, total: number }>('/logs/system', {
+  function getOperatorLogs(options?: { tailLines?: number }) {
+    return useNuxtApp().$api<TOperatorLogsResponse>('/logs/operator', {
       method: 'GET',
-      query: {
-        page: options.page ?? 1,
-        level: options.level,
-        search: options.search ?? '',
-        startTime: options.startTime,
-        endTime: options.endTime
-      }
+      query: options?.tailLines ? { tailLines: options.tailLines } : undefined
     })
   }
 
-  function getOperatorLogs(options: Omit<TLogFilters, 'source' | 'sourceId'> = {}) {
-    return useNuxtApp().$api<{ items: TLogEntry[], pages: number, total: number }>('/logs/operator', {
+  function searchLogs(query: string, sources?: string[], tailLines?: number) {
+    return useNuxtApp().$api<TLogSearchResponse>('/logs/search', {
       method: 'GET',
       query: {
-        page: options.page ?? 1,
-        level: options.level,
-        search: options.search ?? '',
-        startTime: options.startTime,
-        endTime: options.endTime
-      }
-    })
-  }
-
-  function searchLogs(query: string, options: Omit<TLogFilters, 'search'> = {}) {
-    return useNuxtApp().$api<{ items: TLogEntry[], pages: number, total: number }>('/logs/search', {
-      method: 'GET',
-      query: {
-        search: query,
-        page: options.page ?? 1,
-        level: options.level,
-        source: options.source,
-        sourceId: options.sourceId,
-        startTime: options.startTime,
-        endTime: options.endTime
-      }
-    })
-  }
-
-  function getAllLogs(options: TLogFilters = {}) {
-    return useNuxtApp().$api<{ items: TLogEntry[], pages: number, total: number }>('/logs', {
-      method: 'GET',
-      query: {
-        page: options.page ?? 1,
-        level: options.level,
-        source: options.source,
-        sourceId: options.sourceId,
-        search: options.search ?? '',
-        startTime: options.startTime,
-        endTime: options.endTime
+        query,
+        ...(sources?.length ? { sources } : {}),
+        ...(tailLines ? { tailLines } : {})
       }
     })
   }
 
   return {
     getAppLogs,
-    getResourceLogs,
     getSystemLogs,
     getOperatorLogs,
-    searchLogs,
-    getAllLogs
+    searchLogs
   }
 }

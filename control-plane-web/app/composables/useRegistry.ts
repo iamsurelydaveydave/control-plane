@@ -48,7 +48,7 @@ export default function useRegistry() {
   }
 
   function verifyCredentials(id: string) {
-    return useNuxtApp().$api<{ success: boolean, error?: string }>(`/registries/${id}/verify`, {
+    return useNuxtApp().$api<{ message: string, valid: boolean }>(`/registries/${id}/verify`, {
       method: 'POST'
     })
   }

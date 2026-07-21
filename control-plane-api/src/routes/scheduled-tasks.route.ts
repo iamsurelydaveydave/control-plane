@@ -1,6 +1,6 @@
 import express from "express";
 import { useScheduledTaskController } from "../resources/scheduled-task";
-import { requireAuth, requireScope } from "../utils/auth.middleware";
+import { requireAuth, requirePermission } from "../utils/auth.middleware";
 
 const router = express.Router();
 const controller = useScheduledTaskController();
@@ -9,30 +9,30 @@ const controller = useScheduledTaskController();
 router.use(requireAuth);
 
 // List tasks
-router.get("/", controller.list);
+router.get("/", requirePermission("tasks:read"), controller.list);
 
-// Create task (admin only)
-router.post("/", requireScope("settings:write"), controller.create);
+// Create task
+router.post("/", requirePermission("tasks:update"), controller.create);
 
 // Get task by ID
-router.get("/:id", controller.getById);
+router.get("/:id", requirePermission("tasks:read"), controller.getById);
 
-// Update task (admin only)
-router.patch("/:id", requireScope("settings:write"), controller.update);
+// Update task
+router.patch("/:id", requirePermission("tasks:update"), controller.update);
 
-// Delete task (admin only)
-router.delete("/:id", requireScope("settings:write"), controller.remove);
+// Delete task
+router.delete("/:id", requirePermission("tasks:update"), controller.remove);
 
-// Run task immediately (admin only)
-router.post("/:id/run", requireScope("settings:write"), controller.runNow);
+// Run task immediately
+router.post("/:id/run", requirePermission("tasks:update"), controller.runNow);
 
-// Pause task (admin only)
-router.post("/:id/pause", requireScope("settings:write"), controller.pause);
+// Pause task
+router.post("/:id/pause", requirePermission("tasks:update"), controller.pause);
 
-// Resume task (admin only)
-router.post("/:id/resume", requireScope("settings:write"), controller.resume);
+// Resume task
+router.post("/:id/resume", requirePermission("tasks:update"), controller.resume);
 
 // Get task run history
-router.get("/:id/history", controller.getHistory);
+router.get("/:id/history", requirePermission("tasks:read"), controller.getHistory);
 
 export default router;

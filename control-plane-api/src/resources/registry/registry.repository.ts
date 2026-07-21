@@ -506,6 +506,32 @@ export function useRegistryRepo() {
     }));
   }
 
+  async function setDefault(id: string): Promise<void> {
+    let oid: ObjectId;
+    try {
+      oid = new ObjectId(id);
+    } catch {
+      throw new BadRequestError("Invalid registry ID format.");
+    }
+
+    // Verify the registry exists
+    const registry = await getCollection().findOne({ _id: oid });
+    if (!registry) {
+      throw new NotFoundError("Registry not found.");
+    }
+
+    // Unset isDefault on all registries, then set it on the target
+    await getCollection().updateMany({}, { $set: { isDefault: false, updatedAt: new Date() } });
+    await getCollection().updateOne({ _id: oid }, { $set: { isDefault: true, updatedAt: new Date() } });
+
+    logger.log({
+      level: "info",
+      message: `Registry set as default: ${id}`,
+    });
+
+    delCachedData();
+  }
+
   return {
     createIndexes,
     add,
@@ -517,5 +543,6 @@ export function useRegistryRepo() {
     updateNamespaces,
     deleteById,
     getAllActive,
+    setDefault,
   };
 }

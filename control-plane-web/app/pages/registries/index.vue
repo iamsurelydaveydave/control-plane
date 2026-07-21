@@ -166,7 +166,7 @@ async function handleVerify(registry: TRegistry) {
   verifyingId.value = registry._id
   try {
     const result = await verifyCredentials(registry._id)
-    if (result.success) {
+    if (result.valid) {
       toast.add({
         title: 'Credentials verified',
         description: `Successfully connected to ${registry.name}`,
@@ -176,7 +176,7 @@ async function handleVerify(registry: TRegistry) {
     } else {
       toast.add({
         title: 'Verification failed',
-        description: result.error || 'Unable to connect to registry',
+        description: result.message || 'Unable to connect to registry',
         color: 'error'
       })
     }

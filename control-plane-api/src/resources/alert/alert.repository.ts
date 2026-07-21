@@ -45,8 +45,9 @@ export function useAlertRepo() {
     status?: TAlertStatus;
     severity?: TAlertSeverity;
     source?: TAlertSource;
+    search?: string;
   } = {}): Promise<TPaginated<TAlert> & { total: number }> {
-    const { page = 1, status, severity, source } = options;
+    const { page = 1, status, severity, source, search } = options;
     const limit = 20;
 
     const cacheKey = makeCacheKey(namespace_collection, {
@@ -54,6 +55,7 @@ export function useAlertRepo() {
       status: status || "",
       severity: severity || "",
       source: source || "",
+      search: search || "",
       tag: "getAll",
     });
     const cached = await repo.getCache<TPaginated<TAlert> & { total: number }>(cacheKey);
@@ -63,6 +65,13 @@ export function useAlertRepo() {
     if (status) query.status = status;
     if (severity) query.severity = severity;
     if (source) query.source = source;
+    if (search) {
+      const escaped = search.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      query.$or = [
+        { title: { $regex: escaped, $options: "i" } },
+        { message: { $regex: escaped, $options: "i" } },
+      ];
+    }
 
     const skip = (page > 0 ? page - 1 : 0) * limit;
 

@@ -12,7 +12,7 @@
 ## ROOT_USER_EMAIL      - Initial admin email
 ## ROOT_USER_PASSWORD   - Initial admin password
 ## VERSION              - Specific version to install (default: latest)
-## IMAGE_REGISTRY       - Docker image registry (default: ghcr.io/goweekdays)
+## IMAGE_REGISTRY       - Docker image registry (default: ghcr.io/iamsurelydaveydave)
 ## SKIP_K3S             - Set to "true" to skip K3s installation (use existing cluster)
 
 set -e
@@ -26,7 +26,7 @@ CDN="https://get.goweekdays.com"
 NAMESPACE="control-plane"
 RELEASE_NAME="control-plane"
 DATA_DIR="/data/control-plane"
-IMAGE_REGISTRY="${IMAGE_REGISTRY:-ghcr.io/goweekdays}"
+IMAGE_REGISTRY="${IMAGE_REGISTRY:-ghcr.io/iamsurelydaveydave}"
 VERSION="${VERSION:-latest}"
 
 # Colors for output

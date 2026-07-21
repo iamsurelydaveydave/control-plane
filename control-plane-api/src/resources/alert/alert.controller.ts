@@ -17,8 +17,9 @@ export function useAlertController() {
       const status = req.query.status as TAlertStatus | undefined;
       const severity = req.query.severity as TAlertSeverity | undefined;
       const source = req.query.source as TAlertSource | undefined;
+      const search = req.query.search as string | undefined;
 
-      const result = await repo.getAll({ page, status, severity, source });
+      const result = await repo.getAll({ page, status, severity, source, search });
       res.json(result);
     } catch (error) {
       next(error);

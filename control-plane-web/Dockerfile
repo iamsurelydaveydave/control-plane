@@ -47,6 +47,11 @@ RUN pnpm build
 # ================================
 FROM node:22-alpine AS production
 
+# Re-declare ARGs so they're available in this stage
+ARG VERSION=dev
+ARG BUILD_DATE
+ARG VCS_REF
+
 WORKDIR /app
 
 # Install curl for health checks

@@ -296,6 +296,21 @@ export function useRegistryController() {
     }
   }
 
+  // ---------------------------------------------------------------------------
+  // Set default registry
+  // ---------------------------------------------------------------------------
+  async function setDefault(req: Request, res: Response, next: NextFunction) {
+    try {
+      const id = req.params.id as string;
+
+      await repo.setDefault(id);
+
+      res.json({ message: "Default registry updated." });
+    } catch (error) {
+      next(error);
+    }
+  }
+
   return {
     list,
     getById,
@@ -303,6 +318,7 @@ export function useRegistryController() {
     updateById,
     deleteById,
     verify,
+    setDefault,
     syncSecrets,
     createPullSecret,
     deletePullSecret,

@@ -11,6 +11,7 @@ const {
   updateById,
   deleteById,
   verify,
+  setDefault,
   syncSecrets,
   createPullSecret,
   deletePullSecret,
@@ -47,6 +48,9 @@ router.delete("/:id", requirePermission("registries:delete"), deleteById);
 
 // Verify registry credentials
 router.post("/:id/verify", requirePermission("registries:update"), verify);
+
+// Set default registry
+router.post("/:id/default", requirePermission("registries:update"), setDefault);
 
 // Sync pull secrets to all namespaces
 router.post(

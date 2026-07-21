@@ -1,11 +1,12 @@
 import express from "express";
-import { requireAuth } from "../utils/auth.middleware";
+import { requireAuth, requirePermission } from "../utils/auth.middleware";
 import { useMetricsService } from "../services/metrics.service";
 
 const router = express.Router();
 
-// All metrics routes require authentication
+// All metrics routes require authentication and monitoring:read permission
 router.use(requireAuth);
+router.use(requirePermission("monitoring:read"));
 
 /**
  * GET /api/metrics/system

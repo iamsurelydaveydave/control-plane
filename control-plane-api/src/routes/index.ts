@@ -83,7 +83,7 @@ router.use("/deployments", deployments);
 
 // GitHub Webhooks
 import githubWebhooks from "./webhooks";
-router.use("/webhooks", githubWebhooks);
+router.use("/hooks", githubWebhooks);
 
 // Organizations (multi-tenancy)
 import organizations from "./organizations.route";

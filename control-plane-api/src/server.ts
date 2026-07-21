@@ -1,6 +1,6 @@
 import http from "http";
 import { WebSocketServer } from "ws";
-import { MONGO_DB, MONGO_URI, PORT } from "./config";
+import { MONGO_DB, MONGO_URI, PORT, validateConfig } from "./config";
 import setup from "./setup";
 import { logger, useAtlas } from "./utils";
 import { startNodeSyncWorker, startAlertCheckWorker, startTaskSchedulerWorker } from "./workers";
@@ -9,6 +9,9 @@ import {
   handlePodExecConnection,
   isPodExecPath,
 } from "./websocket";
+
+// Validate configuration before anything else
+validateConfig();
 
 useAtlas
   .initialize({ uri: MONGO_URI, db: MONGO_DB, name: "default" })

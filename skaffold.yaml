@@ -16,11 +16,6 @@ build:
       context: control-plane-api
       docker:
         dockerfile: Dockerfile
-      sync:
-        # Hot-reload TypeScript source without a full rebuild in `skaffold dev`.
-        # Nodemon inside the container picks up the synced .ts files.
-        infer:
-          - "src/**/*.ts"
 
     - image: ghcr.io/iamsurelydaveydave/control-plane-web
       context: control-plane-web
@@ -51,11 +46,14 @@ deploy:
         valuesFiles:
           - deploy/helm/control-plane/values.yaml
           - deploy/skaffold-values.yaml          # secrets — gitignored
-        artifactOverrides:
-          api.image: ghcr.io/iamsurelydaveydave/control-plane-api
-          web.image: ghcr.io/iamsurelydaveydave/control-plane-web
-        imageStrategy:
-          helm: {}    # splits image into .repository + .tag subkeys
+        # Skaffold v4: use setValueTemplates to inject built image refs
+        # Template vars are auto-generated from artifact image names:
+        #   ghcr.io/iamsurelydaveydave/control-plane-api → IMAGE_*_ghcr_io_iamsurelydaveydave_control_plane_api
+        setValueTemplates:
+          api.image.repository: "{{.IMAGE_REPO_ghcr_io_iamsurelydaveydave_control_plane_api}}"
+          api.image.tag: "{{.IMAGE_TAG_ghcr_io_iamsurelydaveydave_control_plane_api}}"
+          web.image.repository: "{{.IMAGE_REPO_ghcr_io_iamsurelydaveydave_control_plane_web}}"
+          web.image.tag: "{{.IMAGE_TAG_ghcr_io_iamsurelydaveydave_control_plane_web}}"
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Profiles
@@ -131,8 +129,8 @@ profiles:
             setValues:
               api.image.pullPolicy: Never   # use locally built image; never pull
               web.image.pullPolicy: Never
-            artifactOverrides:
-              api.image: ghcr.io/iamsurelydaveydave/control-plane-api
-              web.image: ghcr.io/iamsurelydaveydave/control-plane-web
-            imageStrategy:
-              helm: {}
+            setValueTemplates:
+              api.image.repository: "{{.IMAGE_REPO_ghcr_io_iamsurelydaveydave_control_plane_api}}"
+              api.image.tag: "{{.IMAGE_TAG_ghcr_io_iamsurelydaveydave_control_plane_api}}"
+              web.image.repository: "{{.IMAGE_REPO_ghcr_io_iamsurelydaveydave_control_plane_web}}"
+              web.image.tag: "{{.IMAGE_TAG_ghcr_io_iamsurelydaveydave_control_plane_web}}"

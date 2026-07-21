@@ -104,27 +104,6 @@ get_public_ip() {
     curl -s https://api.ipify.org 2>/dev/null || curl -s https://ifconfig.me 2>/dev/null || echo "localhost"
 }
 
-parse_mongo_host() {
-    local uri="$1"
-    if [[ "$uri" =~ "mongodb+srv://" ]]; then
-        echo "$uri" | sed -E 's|mongodb\+srv://([^:@]+:[^@]+@)?([^/?]+).*|\2|'
-    else
-        echo "$uri" | sed -E 's|mongodb://([^:@]+:[^@]+@)?([^:/?]+).*|\2|'
-    fi
-}
-
-parse_mongo_port() {
-    local uri="$1"
-    if [[ "$uri" =~ "mongodb+srv://" ]]; then
-        echo "27017"
-    else
-        local port
-        port=$(echo "$uri" | sed -E 's|mongodb://[^@]+@[^:]+:([0-9]+).*|\1|')
-        # sed returns the full string unchanged if pattern doesn't match
-        if [ "$port" = "$uri" ]; then echo "27017"; else echo "$port"; fi
-    fi
-}
-
 # ================================
 # Check MongoDB Connection
 # ================================
@@ -137,11 +116,51 @@ check_mongodb_connection() {
         return
     fi
 
+    local uri="$MONGODB_URI"
     local host port
-    host=$(parse_mongo_host "$MONGODB_URI")
-    port=$(parse_mongo_port "$MONGODB_URI")
 
-    log "Testing connection to ${host}:${port} (timeout: 10s)..."
+    if [[ "$uri" =~ mongodb\+srv:// ]]; then
+        # Atlas SRV URI: mongodb+srv://user:pass@cluster0.xxxxx.mongodb.net/db
+        # Extract the cluster hostname (e.g., cluster0.xxxxx.mongodb.net)
+        local cluster_host
+        cluster_host=$(echo "$uri" | sed -E 's|mongodb\+srv://([^:@]+:[^@]+@)?([^/?]+).*|\2|')
+
+        log "Resolving SRV record for ${cluster_host}..."
+
+        # Look up the _mongodb._tcp SRV record to find actual hosts
+        local srv_record
+        srv_record=$(dig +short SRV "_mongodb._tcp.${cluster_host}" 2>/dev/null | head -1)
+
+        if [ -z "$srv_record" ]; then
+            log_warn "Could not resolve SRV record for ${cluster_host}"
+            log_warn "DNS may not have propagated yet, or the hostname is wrong."
+            echo ""
+            echo -ne "${GREEN}→${NC} Continue anyway? [y/N]: "
+            local cont
+            read -r cont < /dev/tty
+            if [[ ! "$cont" =~ ^[Yy]$ ]]; then
+                exit 1
+            fi
+            return
+        fi
+
+        # SRV record format: priority weight port host
+        # e.g., "0 0 27017 cluster0-shard-00-00.xxxxx.mongodb.net."
+        port=$(echo "$srv_record" | awk '{print $3}')
+        host=$(echo "$srv_record" | awk '{print $4}' | sed 's/\.$//')  # remove trailing dot
+
+        log "Resolved to ${host}:${port}"
+    else
+        # Standard URI: mongodb://user:pass@host:port/db
+        host=$(echo "$uri" | sed -E 's|mongodb://([^:@]+:[^@]+@)?([^:/?]+).*|\2|')
+        port=$(echo "$uri" | sed -E 's|mongodb://[^@]+@[^:]+:([0-9]+).*|\1|')
+        # If no port in URI, default to 27017
+        if [ "$port" = "$uri" ] || [ -z "$port" ]; then
+            port=27017
+        fi
+    fi
+
+    log "Testing TCP connection to ${host}:${port} (timeout: 10s)..."
 
     if timeout 10 bash -c "echo >/dev/tcp/${host}/${port}" 2>/dev/null; then
         log_success "MongoDB is reachable at ${host}:${port}"

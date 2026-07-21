@@ -1,0 +1,166 @@
+# =============================================================================
+# Alertmanager Configuration
+# 
+# This file can be used standalone or merged with the kube-prometheus-stack
+# values. For standalone use, create a ConfigMap:
+#
+#   kubectl create configmap alertmanager-config \
+#     --from-file=alertmanager.yaml=alertmanager-config.yaml \
+#     -n monitoring
+#
+# Or apply as a secret for sensitive data (recommended for production).
+# =============================================================================
+
+global:
+  # How long to wait before sending a notification again after a resolve.
+  resolve_timeout: 5m
+  
+  # SMTP settings for email notifications (uncomment and configure)
+  # smtp_smarthost: 'smtp.gmail.com:587'
+  # smtp_from: 'alertmanager@yourdomain.com'
+  # smtp_auth_username: 'alertmanager@yourdomain.com'
+  # smtp_auth_password: 'your-app-password'
+  # smtp_require_tls: true
+  
+  # Slack webhook URL (if using Slack)
+  # slack_api_url: 'https://hooks.slack.com/services/YOUR/WEBHOOK/URL'
+  
+  # PagerDuty (if using)
+  # pagerduty_url: 'https://events.pagerduty.com/v2/enqueue'
+
+# =============================================================================
+# Routes
+# =============================================================================
+route:
+  # Default receiver
+  receiver: 'default-receiver'
+  
+  # Group alerts by these labels
+  group_by: ['alertname', 'namespace', 'severity', 'service']
+  
+  # How long to wait before sending the initial notification
+  group_wait: 30s
+  
+  # How long to wait before sending notification about new alerts in a group
+  group_interval: 5m
+  
+  # How long to wait before resending a notification
+  repeat_interval: 4h
+  
+  # Child routes (processed in order, first match wins)
+  routes:
+    # Critical alerts - immediate notification, shorter repeat
+    - match:
+        severity: critical
+      receiver: 'critical-receiver'
+      group_wait: 10s
+      repeat_interval: 1h
+      continue: false
+    
+    # Warning alerts - normal priority
+    - match:
+        severity: warning
+      receiver: 'warning-receiver'
+      repeat_interval: 4h
+      continue: false
+    
+    # Control Plane specific alerts
+    - match:
+        service: control-plane-api
+      receiver: 'control-plane-receiver'
+      continue: true
+    
+    # Infrastructure alerts (pods, nodes)
+    - match_re:
+        alertname: '^(PodRestarting|HighMemory|NodeNotReady)$'
+      receiver: 'infrastructure-receiver'
+      continue: false
+
+# =============================================================================
+# Inhibit Rules
+# =============================================================================
+inhibit_rules:
+  # If a critical alert is firing, suppress warnings for the same service
+  - source_match:
+      severity: 'critical'
+    target_match:
+      severity: 'warning'
+    equal: ['alertname', 'namespace', 'service']
+  
+  # If the API is completely down, suppress individual endpoint alerts
+  - source_match:
+      alertname: 'ControlPlaneAPIDown'
+    target_match_re:
+      alertname: '^ControlPlane(HighErrorRate|SlowResponses|RateLimitExhaustion)$'
+    equal: ['namespace']
+
+# =============================================================================
+# Receivers
+# =============================================================================
+receivers:
+  # Default receiver (fallback)
+  - name: 'default-receiver'
+    # Uncomment and configure your preferred channel
+    # email_configs:
+    #   - to: 'ops-team@yourdomain.com'
+    #     send_resolved: true
+    # slack_configs:
+    #   - channel: '#alerts'
+    #     send_resolved: true
+    #     title: '{{ .Status | toUpper }}: {{ .CommonLabels.alertname }}'
+    #     text: '{{ range .Alerts }}{{ .Annotations.description }}{{ end }}'
+
+  # Critical alerts - use multiple channels
+  - name: 'critical-receiver'
+    # pagerduty_configs:
+    #   - service_key: 'YOUR_PAGERDUTY_SERVICE_KEY'
+    #     severity: critical
+    #     description: '{{ .CommonLabels.alertname }}: {{ .CommonAnnotations.summary }}'
+    # slack_configs:
+    #   - channel: '#critical-alerts'
+    #     send_resolved: true
+    #     color: '{{ if eq .Status "firing" }}danger{{ else }}good{{ end }}'
+    #     title: '🚨 CRITICAL: {{ .CommonLabels.alertname }}'
+    #     text: |
+    #       *Severity:* {{ .CommonLabels.severity }}
+    #       *Service:* {{ .CommonLabels.service }}
+    #       *Description:* {{ .CommonAnnotations.description }}
+    #       {{ if gt (len .Alerts.Firing) 0 }}
+    #       *Firing:*
+    #       {{ range .Alerts.Firing }}- {{ .Labels.alertname }}: {{ .Annotations.summary }}
+    #       {{ end }}{{ end }}
+
+  # Warning alerts
+  - name: 'warning-receiver'
+    # slack_configs:
+    #   - channel: '#warnings'
+    #     send_resolved: true
+    #     color: '{{ if eq .Status "firing" }}warning{{ else }}good{{ end }}'
+    #     title: '⚠️ Warning: {{ .CommonLabels.alertname }}'
+    #     text: '{{ .CommonAnnotations.description }}'
+
+  # Control Plane specific alerts
+  - name: 'control-plane-receiver'
+    # slack_configs:
+    #   - channel: '#control-plane-alerts'
+    #     send_resolved: true
+    #     title: '{{ .Status | toUpper }}: {{ .CommonLabels.alertname }}'
+    #     text: |
+    #       *Service:* Control Plane API
+    #       *Summary:* {{ .CommonAnnotations.summary }}
+    #       *Description:* {{ .CommonAnnotations.description }}
+    #       *Runbook:* {{ .CommonAnnotations.runbook_url }}
+
+  # Infrastructure alerts
+  - name: 'infrastructure-receiver'
+    # slack_configs:
+    #   - channel: '#infrastructure'
+    #     send_resolved: true
+    #     title: '🔧 Infrastructure: {{ .CommonLabels.alertname }}'
+    #     text: '{{ .CommonAnnotations.description }}'
+
+# =============================================================================
+# Templates (optional custom templates)
+# =============================================================================
+# templates:
+#   - '/etc/alertmanager/templates/*.tmpl'

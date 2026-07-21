@@ -1,0 +1,319 @@
+# =============================================================================
+# Helm values for kube-prometheus-stack
+# https://github.com/prometheus-community/helm-charts/tree/main/charts/kube-prometheus-stack
+#
+# Install:
+#   helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+#   helm repo update
+#   helm install monitoring prometheus-community/kube-prometheus-stack \
+#     -f deploy/monitoring/prometheus-values.yaml \
+#     --namespace monitoring --create-namespace
+# =============================================================================
+
+# =============================================================================
+# Prometheus Configuration
+# =============================================================================
+prometheus:
+  prometheusSpec:
+    # Allow ServiceMonitors from any namespace
+    serviceMonitorSelectorNilUsesHelmValues: false
+    podMonitorSelectorNilUsesHelmValues: false
+    ruleSelectorNilUsesHelmValues: false
+    
+    # Retention
+    retention: 15d
+    retentionSize: "10GB"
+    
+    # Resources
+    resources:
+      requests:
+        memory: 512Mi
+        cpu: 250m
+      limits:
+        memory: 2Gi
+        cpu: 1000m
+    
+    # Storage (persistent volume)
+    storageSpec:
+      volumeClaimTemplate:
+        spec:
+          accessModes: ["ReadWriteOnce"]
+          resources:
+            requests:
+              storage: 20Gi
+
+# =============================================================================
+# Alertmanager Configuration
+# =============================================================================
+alertmanager:
+  enabled: true
+  alertmanagerSpec:
+    resources:
+      requests:
+        memory: 128Mi
+        cpu: 50m
+      limits:
+        memory: 256Mi
+        cpu: 200m
+    storage:
+      volumeClaimTemplate:
+        spec:
+          accessModes: ["ReadWriteOnce"]
+          resources:
+            requests:
+              storage: 5Gi
+  
+  # Configure receivers (customize for your notification channels)
+  config:
+    global:
+      resolve_timeout: 5m
+    
+    route:
+      group_by: ['alertname', 'namespace', 'severity']
+      group_wait: 30s
+      group_interval: 5m
+      repeat_interval: 4h
+      receiver: 'default-receiver'
+      routes:
+        - match:
+            severity: critical
+          receiver: 'critical-receiver'
+          repeat_interval: 1h
+        - match:
+            severity: warning
+          receiver: 'warning-receiver'
+          repeat_interval: 4h
+    
+    receivers:
+      - name: 'default-receiver'
+        # Configure your notification channel here
+        # Example: Slack, PagerDuty, email, etc.
+        # slack_configs:
+        #   - api_url: 'https://hooks.slack.com/services/YOUR/WEBHOOK/URL'
+        #     channel: '#alerts'
+        #     send_resolved: true
+      
+      - name: 'critical-receiver'
+        # PagerDuty or urgent channel
+        # pagerduty_configs:
+        #   - service_key: 'YOUR_PAGERDUTY_KEY'
+      
+      - name: 'warning-receiver'
+        # Less urgent channel
+
+# =============================================================================
+# Grafana Configuration
+# =============================================================================
+grafana:
+  enabled: true
+  
+  # Admin credentials (change in production!)
+  adminUser: admin
+  adminPassword: changeme
+  
+  # Resources
+  resources:
+    requests:
+      memory: 256Mi
+      cpu: 100m
+    limits:
+      memory: 512Mi
+      cpu: 500m
+  
+  # Persistence
+  persistence:
+    enabled: true
+    size: 5Gi
+  
+  # Default dashboards
+  defaultDashboardsEnabled: true
+  defaultDashboardsTimezone: utc
+  
+  # Dashboard providers (auto-load dashboards from ConfigMaps)
+  dashboardProviders:
+    dashboardproviders.yaml:
+      apiVersion: 1
+      providers:
+        - name: 'control-plane'
+          orgId: 1
+          folder: 'Control Plane'
+          type: file
+          disableDeletion: false
+          editable: true
+          options:
+            path: /var/lib/grafana/dashboards/control-plane
+  
+  # Dashboard ConfigMaps
+  dashboardsConfigMaps:
+    control-plane: "control-plane-dashboard"
+  
+  # Additional data sources
+  additionalDataSources: []
+  
+  # Grafana.ini settings
+  grafana.ini:
+    server:
+      root_url: "%(protocol)s://%(domain)s/grafana"
+    security:
+      allow_embedding: true
+    auth.anonymous:
+      enabled: false
+    
+    # Unified alerting
+    unified_alerting:
+      enabled: true
+
+# =============================================================================
+# Additional PrometheusRules
+# =============================================================================
+additionalPrometheusRulesMap:
+  control-plane-alerts:
+    groups:
+      - name: control-plane.rules
+        rules:
+          # High error rate alert
+          - alert: ControlPlaneHighErrorRate
+            expr: |
+              sum(rate(http_request_duration_seconds_count{job="control-plane-api", status_code=~"5.."}[5m])) 
+              / 
+              sum(rate(http_request_duration_seconds_count{job="control-plane-api"}[5m])) 
+              > 0.05
+            for: 5m
+            labels:
+              severity: critical
+              service: control-plane-api
+            annotations:
+              summary: "High error rate in Control Plane API"
+              description: "Error rate is {{ $value | humanizePercentage }} (threshold: 5%)"
+          
+          # Slow response times (p95 > 1s)
+          - alert: ControlPlaneSlowResponses
+            expr: |
+              histogram_quantile(0.95, 
+                sum(rate(http_request_duration_seconds_bucket{job="control-plane-api"}[5m])) by (le)
+              ) > 1
+            for: 10m
+            labels:
+              severity: warning
+              service: control-plane-api
+            annotations:
+              summary: "Slow response times in Control Plane API"
+              description: "p95 response time is {{ $value | humanizeDuration }} (threshold: 1s)"
+          
+          # Rate limit exhaustion (high 429 rate)
+          - alert: ControlPlaneRateLimitExhaustion
+            expr: |
+              sum(rate(http_request_duration_seconds_count{job="control-plane-api", status_code="429"}[5m])) > 10
+            for: 5m
+            labels:
+              severity: warning
+              service: control-plane-api
+            annotations:
+              summary: "High rate of rate-limited requests"
+              description: "Rate limit hits: {{ $value | humanize }} per second"
+          
+          # Pod restarts
+          - alert: ControlPlanePodRestarting
+            expr: |
+              increase(kube_pod_container_status_restarts_total{namespace="control-plane"}[1h]) > 3
+            for: 5m
+            labels:
+              severity: warning
+              service: control-plane
+            annotations:
+              summary: "Control Plane pod restarting frequently"
+              description: "Pod {{ $labels.pod }} has restarted {{ $value | humanize }} times in the last hour"
+          
+          # High memory usage
+          - alert: ControlPlaneHighMemory
+            expr: |
+              container_memory_working_set_bytes{namespace="control-plane", container!=""}
+              / 
+              container_spec_memory_limit_bytes{namespace="control-plane", container!=""}
+              > 0.85
+            for: 10m
+            labels:
+              severity: warning
+              service: control-plane
+            annotations:
+              summary: "High memory usage in Control Plane"
+              description: "Container {{ $labels.container }} is using {{ $value | humanizePercentage }} of memory limit"
+          
+          # MongoDB connection issues
+          - alert: ControlPlaneMongoConnectionIssues
+            expr: |
+              mongodb_up{job="control-plane-api"} == 0
+            for: 2m
+            labels:
+              severity: critical
+              service: control-plane-api
+            annotations:
+              summary: "MongoDB connection down"
+              description: "Control Plane API cannot connect to MongoDB"
+          
+          # Redis connection issues
+          - alert: ControlPlaneRedisConnectionIssues
+            expr: |
+              redis_up{job="control-plane-api"} == 0
+            for: 2m
+            labels:
+              severity: critical
+              service: control-plane-api
+            annotations:
+              summary: "Redis connection down"
+              description: "Control Plane API cannot connect to Redis"
+          
+          # High MongoDB query times
+          - alert: ControlPlaneSlowMongoQueries
+            expr: |
+              histogram_quantile(0.95, 
+                sum(rate(mongodb_query_duration_seconds_bucket{job="control-plane-api"}[5m])) by (le, operation)
+              ) > 0.5
+            for: 10m
+            labels:
+              severity: warning
+              service: control-plane-api
+            annotations:
+              summary: "Slow MongoDB queries"
+              description: "p95 MongoDB query time for {{ $labels.operation }} is {{ $value | humanizeDuration }}"
+          
+          # Low cache hit rate
+          - alert: ControlPlaneLowCacheHitRate
+            expr: |
+              sum(rate(redis_cache_hits_total{job="control-plane-api"}[5m]))
+              / 
+              (sum(rate(redis_cache_hits_total{job="control-plane-api"}[5m])) + sum(rate(redis_cache_misses_total{job="control-plane-api"}[5m])))
+              < 0.5
+            for: 15m
+            labels:
+              severity: warning
+              service: control-plane-api
+            annotations:
+              summary: "Low cache hit rate"
+              description: "Cache hit rate is {{ $value | humanizePercentage }} (threshold: 50%)"
+
+# =============================================================================
+# Node Exporter
+# =============================================================================
+nodeExporter:
+  enabled: true
+  resources:
+    requests:
+      memory: 64Mi
+      cpu: 50m
+    limits:
+      memory: 128Mi
+      cpu: 200m
+
+# =============================================================================
+# kube-state-metrics
+# =============================================================================
+kubeStateMetrics:
+  enabled: true
+  resources:
+    requests:
+      memory: 64Mi
+      cpu: 50m
+    limits:
+      memory: 256Mi
+      cpu: 200m

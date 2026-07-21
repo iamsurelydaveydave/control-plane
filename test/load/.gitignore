@@ -1,0 +1,6 @@
+# Test results
+results/
+*.json
+
+# k6 cloud tokens (if using k6 cloud)
+.k6-cloud-token

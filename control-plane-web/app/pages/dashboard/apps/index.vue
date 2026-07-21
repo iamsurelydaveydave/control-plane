@@ -1,6 +1,6 @@
 <script setup lang="ts">
 /**
- * Apps list page — manage Kamal-based app deployments.
+ * Apps list page — manage Kubernetes app deployments.
  */
 definePageMeta({
   layout: 'dashboard',
@@ -10,7 +10,6 @@ definePageMeta({
 
 const toast = useToast()
 const { getAll, add, deleteById, deploy, stop } = useApp()
-const { getAll: getServers } = useServer()
 
 // Dialog state
 const dialogAdd = ref(false)
@@ -22,25 +21,12 @@ const message = ref('')
 const search = ref('')
 const page = ref(1)
 
-// Servers for the dropdown
-const { data: serversData } = useLazyAsyncData(
-  'servers-dropdown',
-  () => getServers({ page: 1 }).catch(() => ({ items: [] as TServer[], pages: 0 })),
-  { server: false }
-)
-const serverOptions = computed(() => {
-  const servers = serversData.value?.items ?? []
-  return servers
-    .filter(s => s.status === 'online' && s.dockerInstalled)
-    .map(s => ({ value: s._id, label: `${s.name} (${s.host})` }))
-})
-
 // Table columns
 const columns = [
   { accessorKey: 'name', header: 'Name' },
-  { accessorKey: 'domain', header: 'Domain' },
+  { accessorKey: 'image', header: 'Image' },
   { accessorKey: 'status', header: 'Status' },
-  { accessorKey: 'currentVersion', header: 'Version' },
+  { accessorKey: 'replicas', header: 'Replicas' },
   { accessorKey: 'deployedAt', header: 'Last Deploy' },
   { id: 'actions', header: '' }
 ]
@@ -62,50 +48,58 @@ const filteredItems = computed(() => {
   return items.value.filter(
     (item: TApp) =>
       item.name.toLowerCase().includes(s)
+      || item.source?.image?.toLowerCase().includes(s)
       || item.proxy?.host?.toLowerCase().includes(s)
   )
 })
 
 // Add form
-const form = reactive<TAppForm>({
+const form = reactive({
   name: '',
-  source: { type: 'image', image: '' },
-  serverIds: [],
-  proxy: { ssl: true, host: '', appPort: 3000 }
+  source: { type: 'image' as const, image: '' },
+  k8s: { replicas: 1, port: 3000 },
+  proxy: { ssl: true, host: '', port: 3000 }
 })
 
 function openAdd() {
   Object.assign(form, {
     name: '',
     source: { type: 'image', image: '' },
-    serverIds: [],
-    proxy: { ssl: true, host: '', appPort: 3000 }
+    k8s: { replicas: 1, port: 3000 },
+    proxy: { ssl: true, host: '', port: 3000 }
   })
   message.value = ''
   dialogAdd.value = true
 }
 
 async function submitAdd() {
-  if (!form.name || !form.serverIds.length) {
-    message.value = 'Name and at least one server are required.'
+  if (!form.name) {
+    message.value = 'Name is required.'
     return
   }
-  if (form.source.type === 'image' && !form.source.image) {
+  if (!form.source.image) {
     message.value = 'Docker image is required.'
-    return
-  }
-  if (form.source.type === 'git' && !form.source.gitUrl) {
-    message.value = 'Git URL is required.'
     return
   }
 
   loadingForm.value = true
   message.value = ''
   try {
-    await add(form)
+    await add({
+      name: form.name,
+      source: form.source,
+      k8s: {
+        replicas: form.k8s.replicas,
+        image: form.source.image,
+        port: form.k8s.port,
+        domain: form.proxy.host || undefined,
+        envVars: {}
+      },
+      proxy: form.proxy.host ? form.proxy : undefined
+    })
     toast.add({
       title: 'App created',
-      description: `${form.name} has been created successfully.`,
+      description: `${form.name} has been created and will be deployed.`,
       color: 'success',
       icon: 'i-lucide-check-circle'
     })
@@ -232,7 +226,7 @@ useHead({ title: 'Apps · Control Plane' })
             Apps
           </h1>
           <p class="text-muted">
-            Deploy and manage your applications with Kamal.
+            Deploy and manage containerized applications on Kubernetes.
           </p>
         </div>
         <UButton
@@ -275,26 +269,14 @@ useHead({ title: 'Apps · Control Plane' })
             </div>
           </template>
 
-          <template #domain-cell="{ row }">
-            <div
-              v-if="row.original.proxy?.host"
-              class="flex items-center gap-1.5"
+          <template #image-cell="{ row }">
+            <code
+              v-if="row.original.source?.image || row.original.currentImage"
+              class="text-xs text-muted bg-muted px-1.5 py-0.5 rounded font-mono truncate max-w-48 block"
             >
-              <span class="text-sm text-muted font-mono truncate max-w-48">
-                {{ row.original.proxy.host }}
-              </span>
-              <UBadge
-                v-if="row.original.proxy.host.endsWith('.sslip.io')"
-                label="sslip.io"
-                color="neutral"
-                variant="subtle"
-                size="xs"
-              />
-            </div>
-            <span
-              v-else
-              class="text-sm text-muted"
-            >—</span>
+              {{ row.original.source?.image || row.original.currentImage }}
+            </code>
+            <span v-else class="text-sm text-muted">—</span>
           </template>
 
           <template #status-cell="{ row }">
@@ -312,14 +294,10 @@ useHead({ title: 'Apps · Control Plane' })
             </div>
           </template>
 
-          <template #currentVersion-cell="{ row }">
-            <code
-              v-if="row.original.currentVersion"
-              class="text-xs text-muted bg-muted px-1.5 py-0.5 rounded"
-            >
-              {{ row.original.currentVersion }}
-            </code>
-            <span v-else class="text-sm text-muted">—</span>
+          <template #replicas-cell="{ row }">
+            <span class="text-sm text-muted">
+              {{ row.original.desiredReplicas ?? row.original.k8s?.replicas ?? 1 }}
+            </span>
           </template>
 
           <template #deployedAt-cell="{ row }">
@@ -399,67 +377,34 @@ useHead({ title: 'Apps · Control Plane' })
               placeholder="my-app"
               class="w-full"
             />
+            <template #hint>
+              <span class="text-xs text-muted">
+                Lowercase letters, numbers, and hyphens only.
+              </span>
+            </template>
           </UFormField>
 
-          <UFormField label="Source type">
-            <USelect
-              v-model="form.source.type"
-              :items="[
-                { value: 'image', label: 'Docker Image' },
-                { value: 'git', label: 'Git Repository' }
-              ]"
-              class="w-full"
-            />
-          </UFormField>
-
-          <UFormField
-            v-if="form.source.type === 'image'"
-            label="Docker image"
-          >
+          <UFormField label="Docker image">
             <UInput
               v-model="form.source.image"
-              placeholder="nginx:latest"
+              placeholder="nginx:latest or ghcr.io/user/app:v1.0"
               class="w-full"
             />
           </UFormField>
 
-          <template v-if="form.source.type === 'git'">
-            <UFormField label="Git URL">
-              <UInput
-                v-model="form.source.gitUrl"
-                placeholder="https://github.com/user/repo.git"
-                class="w-full"
-              />
-            </UFormField>
-            <div class="grid grid-cols-2 gap-3">
-              <UFormField label="Branch">
-                <UInput
-                  v-model="form.source.gitBranch"
-                  placeholder="main"
-                  class="w-full"
-                />
-              </UFormField>
-              <UFormField label="Dockerfile">
-                <UInput
-                  v-model="form.source.dockerfile"
-                  placeholder="Dockerfile"
-                  class="w-full"
-                />
-              </UFormField>
-            </div>
-          </template>
-
           <div class="grid grid-cols-2 gap-3">
-            <UFormField label="Domain">
+            <UFormField label="Replicas">
               <UInput
-                v-model="form.proxy!.host"
-                placeholder="app.example.com"
+                v-model.number="form.k8s.replicas"
+                type="number"
+                min="0"
+                max="10"
                 class="w-full"
               />
             </UFormField>
-            <UFormField label="App port">
+            <UFormField label="Container port">
               <UInput
-                v-model.number="form.proxy!.appPort"
+                v-model.number="form.k8s.port"
                 type="number"
                 placeholder="3000"
                 class="w-full"
@@ -467,25 +412,15 @@ useHead({ title: 'Apps · Control Plane' })
             </UFormField>
           </div>
 
-          <UFormField label="Servers">
-            <USelect
-              v-model="form.serverIds"
-              :items="serverOptions"
-              multiple
-              placeholder="Select servers..."
+          <UFormField label="Domain (optional)">
+            <UInput
+              v-model="form.proxy.host"
+              placeholder="app.example.com"
               class="w-full"
             />
             <template #hint>
-              <span
-                v-if="!serverOptions.length"
-                class="text-xs text-muted"
-              >
-                No ready servers. Servers must be
-                <span class="font-medium text-highlighted">online with Docker installed</span>.
-                <NuxtLink
-                  to="/dashboard/servers"
-                  class="text-primary underline"
-                >Set up a server</NuxtLink> first.
+              <span class="text-xs text-muted">
+                Leave empty for cluster-internal only.
               </span>
             </template>
           </UFormField>
@@ -502,7 +437,7 @@ useHead({ title: 'Apps · Control Plane' })
         </UButton>
         <UButton
           :loading="loadingForm"
-          :disabled="!form.name || !form.serverIds.length"
+          :disabled="!form.name || !form.source.image"
           icon="i-lucide-plus"
           @click="submitAdd"
         >
@@ -535,7 +470,7 @@ useHead({ title: 'Apps · Control Plane' })
               <p class="text-muted">
                 Are you sure you want to delete
                 <span class="font-medium text-highlighted">{{ deleteTarget?.name }}</span>?
-                This will remove the deployment and cannot be undone.
+                This will remove all K8s resources and cannot be undone.
               </p>
             </div>
           </div>

@@ -80,7 +80,7 @@ function toggleSidebar() {
           aria-label="Open navigation"
           @click="toggleSidebar"
         />
-        <span class="font-semibold text-highlighted">{{ appName }}</span>
+        <span class="font-semibold text-highlighted flex-1">{{ appName }}</span>
       </div>
 
       <div class="min-h-0 flex-1 overflow-auto">

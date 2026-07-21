@@ -1,0 +1,202 @@
+# Deploy to Kubernetes
+# Manual trigger with environment selection
+
+name: Deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Target environment'
+        required: true
+        type: choice
+        options:
+          - staging
+          - production
+        default: staging
+      version:
+        description: 'Version to deploy (e.g., 1.0.0 or latest)'
+        required: true
+        default: 'latest'
+      dry_run:
+        description: 'Dry run (no actual deployment)'
+        required: false
+        type: boolean
+        default: false
+
+env:
+  HELM_CHART_PATH: deploy/helm/control-plane
+  REGISTRY: ghcr.io
+  API_IMAGE: ${{ github.repository_owner }}/control-plane-api
+  WEB_IMAGE: ${{ github.repository_owner }}/control-plane-web
+
+jobs:
+  deploy:
+    name: Deploy to ${{ inputs.environment }}
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Validate version
+        id: validate
+        run: |
+          VERSION="${{ inputs.version }}"
+          
+          # Check if version exists in registry
+          if [ "$VERSION" != "latest" ]; then
+            echo "Checking if version $VERSION exists..."
+            # This will fail if the image doesn't exist
+            docker manifest inspect ${{ env.REGISTRY }}/${{ env.API_IMAGE }}:$VERSION > /dev/null 2>&1 || {
+              echo "::error::Version $VERSION not found in registry"
+              exit 1
+            }
+          fi
+          
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "✅ Version $VERSION validated"
+
+      - name: Setup kubectl
+        uses: azure/setup-kubectl@v4
+        with:
+          version: 'v1.30.0'
+
+      - name: Setup Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: 'v3.15.0'
+
+      - name: Configure kubeconfig
+        run: |
+          mkdir -p ~/.kube
+          echo "${{ secrets.KUBECONFIG }}" | base64 -d > ~/.kube/config
+          chmod 600 ~/.kube/config
+
+      - name: Verify cluster connection
+        run: |
+          echo "Verifying connection to Kubernetes cluster..."
+          kubectl cluster-info
+          kubectl get nodes
+
+      - name: Set environment-specific values
+        id: env_values
+        run: |
+          if [ "${{ inputs.environment }}" == "production" ]; then
+            echo "namespace=control-plane" >> $GITHUB_OUTPUT
+            echo "replicas_api=3" >> $GITHUB_OUTPUT
+            echo "replicas_web=3" >> $GITHUB_OUTPUT
+            echo "resources_api_cpu=500m" >> $GITHUB_OUTPUT
+            echo "resources_api_memory=512Mi" >> $GITHUB_OUTPUT
+            echo "resources_web_cpu=250m" >> $GITHUB_OUTPUT
+            echo "resources_web_memory=256Mi" >> $GITHUB_OUTPUT
+          else
+            echo "namespace=control-plane-staging" >> $GITHUB_OUTPUT
+            echo "replicas_api=1" >> $GITHUB_OUTPUT
+            echo "replicas_web=1" >> $GITHUB_OUTPUT
+            echo "resources_api_cpu=250m" >> $GITHUB_OUTPUT
+            echo "resources_api_memory=256Mi" >> $GITHUB_OUTPUT
+            echo "resources_web_cpu=100m" >> $GITHUB_OUTPUT
+            echo "resources_web_memory=128Mi" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Create namespace if not exists
+        run: |
+          kubectl create namespace ${{ steps.env_values.outputs.namespace }} --dry-run=client -o yaml | kubectl apply -f -
+
+      - name: Helm lint
+        run: |
+          helm lint ${{ env.HELM_CHART_PATH }}
+
+      - name: Helm diff (dry run)
+        run: |
+          helm upgrade control-plane ${{ env.HELM_CHART_PATH }} \
+            --namespace ${{ steps.env_values.outputs.namespace }} \
+            --set api.image.repository=${{ env.REGISTRY }}/${{ env.API_IMAGE }} \
+            --set api.image.tag=${{ steps.validate.outputs.version }} \
+            --set api.replicas=${{ steps.env_values.outputs.replicas_api }} \
+            --set api.resources.requests.cpu=${{ steps.env_values.outputs.resources_api_cpu }} \
+            --set api.resources.requests.memory=${{ steps.env_values.outputs.resources_api_memory }} \
+            --set web.image.repository=${{ env.REGISTRY }}/${{ env.WEB_IMAGE }} \
+            --set web.image.tag=${{ steps.validate.outputs.version }} \
+            --set web.replicas=${{ steps.env_values.outputs.replicas_web }} \
+            --set web.resources.requests.cpu=${{ steps.env_values.outputs.resources_web_cpu }} \
+            --set web.resources.requests.memory=${{ steps.env_values.outputs.resources_web_memory }} \
+            --dry-run \
+            --debug
+
+      - name: Deploy with Helm
+        if: ${{ !inputs.dry_run }}
+        run: |
+          helm upgrade --install control-plane ${{ env.HELM_CHART_PATH }} \
+            --namespace ${{ steps.env_values.outputs.namespace }} \
+            --set api.image.repository=${{ env.REGISTRY }}/${{ env.API_IMAGE }} \
+            --set api.image.tag=${{ steps.validate.outputs.version }} \
+            --set api.replicas=${{ steps.env_values.outputs.replicas_api }} \
+            --set api.resources.requests.cpu=${{ steps.env_values.outputs.resources_api_cpu }} \
+            --set api.resources.requests.memory=${{ steps.env_values.outputs.resources_api_memory }} \
+            --set web.image.repository=${{ env.REGISTRY }}/${{ env.WEB_IMAGE }} \
+            --set web.image.tag=${{ steps.validate.outputs.version }} \
+            --set web.replicas=${{ steps.env_values.outputs.replicas_web }} \
+            --set web.resources.requests.cpu=${{ steps.env_values.outputs.resources_web_cpu }} \
+            --set web.resources.requests.memory=${{ steps.env_values.outputs.resources_web_memory }} \
+            --wait \
+            --timeout 10m
+
+      - name: Verify deployment
+        if: ${{ !inputs.dry_run }}
+        run: |
+          echo "Waiting for rollout to complete..."
+          kubectl rollout status deployment/control-plane-api -n ${{ steps.env_values.outputs.namespace }} --timeout=5m
+          kubectl rollout status deployment/control-plane-web -n ${{ steps.env_values.outputs.namespace }} --timeout=5m
+          
+          echo ""
+          echo "=== Deployment Status ==="
+          kubectl get pods -n ${{ steps.env_values.outputs.namespace }} -l app.kubernetes.io/instance=control-plane
+          
+          echo ""
+          echo "=== Services ==="
+          kubectl get svc -n ${{ steps.env_values.outputs.namespace }} -l app.kubernetes.io/instance=control-plane
+
+      - name: Deployment summary
+        run: |
+          echo "## Deployment Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Parameter | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|-----------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Environment | \`${{ inputs.environment }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Version | \`${{ steps.validate.outputs.version }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Namespace | \`${{ steps.env_values.outputs.namespace }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Dry Run | \`${{ inputs.dry_run }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| API Replicas | \`${{ steps.env_values.outputs.replicas_api }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Web Replicas | \`${{ steps.env_values.outputs.replicas_web }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          if [ "${{ inputs.dry_run }}" == "true" ]; then
+            echo "⚠️ **This was a dry run. No changes were applied.**" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "✅ **Deployment completed successfully.**" >> $GITHUB_STEP_SUMMARY
+          fi
+
+  # ================================
+  # Notify on failure
+  # ================================
+  notify-failure:
+    name: Notify on Failure
+    runs-on: ubuntu-latest
+    needs: deploy
+    if: failure()
+
+    steps:
+      - name: Create failure summary
+        run: |
+          echo "## ❌ Deployment Failed" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Parameter | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|-----------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Environment | \`${{ inputs.environment }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Version | \`${{ inputs.version }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Triggered by | @${{ github.actor }} |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Check the workflow logs for details." >> $GITHUB_STEP_SUMMARY

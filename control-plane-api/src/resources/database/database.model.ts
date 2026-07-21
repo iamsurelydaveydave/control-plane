@@ -1,12 +1,13 @@
 import Joi from "joi";
 import { ObjectId } from "mongodb";
-import { BadRequestError } from "../../utils";
+import { BadRequestError } from "../../utils/error";
 
-export const databaseTypes = ["mongodb", "redis", "postgresql", "mysql"] as const;
+// =============================================================================
+// Enums
+// =============================================================================
+
+export const databaseTypes = ["mongodb"] as const;
 export type TDatabaseType = (typeof databaseTypes)[number];
-
-export const databaseStatuses = ["provisioning", "running", "failed", "stopped", "deleting"] as const;
-export type TDatabaseStatus = (typeof databaseStatuses)[number];
 
 export const databaseNodeRoles = ["primary", "secondary", "arbiter", "standalone"] as const;
 export type TDatabaseNodeRole = (typeof databaseNodeRoles)[number];
@@ -14,156 +15,306 @@ export type TDatabaseNodeRole = (typeof databaseNodeRoles)[number];
 export const databaseNodeStatuses = ["running", "stopped", "syncing", "unhealthy"] as const;
 export type TDatabaseNodeStatus = (typeof databaseNodeStatuses)[number];
 
-export const provisionerTypes = ["ansible", "k8s"] as const;
-export type TProvisionerType = (typeof provisionerTypes)[number];
+export const databaseStatuses = [
+  "provisioning",
+  "running",
+  "stopped",
+  "failed",
+  "deleting",
+  "unknown",
+] as const;
+export type TDatabaseStatus = (typeof databaseStatuses)[number];
+
+// =============================================================================
+// Types
+// =============================================================================
 
 export type TDatabaseNode = {
-  serverId: ObjectId | string;
+  serverId: ObjectId;
   role: TDatabaseNodeRole;
   status: TDatabaseNodeStatus;
+  sslipHost?: string;
+  sslipConnectionHost?: string;
 };
 
 export type TDatabaseCredentials = {
   adminUser: string;
-  adminPassword: string; // encrypted
-  connectionString: string; // encrypted
+  adminPassword: string; // Encrypted at rest
+  connectionString: string;
+  srvConnectionString?: string; // mongodb+srv:// — present when DNS is configured
+};
+
+export type TDatabaseConfig = {
+  port?: number;
+  replicaSetName?: string;
+  cacheSizeGB?: number;
+};
+
+export type TDatabaseDNS = {
+  enabled: boolean;
+  provider: string;
+  clusterHost: string;
+  nodeHosts: string[];
+  srvConnectionString: string;
+  records: Array<{ id: string; type: string; name: string }>;
+  configuredAt: Date;
+};
+
+export type TDatabaseTLS = {
+  enabled: boolean;
+  caCert: string;
+  tlsConnectionString: string;
+  configuredAt: Date;
 };
 
 export type TDatabaseBackup = {
   enabled: boolean;
   schedule: string;
-  s3Bucket: string;
+  s3Bucket?: string;
+  s3Endpoint?: string;
   s3Region?: string;
+  credentialsSecret?: string;
   lastBackup?: Date;
 };
 
-/**
- * DNS configuration stored on the database document once DNS records are
- * provisioned. The `records` array holds every Cloudflare record ID so
- * they can be deleted when the cluster is torn down.
- */
-export type TDatabaseDNS = {
+export type TBackupConfigInput = {
   enabled: boolean;
-  provider: string;            // e.g. "cloudflare"
-  clusterHost: string;         // e.g. "mydb.example.com"
-  nodeHosts: string[];         // e.g. ["node1.mydb.example.com", …]
-  srvConnectionString: string; // mongodb+srv://admin:***@mydb.example.com/…
-  records: Array<{
-    id: string;                // provider record ID (for deletion)
-    type: string;              // "A" | "SRV" | "TXT"
-    name: string;              // full DNS name
-  }>;
-  configuredAt: Date;
-};
-
-/**
- * TLS configuration stored on the database document once TLS is enabled.
- * The CA certificate is stored for client distribution.
- */
-export type TDatabaseTLS = {
-  enabled: boolean;
-  caCert: string;              // PEM-encoded CA certificate for client connections
-  tlsConnectionString: string; // Connection string with tls=true&tlsCAFile param
-  configuredAt: Date;
-};
-
-export type TDatabaseBackupRecord = {
-  _id?: ObjectId;
-  s3Key: string;
+  schedule: string;
   s3Bucket: string;
-  s3Region: string;
-  sizeBytes?: number;
-  createdAt: Date;
-  status: "success" | "failed";
-  error?: string;
+  s3Endpoint?: string;
+  s3Region?: string;
+  accessKeyId: string;
+  secretAccessKey: string;
+};
+
+export type TBackupInfo = {
+  name: string;
+  status: string;
+  type: string;
+  storageName: string;
+  completed?: Date;
+  pbmName?: string;
+  size?: number;
 };
 
 export type TDatabase = {
   _id?: ObjectId;
+  organizationId?: ObjectId;   // Organization this database belongs to (multi-tenancy)
   name: string;
   type: TDatabaseType;
   version: string;
   status: TDatabaseStatus;
-  provisionedWith?: TProvisionerType; // Tracks which provisioner created this database
-  config: Record<string, any>;
   credentials: TDatabaseCredentials;
   nodes: TDatabaseNode[];
-  backup?: TDatabaseBackup;
-  backupRecords?: TDatabaseBackupRecord[];
+  config: TDatabaseConfig;
   dns?: TDatabaseDNS;
   tls?: TDatabaseTLS;
-  createdAt?: Date;
-  updatedAt?: Date;
-  deletedAt?: Date;
+  backup?: TDatabaseBackup;
+  deploymentLogs?: string[];
+  createdAt: Date;
+  updatedAt: Date;
 };
 
-const schemaCredentials = Joi.object({
-  adminUser: Joi.string().required(),
-  adminPassword: Joi.string().required(),
-  connectionString: Joi.string().optional().allow(""),
+// =============================================================================
+// Input type for creating a database
+// =============================================================================
+
+export type TDatabaseInput = {
+  name: string;
+  type: TDatabaseType;
+  version: string;
+  credentials: {
+    adminUser: string;
+    adminPassword: string;
+    connectionString?: string;
+  };
+  nodes: Array<{
+    serverId: string;
+    role: TDatabaseNodeRole;
+    status?: TDatabaseNodeStatus;
+  }>;
+  config?: Partial<TDatabaseConfig>;
+  backup?: TDatabaseBackup;
+};
+
+// =============================================================================
+// Joi Schemas
+// =============================================================================
+
+const schemaNodeBase = Joi.object({
+  serverId: Joi.alternatives()
+    .try(Joi.string().length(24), Joi.object().instance(ObjectId))
+    .required(),
+  role: Joi.string()
+    .valid(...databaseNodeRoles)
+    .required(),
+  status: Joi.string()
+    .valid(...databaseNodeStatuses)
+    .default("stopped"),
+  sslipHost: Joi.string().optional(),
+  sslipConnectionHost: Joi.string().optional(),
 });
 
-const schemaNode = Joi.object({
-  serverId: Joi.string().required(),
-  role: Joi.string().valid(...databaseNodeRoles).required(),
-  status: Joi.string().valid(...databaseNodeStatuses).default("stopped"),
+const schemaCredentialsBase = Joi.object({
+  adminUser: Joi.string().required(),
+  adminPassword: Joi.string().required(),
+  connectionString: Joi.string().allow("").default(""),
+});
+
+const schemaConfigBase = Joi.object({
+  port: Joi.number().integer().min(1024).max(65535).optional(),
+  replicaSetName: Joi.string().optional(),
+  cacheSizeGB: Joi.number().positive().optional(),
+});
+
+const schemaDNSRecord = Joi.object({
+  id: Joi.string().required(),
+  type: Joi.string().required(),
+  name: Joi.string().required(),
+});
+
+const schemaDNS = Joi.object({
+  enabled: Joi.boolean().required(),
+  provider: Joi.string().required(),
+  clusterHost: Joi.string().required(),
+  nodeHosts: Joi.array().items(Joi.string()).required(),
+  srvConnectionString: Joi.string().required(),
+  records: Joi.array().items(schemaDNSRecord).required(),
+  configuredAt: Joi.date().required(),
+});
+
+const schemaTLS = Joi.object({
+  enabled: Joi.boolean().required(),
+  caCert: Joi.string().required(),
+  tlsConnectionString: Joi.string().required(),
+  configuredAt: Joi.date().required(),
 });
 
 const schemaBackup = Joi.object({
-  enabled: Joi.boolean().default(false),
-  schedule: Joi.string().default("0 0 * * *"),
+  enabled: Joi.boolean().required(),
+  schedule: Joi.string().required(),
+  s3Bucket: Joi.string().optional(),
+  s3Endpoint: Joi.string().optional(),
+  s3Region: Joi.string().optional(),
+  credentialsSecret: Joi.string().optional(),
+  lastBackup: Joi.date().optional(),
+});
+
+export const schemaBackupConfig = Joi.object({
+  enabled: Joi.boolean().required(),
+  schedule: Joi.string().required().pattern(/^[\d*,\-/\s]+$/, 'cron expression'),
   s3Bucket: Joi.string().required(),
+  s3Endpoint: Joi.string().optional(),
+  s3Region: Joi.string().default('us-east-1'),
+  accessKeyId: Joi.string().required(),
+  secretAccessKey: Joi.string().required(),
+});
+
+export const schemaRestoreBackup = Joi.object({
+  backupName: Joi.string().required(),
 });
 
 export const schemaDatabaseCreate = Joi.object({
-  name: Joi.string().max(100).required(),
-  type: Joi.string().valid(...databaseTypes).required(),
+  organizationId: Joi.string().length(24).optional(), // Optional for backwards compat
+  name: Joi.string().min(1).max(100).required(),
+  type: Joi.string()
+    .valid(...databaseTypes)
+    .required(),
   version: Joi.string().required(),
-  config: Joi.object().default({}),
-  credentials: schemaCredentials.required(),
-  nodes: Joi.array().items(schemaNode).min(1).required(),
+  credentials: schemaCredentialsBase.required(),
+  nodes: Joi.array().items(schemaNodeBase).min(1).required(),
+  config: schemaConfigBase.default({}),
+  dns: schemaDNS.optional(),
+  tls: schemaTLS.optional(),
   backup: schemaBackup.optional(),
 });
 
-export const schemaDatabaseUpdate = Joi.object({
-  name: Joi.string().max(100).optional(),
+export const schemaAddNode = Joi.object({
+  serverId: Joi.string().required(),
+  role: Joi.string()
+    .valid(...databaseNodeRoles)
+    .required(),
+});
+
+export const schemaDatabaseUpdate = Joi.object<Partial<TDatabase>>({
+  name: Joi.string().min(1).max(100).optional(),
   version: Joi.string().optional(),
-  config: Joi.object().optional(),
+  status: Joi.string()
+    .valid(...databaseStatuses)
+    .optional(),
+  config: schemaConfigBase.optional(),
+  dns: schemaDNS.optional(),
+  tls: schemaTLS.optional(),
   backup: schemaBackup.optional(),
 });
 
-export function modelDatabase(data: Partial<TDatabase>): TDatabase {
-  const { error, value } = schemaDatabaseCreate.validate(data);
+// =============================================================================
+// Model Function
+// =============================================================================
+
+/**
+ * Validate and normalize database data for creation.
+ * - Validates all fields via Joi
+ * - Converts string serverIds to ObjectId
+ * - Sets initial status to "provisioning"
+ * - Sets timestamps
+ */
+export function modelDatabase(data: Partial<TDatabase> | TDatabaseInput): Omit<TDatabase, "_id"> {
+  const { error, value } = schemaDatabaseCreate.validate(data, {
+    abortEarly: false,
+    stripUnknown: true,
+  });
 
   if (error) {
-    throw new BadRequestError(`Database validation error: ${error.message}`);
+    throw new BadRequestError(
+      `Database validation error: ${error.details.map((d) => d.message).join(", ")}`
+    );
   }
 
-  if (data._id && typeof data._id === "string") {
+  const now = new Date();
+
+  // Convert string serverIds to ObjectId in nodes array
+  const nodes: TDatabaseNode[] = value.nodes.map((node: any) => {
+    let serverId: ObjectId;
     try {
-      data._id = new ObjectId(data._id);
+      serverId =
+        node.serverId instanceof ObjectId
+          ? node.serverId
+          : new ObjectId(node.serverId);
     } catch {
-      throw new BadRequestError(`Invalid _id format: ${data._id}`);
+      throw new BadRequestError(
+        `Invalid serverId format in nodes: ${node.serverId}`
+      );
     }
-  }
 
-  // Convert serverId strings to ObjectIds
-  const nodes = value.nodes.map((node: TDatabaseNode) => ({
-    ...node,
-    serverId: typeof node.serverId === "string" ? new ObjectId(node.serverId) : node.serverId,
-  }));
+    return {
+      serverId,
+      role: node.role as TDatabaseNodeRole,
+      status: node.status as TDatabaseNodeStatus,
+      ...(node.sslipHost && { sslipHost: node.sslipHost }),
+      ...(node.sslipConnectionHost && {
+        sslipConnectionHost: node.sslipConnectionHost,
+      }),
+    };
+  });
 
   return {
-    _id: data._id,
+    organizationId: value.organizationId ? new ObjectId(value.organizationId) : undefined,
     name: value.name,
-    type: value.type,
+    type: value.type as TDatabaseType,
     version: value.version,
-    status: "provisioning",
-    config: value.config,
-    credentials: value.credentials,
+    status: "provisioning", // Always start as provisioning
+    credentials: {
+      adminUser: value.credentials.adminUser,
+      adminPassword: value.credentials.adminPassword,
+      connectionString: value.credentials.connectionString || "",
+    },
     nodes,
-    backup: value.backup,
-    createdAt: data.createdAt ?? new Date(),
-    updatedAt: data.updatedAt ?? new Date(),
+    config: value.config || {},
+    ...(value.dns && { dns: value.dns }),
+    ...(value.tls && { tls: value.tls }),
+    ...(value.backup && { backup: value.backup }),
+    createdAt: now,
+    updatedAt: now,
   };
 }

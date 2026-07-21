@@ -5,9 +5,12 @@ import { verifyJwt } from "./jwt";
 import { sidCookieOptions, identityCookieOptions } from "./cookie";
 import { ACCESS_TOKEN_SECRET, SESSION_TTL_SECONDS } from "../config";
 import { useAPITokenService } from "../resources/api-token";
+import { useRoleService, TPermission, hasPermission } from "../resources/role";
+import { useUserRepo } from "../resources/user";
 import type { TAPITokenScope } from "../resources/api-token/api-token.model";
+import { ForbiddenError, UnauthorizedError } from "./error";
 
-// Extend Express Request to include API token info
+// Extend Express Request to include API token info and user permissions
 declare module "express-serve-static-core" {
   interface Request {
     apiToken?: {
@@ -15,6 +18,7 @@ declare module "express-serve-static-core" {
       userId: string;
       scopes: TAPITokenScope[];
     };
+    userPermissions?: TPermission[];
   }
 }
 
@@ -101,17 +105,17 @@ export async function requireAuth(req: Request, res: Response, next: NextFunctio
 /**
  * Middleware to require a specific API token scope.
  * Must be used after requireAuth.
+ * @deprecated Use requirePermission instead for RBAC-based access control.
  */
 export function requireScope(scope: TAPITokenScope) {
   return (req: Request, res: Response, next: NextFunction) => {
-    // If not using API token, allow (session users have full access)
+    // If not using API token, allow (session users have full access via RBAC)
     if (!req.apiToken) {
       next();
       return;
     }
 
     // Check scope
-    const apiTokenService = useAPITokenService();
     if (
       req.apiToken.scopes.includes("*") ||
       req.apiToken.scopes.includes(scope)
@@ -122,4 +126,114 @@ export function requireScope(scope: TAPITokenScope) {
 
     res.status(403).json({ error: `Insufficient scope. Required: ${scope}` });
   };
+}
+
+/**
+ * Map API token scopes to RBAC permissions.
+ * This allows API tokens to work with the new permission system.
+ */
+function mapScopeToPermission(scope: TAPITokenScope, permission: TPermission): boolean {
+  // Full access scope
+  if (scope === "*") {
+    return true;
+  }
+
+  // Direct mapping for read/write scopes
+  const [scopeResource, scopeAction] = scope.split(":");
+  const [permResource, permAction] = permission.split(":");
+
+  // Check if resources match
+  if (scopeResource !== permResource) {
+    return false;
+  }
+
+  // Read scope allows read actions
+  if (scopeAction === "read" && permAction === "read") {
+    return true;
+  }
+
+  // Write scope allows all actions on that resource
+  if (scopeAction === "write") {
+    return true;
+  }
+
+  return false;
+}
+
+/**
+ * Check if an API token has the required permission via its scopes.
+ */
+function apiTokenHasPermission(scopes: TAPITokenScope[], permission: TPermission): boolean {
+  return scopes.some((scope) => mapScopeToPermission(scope, permission));
+}
+
+/**
+ * Middleware to require a specific permission.
+ * Works with both session-based auth (uses RBAC) and API tokens (uses scopes).
+ * Must be used after requireAuth.
+ */
+export function requirePermission(permission: TPermission) {
+  return async (req: Request, res: Response, next: NextFunction) => {
+    const userId = req.cookies?.user as string;
+    
+    if (!userId) {
+      next(new UnauthorizedError("Not authenticated"));
+      return;
+    }
+
+    try {
+      // If using API token, check scopes
+      if (req.apiToken) {
+        if (apiTokenHasPermission(req.apiToken.scopes, permission)) {
+          next();
+          return;
+        }
+        next(new ForbiddenError(`Insufficient scope for permission: ${permission}`));
+        return;
+      }
+
+      // For session-based auth, check RBAC permissions
+      const roleService = useRoleService();
+      const hasRequiredPermission = await roleService.checkUserPermission(userId, permission);
+
+      if (hasRequiredPermission) {
+        next();
+        return;
+      }
+
+      next(new ForbiddenError(`Missing permission: ${permission}`));
+    } catch (error) {
+      logger.log({
+        level: "error",
+        message: `Permission check failed for user ${userId}: ${error}`,
+      });
+      next(new ForbiddenError(`Permission check failed: ${permission}`));
+    }
+  };
+}
+
+/**
+ * Middleware to require admin permission (admin:*).
+ * Shorthand for requirePermission("admin:*").
+ */
+export function requireAdmin(req: Request, res: Response, next: NextFunction) {
+  return requirePermission("admin:*")(req, res, next);
+}
+
+/**
+ * Get all permissions for the current user.
+ * Can be used in controllers to check multiple permissions.
+ */
+export async function getUserPermissions(userId: string): Promise<TPermission[]> {
+  const roleService = useRoleService();
+  return roleService.getUserPermissions(userId);
+}
+
+/**
+ * Check if a user has a specific permission.
+ * Can be used in controllers for fine-grained access control.
+ */
+export async function checkPermission(userId: string, permission: TPermission): Promise<boolean> {
+  const roleService = useRoleService();
+  return roleService.checkUserPermission(userId, permission);
 }

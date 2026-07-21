@@ -1,6 +1,8 @@
 import { Request, Response, NextFunction } from "express";
 import Joi from "joi";
 import { useUserService } from "../user";
+import { useAuditLogService } from "../audit-log";
+import { useRoleService } from "../role";
 import {
   BadRequestError,
   comparePassword,
@@ -43,6 +45,8 @@ const schemaUpdateMe = Joi.object({
 export function useAuthController() {
   const userService = useUserService();
   const sessionStore = useSessionStore();
+  const auditService = useAuditLogService();
+  const roleService = useRoleService();
 
   async function login(req: Request, res: Response, next: NextFunction) {
     try {
@@ -56,12 +60,33 @@ export function useAuthController() {
       const user = await userService.getByEmail(email);
 
       if (!user) {
+        // Log failed login attempt
+        await auditService.logAction({
+          req,
+          action: "login_failed",
+          resource: "user",
+          details: { email, reason: "User not found" },
+          success: false,
+          errorMessage: "Invalid email or password",
+        });
+
         next(new BadRequestError("Invalid email or password"));
         return;
       }
 
       const isValid = await comparePassword(password, user.password);
       if (!isValid) {
+        // Log failed login attempt
+        await auditService.logAction({
+          req,
+          action: "login_failed",
+          resource: "user",
+          resourceId: String(user._id),
+          details: { email, reason: "Invalid password" },
+          success: false,
+          errorMessage: "Invalid email or password",
+        });
+
         next(new BadRequestError("Invalid email or password"));
         return;
       }
@@ -79,12 +104,35 @@ export function useAuthController() {
       res.cookie("sid", sid, sidCookieOptions());
       res.cookie("user", userId, identityCookieOptions());
 
+      // Log successful login
+      await auditService.logAction({
+        req,
+        action: "login",
+        resource: "user",
+        resourceId: userId,
+        details: { email: user.email },
+        success: true,
+      });
+
+      // Get role name if user has a role
+      let roleName: string | undefined;
+      if (user.roleId) {
+        try {
+          const role = await roleService.getById(String(user.roleId));
+          roleName = role.name;
+        } catch {
+          // Ignore role lookup failures
+        }
+      }
+
       res.json({
         message: "Login successful",
         user: {
           _id: user._id,
           email: user.email,
           role: user.role,
+          roleId: user.roleId,
+          roleName,
         },
       });
     } catch (error) {
@@ -95,12 +143,25 @@ export function useAuthController() {
   async function logout(req: Request, res: Response, next: NextFunction) {
     try {
       const sid = req.cookies?.sid;
+      const userId = req.cookies?.user;
+
       if (sid) {
         await sessionStore.destroy(sid);
       }
 
       res.clearCookie("sid", clearSidCookieOptions());
       res.clearCookie("user", clearIdentityCookieOptions());
+
+      // Log logout
+      if (userId) {
+        await auditService.logAction({
+          req,
+          action: "logout",
+          resource: "user",
+          resourceId: userId,
+          success: true,
+        });
+      }
 
       res.json({ message: "Logged out successfully" });
     } catch (error) {
@@ -122,11 +183,24 @@ export function useAuthController() {
         return;
       }
 
+      // Get role name if user has a role
+      let roleName: string | undefined;
+      if (user.roleId) {
+        try {
+          const role = await roleService.getById(String(user.roleId));
+          roleName = role.name;
+        } catch {
+          // Ignore role lookup failures
+        }
+      }
+
       res.json({
         user: {
           _id: user._id,
           email: user.email,
           role: user.role,
+          roleId: user.roleId,
+          roleName,
         },
       });
     } catch (error) {
@@ -166,12 +240,26 @@ export function useAuthController() {
         newPassword: value.newPassword,
       });
 
+      // Log profile update
+      await auditService.logAction({
+        req,
+        action: "update",
+        resource: "user",
+        resourceId: userId,
+        changes: [
+          ...(value.email ? [{ field: "email", oldValue: user.email, newValue: value.email }] : []),
+          ...(value.newPassword ? [{ field: "password", oldValue: "[redacted]", newValue: "[redacted]" }] : []),
+        ],
+        success: true,
+      });
+
       res.json({
         message: "Profile updated successfully",
         user: {
           _id: user._id,
           email: value.email ?? user.email,
           role: user.role,
+          roleId: user.roleId,
         },
       });
     } catch (error) {

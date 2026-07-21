@@ -1,0 +1,125 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "control-plane.api.fullname" . }}
+  labels:
+    {{- include "control-plane.api.labels" . | nindent 4 }}
+spec:
+  {{- if not .Values.autoscaling.api.enabled }}
+  replicas: {{ .Values.api.replicas }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "control-plane.api.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
+        {{- with .Values.api.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      labels:
+        {{- include "control-plane.api.selectorLabels" . | nindent 8 }}
+    spec:
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "control-plane.serviceAccountName" . }}
+      securityContext:
+        {{- toYaml .Values.api.podSecurityContext | nindent 8 }}
+      containers:
+        - name: api
+          securityContext:
+            {{- toYaml .Values.api.securityContext | nindent 12 }}
+          image: {{ include "control-plane.api.image" . }}
+          imagePullPolicy: {{ .Values.api.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 5005
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: {{ include "control-plane.api.configMapName" . }}
+            {{- with .Values.api.envFrom }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          env:
+            # MongoDB URI from secret
+            {{- if .Values.api.mongodb.existingSecret }}
+            - name: MONGODB_URI
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.api.mongodb.existingSecret }}
+                  key: {{ .Values.api.mongodb.existingSecretKey }}
+            {{- else }}
+            - name: MONGODB_URI
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "control-plane.api.secretName" . }}
+                  key: mongodb-uri
+            {{- end }}
+            # JWT Secret from secret
+            {{- if .Values.api.jwt.existingSecret }}
+            - name: JWT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.api.jwt.existingSecret }}
+                  key: {{ .Values.api.jwt.existingSecretKey }}
+            {{- else }}
+            - name: JWT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "control-plane.api.secretName" . }}
+                  key: jwt-secret
+            {{- end }}
+            # Redis configuration
+            - name: REDIS_HOST
+              value: {{ include "control-plane.redis.host" . | quote }}
+            - name: REDIS_PORT
+              value: {{ .Values.api.redis.port | quote }}
+            {{- if or .Values.redis.enabled .Values.api.redis.password .Values.api.redis.existingSecret }}
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "control-plane.redis.secretName" . }}
+                  key: {{ include "control-plane.redis.secretKey" . }}
+            {{- end }}
+            # Additional environment variables
+            {{- range $key, $value := .Values.api.env }}
+            - name: {{ $key }}
+              value: {{ $value | quote }}
+            {{- end }}
+          livenessProbe:
+            {{- toYaml .Values.api.livenessProbe | nindent 12 }}
+          readinessProbe:
+            {{- toYaml .Values.api.readinessProbe | nindent 12 }}
+          resources:
+            {{- toYaml .Values.api.resources | nindent 12 }}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            - name: logs
+              mountPath: /app/logs
+            - name: data
+              mountPath: /data/control-plane
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        - name: logs
+          emptyDir: {}
+        - name: data
+          emptyDir: {}
+      {{- with .Values.api.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.api.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.api.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

@@ -1,616 +1,763 @@
 import { ObjectId } from "mongodb";
+import crypto from "crypto";
+import { useRepo } from "../../utils/repo";
+import { makeCacheKey } from "../../utils/make-cache-key";
+import { paginate, normalizePage, TPaginated } from "../../utils/paginate";
+import { BadRequestError, ConflictError, NotFoundError } from "../../utils/error";
 import {
-  modelDatabase,
   TDatabase,
-  TDatabaseBackupRecord,
-  TDatabaseDNS,
   TDatabaseNode,
-  TDatabaseNodeStatus,
   TDatabaseStatus,
+  TDatabaseNodeStatus,
+  TDatabaseNodeRole,
+  TDatabaseDNS,
   TDatabaseTLS,
+  TDatabaseBackup,
+  modelDatabase,
 } from "./database.model";
-import {
-  BadRequestError,
-  InternalServerError,
-  NotFoundError,
-  logger,
-  makeCacheKey,
-  paginate,
-  useRepo,
-  escapeRegex,
-} from "../../utils";
+
+const namespace_collection = "cp_databases";
+
+// =============================================================================
+// Encryption Helpers (same pattern as ssh-key repo)
+// =============================================================================
+
+const ENCRYPTION_KEY =
+  process.env.SECRET_ENCRYPTION_KEY ||
+  process.env.SECRET_KEY ||
+  "default-key-change-in-production!";
+const ALGORITHM = "aes-256-gcm";
+const IV_LENGTH = 16;
+
+function getEncryptionKey(): Buffer {
+  return crypto.createHash("sha256").update(ENCRYPTION_KEY).digest();
+}
+
+function encrypt(text: string): string {
+  const iv = crypto.randomBytes(IV_LENGTH);
+  const key = getEncryptionKey();
+  const cipher = crypto.createCipheriv(ALGORITHM, key, iv);
+
+  let encrypted = cipher.update(text, "utf8", "hex");
+  encrypted += cipher.final("hex");
+
+  const authTag = cipher.getAuthTag();
+  return `${iv.toString("hex")}:${authTag.toString("hex")}:${encrypted}`;
+}
+
+function decrypt(encryptedText: string): string {
+  const parts = encryptedText.split(":");
+  if (parts.length !== 3) {
+    throw new Error("Invalid encrypted format");
+  }
+
+  const [ivHex, authTagHex, encrypted] = parts;
+  const iv = Buffer.from(ivHex, "hex");
+  const authTag = Buffer.from(authTagHex, "hex");
+  const key = getEncryptionKey();
+
+  const decipher = crypto.createDecipheriv(ALGORITHM, key, iv);
+  decipher.setAuthTag(authTag);
+
+  let decrypted = decipher.update(encrypted, "hex", "utf8");
+  decrypted += decipher.final("utf8");
+
+  return decrypted;
+}
+
+// =============================================================================
+// List item type (excludes sensitive credentials)
+// =============================================================================
+
+export type TDatabaseListItem = Omit<TDatabase, "credentials"> & {
+  credentials?: {
+    adminUser: string;
+  };
+};
+
+// =============================================================================
+// Repository
+// =============================================================================
 
 export function useDatabaseRepo() {
-  const namespace_collection = "cp_databases";
   const repo = useRepo(namespace_collection);
 
+  /**
+   * Create indexes for the databases collection.
+   * Indexes cover: name (unique), type, status, nodes.serverId
+   */
   async function createIndexes() {
     try {
-      // Drop the old non-partial unique index if it exists (one-time migration)
-      // The new index is partial (only enforces uniqueness for non-stopped databases)
-      try {
-        const existingIndexes = await repo.collection.indexes();
-        const oldNameIndex = existingIndexes.find(
-          (idx) =>
-            idx.key?.name === 1 &&
-            idx.unique === true &&
-            !idx.partialFilterExpression
-        );
-        if (oldNameIndex?.name) {
-          logger.log({
-            level: "info",
-            message: `Dropping old non-partial unique index: ${oldNameIndex.name}`,
-          });
-          await repo.collection.dropIndex(oldNameIndex.name);
-        }
-      } catch (dropErr: any) {
-        // Ignore if index doesn't exist
-        if (!dropErr.message?.includes("index not found")) {
-          logger.log({
-            level: "warn",
-            message: `Could not drop old name index: ${dropErr.message}`,
-          });
-        }
-      }
-
       await repo.collection.createIndexes([
-        { key: { name: "text" } },
-        // Unique name only for active databases (not stopped/deleted)
-        {
-          key: { name: 1 },
-          unique: true,
-          partialFilterExpression: { status: { $ne: "stopped" } },
-        },
+        { key: { name: 1 }, unique: true },
         { key: { type: 1 } },
         { key: { status: 1 } },
         { key: { "nodes.serverId": 1 } },
+        { key: { type: 1, status: 1 } },
+        { key: { name: "text" } },
       ]);
     } catch (error) {
-      logger.log({
-        level: "error",
-        message: `Failed to create database indexes: ${error}`,
-      });
-    }
-  }
-
-  async function add(value: Partial<TDatabase>) {
-    try {
-      const database = modelDatabase(value);
-      const res = await repo.collection.insertOne(database);
-      repo.delCachedData();
-      return res.insertedId;
-    } catch (error: any) {
-      logger.log({ level: "error", message: `${error}` });
-
-      if (error.message?.includes("duplicate")) {
-        throw new BadRequestError("Database with this name already exists");
-      }
-
-      throw new InternalServerError("Failed to create database");
-    }
-  }
-
-  async function getById(_id: string | ObjectId) {
-    try {
-      _id = new ObjectId(_id);
-    } catch {
-      throw new BadRequestError("Invalid database ID");
-    }
-
-    const cacheKey = makeCacheKey(namespace_collection, { _id: String(_id), tag: "by-id" });
-
-    try {
-      const cached = await repo.getCache<TDatabase>(cacheKey);
-      if (cached) {
-        return cached;
-      }
-
-      const result = await repo.collection.findOne<TDatabase>({ _id });
-
-      if (result) {
-        repo.setCache(cacheKey, result, 300).catch((err) => {
-          logger.log({
-            level: "error",
-            message: `Failed to set cache for database by id: ${err.message}`,
-          });
-        });
-      }
-
-      return result;
-    } catch (error) {
-      throw new InternalServerError("Failed to get database by id");
-    }
-  }
-
-  async function getAll({
-    search = "",
-    page = 1,
-    limit = 10,
-    type,
-    status,
-    includeDeleted = false,
-  }: {
-    search?: string;
-    page?: number;
-    limit?: number;
-    type?: string;
-    status?: TDatabaseStatus;
-    includeDeleted?: boolean;
-  } = {}) {
-    page = page > 0 ? page - 1 : 0;
-
-    const query: Record<string, any> = {};
-
-    if (search) {
-      query.name = { $regex: escapeRegex(search), $options: "i" };
-    }
-
-    if (type) {
-      query.type = type;
-    }
-
-    if (status) {
-      query.status = status;
-    } else if (!includeDeleted) {
-      // By default, exclude soft-deleted (stopped) databases
-      query.status = { $ne: "stopped" };
-    }
-
-    const cacheKey = makeCacheKey(namespace_collection, {
-      search,
-      page,
-      limit,
-      type: type ?? "",
-      status: status ?? "",
-      includeDeleted,
-      tag_query: "getAll",
-    });
-
-    try {
-      const cached = await repo.getCache<Record<string, any>>(cacheKey);
-      if (cached) {
-        return cached;
-      }
-
-      const items = await repo.collection
-        .aggregate([
-          { $match: query },
-          { $sort: { createdAt: -1 } },
-          { $skip: page * limit },
-          { $limit: limit },
-          // Exclude sensitive credentials from list view
-          {
-            $project: {
-              "credentials.adminPassword": 0,
-              "credentials.connectionString": 0,
-            },
-          },
-        ])
-        .toArray();
-
-      const length = await repo.collection.countDocuments(query);
-      const data = paginate(items, page, limit, length);
-
-      repo.setCache(cacheKey, data, 300).catch((err) => {
-        logger.log({
-          level: "error",
-          message: `Failed to set cache for databases getAll: ${err.message}`,
-        });
-      });
-
-      return data;
-    } catch (error) {
-      logger.log({ level: "error", message: `${error}` });
-      throw new InternalServerError("Failed to get databases");
-    }
-  }
-
-  async function updateById(_id: string | ObjectId, update: Partial<TDatabase>) {
-    try {
-      _id = new ObjectId(_id);
-    } catch {
-      throw new BadRequestError("Invalid database ID");
-    }
-
-    try {
-      const result = await repo.collection.updateOne(
-        { _id },
-        { $set: { ...update, updatedAt: new Date() } }
-      );
-
-      if (result.matchedCount === 0) {
-        throw new NotFoundError("Database not found");
-      }
-
-      repo.delCachedData();
-      return result;
-    } catch (error) {
-      if (error instanceof NotFoundError) throw error;
-      throw new InternalServerError("Failed to update database");
-    }
-  }
-
-  async function updateStatus(_id: string | ObjectId, status: TDatabaseStatus) {
-    try {
-      _id = new ObjectId(_id);
-    } catch {
-      throw new BadRequestError("Invalid database ID");
-    }
-
-    try {
-      const result = await repo.collection.updateOne(
-        { _id },
-        { $set: { status, updatedAt: new Date() } }
-      );
-
-      repo.delCachedData();
-      return result;
-    } catch (error) {
-      throw new InternalServerError("Failed to update database status");
-    }
-  }
-
-  async function updateBackupTime(_id: string | ObjectId) {
-    try {
-      _id = new ObjectId(_id);
-    } catch {
-      throw new BadRequestError("Invalid database ID");
-    }
-
-    try {
-      const result = await repo.collection.updateOne(
-        { _id },
-        { $set: { "backup.lastBackup": new Date(), updatedAt: new Date() } }
-      );
-
-      repo.delCachedData();
-      return result;
-    } catch (error) {
-      throw new InternalServerError("Failed to update backup time");
-    }
-  }
-
-  async function addBackupRecord(_id: string | ObjectId, record: TDatabaseBackupRecord): Promise<void> {
-    try {
-      _id = new ObjectId(_id);
-    } catch {
-      throw new BadRequestError("Invalid database ID");
-    }
-
-    try {
-      await repo.collection.updateOne(
-        { _id },
-        {
-          $push: {
-            backupRecords: {
-              $each: [{ ...record, _id: new ObjectId() }],
-              $slice: -50,
-            },
-          } as any,
-          $set: { "backup.lastBackup": new Date(), updatedAt: new Date() },
-        }
-      );
-
-      repo.delCachedData();
-    } catch (error) {
-      throw new InternalServerError("Failed to add backup record");
-    }
-  }
-
-  async function getBackupRecords(_id: string | ObjectId): Promise<TDatabaseBackupRecord[]> {
-    try {
-      _id = new ObjectId(_id);
-    } catch {
-      throw new BadRequestError("Invalid database ID");
-    }
-
-    const cacheKey = makeCacheKey(namespace_collection, { _id: String(_id), tag: "backup-records" });
-
-    try {
-      const cached = await repo.getCache<TDatabaseBackupRecord[]>(cacheKey);
-      if (cached) return cached;
-
-      const result = await repo.collection.findOne<TDatabase>(
-        { _id },
-        { projection: { backupRecords: 1 } }
-      );
-
-      const records = result?.backupRecords ?? [];
-
-      repo.setCache(cacheKey, records, 60).catch((err) => {
-        logger.log({
-          level: "error",
-          message: `Failed to set cache for backup records: ${err.message}`,
-        });
-      });
-
-      return records;
-    } catch (error) {
-      throw new InternalServerError("Failed to get backup records");
-    }
-  }
-
-  async function deleteBackupRecord(_id: string | ObjectId, recordIndex: number): Promise<void> {
-    try {
-      _id = new ObjectId(_id);
-    } catch {
-      throw new BadRequestError("Invalid database ID");
-    }
-
-    try {
-      // Pull the record at the given index by unsetting then pulling nulls
-      const database = await repo.collection.findOne<TDatabase>({ _id });
-      if (!database) throw new NotFoundError("Database not found");
-
-      const records = database.backupRecords ?? [];
-      if (recordIndex < 0 || recordIndex >= records.length) {
-        throw new BadRequestError("Backup record index out of range");
-      }
-
-      records.splice(recordIndex, 1);
-
-      await repo.collection.updateOne(
-        { _id },
-        { $set: { backupRecords: records, updatedAt: new Date() } }
-      );
-
-      repo.delCachedData();
-    } catch (error) {
-      if (error instanceof NotFoundError || error instanceof BadRequestError) throw error;
-      throw new InternalServerError("Failed to delete backup record");
-    }
-  }
-
-  async function deleteById(_id: string | ObjectId) {
-    try {
-      _id = new ObjectId(_id);
-    } catch {
-      throw new BadRequestError("Invalid database ID");
-    }
-
-    try {
-      // Soft delete: set status to "stopped" so the name can be reused
-      // (the unique index is partial and excludes stopped databases)
-      const result = await repo.collection.updateOne(
-        { _id },
-        {
-          $set: {
-            status: "stopped",
-            deletedAt: new Date(),
-            updatedAt: new Date(),
-          },
-        }
-      );
-
-      if (result.matchedCount === 0) {
-        throw new NotFoundError("Database not found");
-      }
-
-      repo.delCachedData();
-      return result;
-    } catch (error) {
-      if (error instanceof NotFoundError) throw error;
-      throw new InternalServerError("Failed to delete database");
-    }
-  }
-
-  async function getByServerId(serverId: string | ObjectId) {
-    try {
-      serverId = new ObjectId(serverId);
-    } catch {
-      throw new BadRequestError("Invalid server ID");
-    }
-
-    try {
-      return await repo.collection.find<TDatabase>({ "nodes.serverId": serverId }).toArray();
-    } catch (error) {
-      throw new InternalServerError("Failed to get databases by server id");
-    }
-  }
-
-  async function countByServerId(serverId: string | ObjectId): Promise<number> {
-    let id: ObjectId;
-    try {
-      id = new ObjectId(serverId);
-    } catch {
-      throw new BadRequestError("Invalid server ID");
-    }
-
-    try {
-      return await repo.collection.countDocuments({ "nodes.serverId": id });
-    } catch (error) {
-      throw new InternalServerError("Failed to count databases for server");
+      throw new BadRequestError("Failed to create database indexes.");
     }
   }
 
   /**
-   * Add a node to an existing database
+   * Add a new database.
+   * Encrypts adminPassword before storing.
+   * Throws ConflictError if name already exists.
    */
-  async function addNode(_id: string | ObjectId, node: TDatabaseNode) {
-    try {
-      _id = new ObjectId(_id);
-    } catch {
-      throw new BadRequestError("Invalid database ID");
-    }
+  async function add(data: Partial<TDatabase>): Promise<string> {
+    // Model validates and normalizes data
+    const database = modelDatabase(data);
 
-    // Convert serverId to ObjectId if needed
-    const nodeWithObjectId: TDatabaseNode = {
-      ...node,
-      serverId:
-        typeof node.serverId === "string" ? new ObjectId(node.serverId) : node.serverId,
+    // Encrypt adminPassword before storing
+    const encryptedDatabase = {
+      ...database,
+      credentials: {
+        ...database.credentials,
+        adminPassword: encrypt(database.credentials.adminPassword),
+      },
     };
 
     try {
-      const result = await repo.collection.updateOne(
-        { _id },
-        {
-          $push: { nodes: nodeWithObjectId } as any,
-          $set: { updatedAt: new Date() },
-        }
-      );
-
-      if (result.matchedCount === 0) {
-        throw new NotFoundError("Database not found");
-      }
-
+      const result = await repo.collection.insertOne(encryptedDatabase as any);
       repo.delCachedData();
-      return result;
-    } catch (error) {
-      if (error instanceof NotFoundError) throw error;
-      throw new InternalServerError("Failed to add node to database");
+      return result.insertedId.toString();
+    } catch (error: any) {
+      // Handle duplicate key error
+      if (error.code === 11000) {
+        throw new ConflictError(
+          `Database with name "${database.name}" already exists.`
+        );
+      }
+      throw error;
     }
   }
 
   /**
-   * Remove a node from an existing database
+   * Get database by ID.
+   * Returns full credentials (decrypted) for admin operations.
+   * Returns null if not found.
    */
-  async function removeNode(_id: string | ObjectId, serverId: string | ObjectId) {
+  async function getById(id: string): Promise<TDatabase | null> {
+    let oid: ObjectId;
     try {
-      _id = new ObjectId(_id);
-      serverId = new ObjectId(serverId);
+      oid = new ObjectId(id);
     } catch {
-      throw new BadRequestError("Invalid ID format");
+      throw new BadRequestError("Invalid database ID format.");
     }
 
-    try {
-      const result = await repo.collection.updateOne(
-        { _id },
-        {
-          $pull: { nodes: { serverId } } as any,
-          $set: { updatedAt: new Date() },
-        }
-      );
-
-      if (result.matchedCount === 0) {
-        throw new NotFoundError("Database not found");
+    const cacheKey = makeCacheKey(namespace_collection, { id, tag: "by-id" });
+    const cached = await repo.getCache<TDatabase>(cacheKey);
+    if (cached) {
+      // Decrypt adminPassword from cached data
+      try {
+        cached.credentials.adminPassword = decrypt(
+          cached.credentials.adminPassword
+        );
+        return cached;
+      } catch {
+        // If decryption fails, fetch fresh from DB
       }
-
-      repo.delCachedData();
-      return result;
-    } catch (error) {
-      if (error instanceof NotFoundError) throw error;
-      throw new InternalServerError("Failed to remove node from database");
     }
+
+    const database = await repo.collection.findOne({ _id: oid });
+    if (!database) return null;
+
+    // Decrypt adminPassword
+    try {
+      database.credentials.adminPassword = decrypt(
+        database.credentials.adminPassword
+      );
+    } catch {
+      throw new BadRequestError("Failed to decrypt database credentials.");
+    }
+
+    // Cache with encrypted password (we'll decrypt on retrieval)
+    const toCache = {
+      ...database,
+      credentials: {
+        ...database.credentials,
+        adminPassword: encrypt(database.credentials.adminPassword),
+      },
+    };
+    repo.setCache(cacheKey, toCache, 600);
+
+    return database as TDatabase;
   }
 
   /**
-   * Update the status of a specific node in a database
+   * Get database by name.
+   * Returns full credentials (decrypted).
+   * Returns null if not found.
+   */
+  async function getByName(name: string): Promise<TDatabase | null> {
+    const cacheKey = makeCacheKey(namespace_collection, { name, tag: "by-name" });
+    const cached = await repo.getCache<TDatabase>(cacheKey);
+    if (cached) {
+      try {
+        cached.credentials.adminPassword = decrypt(
+          cached.credentials.adminPassword
+        );
+        return cached;
+      } catch {
+        // If decryption fails, fetch fresh from DB
+      }
+    }
+
+    const database = await repo.collection.findOne({ name });
+    if (!database) return null;
+
+    // Decrypt adminPassword
+    try {
+      database.credentials.adminPassword = decrypt(
+        database.credentials.adminPassword
+      );
+    } catch {
+      throw new BadRequestError("Failed to decrypt database credentials.");
+    }
+
+    // Cache with encrypted password
+    const toCache = {
+      ...database,
+      credentials: {
+        ...database.credentials,
+        adminPassword: encrypt(database.credentials.adminPassword),
+      },
+    };
+    repo.setCache(cacheKey, toCache, 600);
+
+    return database as TDatabase;
+  }
+
+  /**
+   * Get all databases with pagination and filtering.
+   * Does NOT return adminPassword or connectionString.
+   */
+  async function getAll(options: {
+    page?: number;
+    limit?: number;
+    type?: string;
+    status?: string;
+    search?: string;
+  } = {}): Promise<TPaginated<TDatabaseListItem>> {
+    const { page = 1, limit = 20, type, status, search } = options;
+
+    const cacheKey = makeCacheKey(namespace_collection, {
+      page,
+      limit,
+      type: type || "",
+      status: status || "",
+      search: search || "",
+      tag: "getAll",
+    });
+    const cached = await repo.getCache<TPaginated<TDatabaseListItem>>(cacheKey);
+    if (cached) return cached;
+
+    // Build query filter
+    const query: Record<string, any> = {};
+    if (type) query.type = type;
+    if (status) query.status = status;
+    if (search) {
+      // Case-insensitive search on name
+      const escaped = search.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      query.name = { $regex: escaped, $options: "i" };
+    }
+
+    const skip = normalizePage(page) * limit;
+
+    // Project to exclude sensitive credentials
+    const projection = {
+      "credentials.adminPassword": 0,
+      "credentials.connectionString": 0,
+    };
+
+    const [items, total] = await Promise.all([
+      repo.collection
+        .find(query)
+        .project(projection)
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(limit)
+        .toArray(),
+      repo.collection.countDocuments(query),
+    ]);
+
+    const result = paginate(items as TDatabaseListItem[], page, limit, total);
+    repo.setCache(cacheKey, result, 300);
+    return result;
+  }
+
+  /**
+   * Update database by ID.
+   * Does NOT allow updating credentials through this method.
+   */
+  async function updateById(
+    id: string,
+    data: Partial<Omit<TDatabase, "_id" | "credentials" | "nodes" | "createdAt">>
+  ): Promise<void> {
+    let oid: ObjectId;
+    try {
+      oid = new ObjectId(id);
+    } catch {
+      throw new BadRequestError("Invalid database ID format.");
+    }
+
+    const updateData = {
+      ...data,
+      updatedAt: new Date(),
+    };
+
+    const result = await repo.collection.updateOne(
+      { _id: oid },
+      { $set: updateData }
+    );
+
+    if (!result.matchedCount) {
+      throw new NotFoundError("Database not found.");
+    }
+    repo.delCachedData();
+  }
+
+  /**
+   * Update database status.
+   */
+  async function updateStatus(id: string, status: TDatabaseStatus): Promise<void> {
+    let oid: ObjectId;
+    try {
+      oid = new ObjectId(id);
+    } catch {
+      throw new BadRequestError("Invalid database ID format.");
+    }
+
+    const result = await repo.collection.updateOne(
+      { _id: oid },
+      { $set: { status, updatedAt: new Date() } }
+    );
+
+    if (!result.matchedCount) {
+      throw new NotFoundError("Database not found.");
+    }
+    repo.delCachedData();
+  }
+
+  /**
+   * Delete database by ID.
+   */
+  async function deleteById(id: string): Promise<void> {
+    let oid: ObjectId;
+    try {
+      oid = new ObjectId(id);
+    } catch {
+      throw new BadRequestError("Invalid database ID format.");
+    }
+
+    const result = await repo.collection.deleteOne({ _id: oid });
+    if (!result.deletedCount) {
+      throw new NotFoundError("Database not found.");
+    }
+    repo.delCachedData();
+  }
+
+  // ===========================================================================
+  // Node Management
+  // ===========================================================================
+
+  /**
+   * Add a node to a database.
+   */
+  async function addNode(
+    id: string,
+    node: { serverId: ObjectId; role: TDatabaseNodeRole; status: TDatabaseNodeStatus }
+  ): Promise<void> {
+    let oid: ObjectId;
+    try {
+      oid = new ObjectId(id);
+    } catch {
+      throw new BadRequestError("Invalid database ID format.");
+    }
+
+    const result = await repo.collection.updateOne(
+      { _id: oid },
+      {
+        $push: { nodes: node } as any,
+        $set: { updatedAt: new Date() },
+      }
+    );
+
+    if (!result.matchedCount) {
+      throw new NotFoundError("Database not found.");
+    }
+    repo.delCachedData();
+  }
+
+  /**
+   * Remove a node from a database by serverId.
+   */
+  async function removeNode(id: string, serverId: string): Promise<void> {
+    let oid: ObjectId;
+    let serverOid: ObjectId;
+    try {
+      oid = new ObjectId(id);
+    } catch {
+      throw new BadRequestError("Invalid database ID format.");
+    }
+    try {
+      serverOid = new ObjectId(serverId);
+    } catch {
+      throw new BadRequestError("Invalid server ID format.");
+    }
+
+    const result = await repo.collection.updateOne(
+      { _id: oid },
+      {
+        $pull: { nodes: { serverId: serverOid } } as any,
+        $set: { updatedAt: new Date() },
+      }
+    );
+
+    if (!result.matchedCount) {
+      throw new NotFoundError("Database not found.");
+    }
+    repo.delCachedData();
+  }
+
+  /**
+   * Update the status of a specific node.
    */
   async function updateNodeStatus(
-    _id: string | ObjectId,
-    serverId: string | ObjectId,
+    id: string,
+    serverId: string,
     status: TDatabaseNodeStatus
-  ) {
+  ): Promise<void> {
+    let oid: ObjectId;
+    let serverOid: ObjectId;
     try {
-      _id = new ObjectId(_id);
-      serverId = new ObjectId(serverId);
+      oid = new ObjectId(id);
     } catch {
-      throw new BadRequestError("Invalid ID format");
+      throw new BadRequestError("Invalid database ID format.");
     }
-
     try {
-      const result = await repo.collection.updateOne(
-        { _id, "nodes.serverId": serverId },
-        {
-          $set: {
-            "nodes.$.status": status,
-            updatedAt: new Date(),
-          },
-        }
-      );
-
-      if (result.matchedCount === 0) {
-        throw new NotFoundError("Database or node not found");
-      }
-
-      repo.delCachedData();
-      return result;
-    } catch (error) {
-      if (error instanceof NotFoundError) throw error;
-      throw new InternalServerError("Failed to update node status");
+      serverOid = new ObjectId(serverId);
+    } catch {
+      throw new BadRequestError("Invalid server ID format.");
     }
+
+    const result = await repo.collection.updateOne(
+      { _id: oid, "nodes.serverId": serverOid },
+      {
+        $set: {
+          "nodes.$.status": status,
+          updatedAt: new Date(),
+        },
+      }
+    );
+
+    if (!result.matchedCount) {
+      throw new NotFoundError("Database or node not found.");
+    }
+    repo.delCachedData();
+  }
+
+  // ===========================================================================
+  // Server Queries
+  // ===========================================================================
+
+  /**
+   * Find all databases that have a node on the specified server.
+   */
+  async function getByServerId(serverId: string): Promise<TDatabase[]> {
+    let serverOid: ObjectId;
+    try {
+      serverOid = new ObjectId(serverId);
+    } catch {
+      throw new BadRequestError("Invalid server ID format.");
+    }
+
+    const cacheKey = makeCacheKey(namespace_collection, {
+      serverId,
+      tag: "by-server",
+    });
+    const cached = await repo.getCache<TDatabase[]>(cacheKey);
+    if (cached) return cached;
+
+    const databases = await repo.collection
+      .find({ "nodes.serverId": serverOid })
+      .toArray();
+
+    repo.setCache(cacheKey, databases, 300);
+    return databases as TDatabase[];
   }
 
   /**
-   * Store (or clear) the DNS configuration on a database document.
-   * Pass `null` to remove existing DNS info (e.g. after teardown).
+   * Count databases that have a node on the specified server.
    */
-  async function updateDNS(_id: string | ObjectId, dns: TDatabaseDNS | null) {
+  async function countByServerId(serverId: string): Promise<number> {
+    let serverOid: ObjectId;
     try {
-      _id = new ObjectId(_id);
+      serverOid = new ObjectId(serverId);
     } catch {
-      throw new BadRequestError("Invalid database ID");
+      throw new BadRequestError("Invalid server ID format.");
     }
 
+    const cacheKey = makeCacheKey(namespace_collection, {
+      serverId,
+      tag: "count-by-server",
+    });
+    const cached = await repo.getCache<number>(cacheKey);
+    if (cached !== null && cached !== undefined) return cached;
+
+    const count = await repo.collection.countDocuments({
+      "nodes.serverId": serverOid,
+    });
+
+    repo.setCache(cacheKey, count, 300);
+    return count;
+  }
+
+  // ===========================================================================
+  // Backup
+  // ===========================================================================
+
+  /**
+   * Update the lastBackup timestamp for a database.
+   */
+  async function updateBackupTime(id: string): Promise<void> {
+    let oid: ObjectId;
     try {
-      const result = await repo.collection.updateOne(
-        { _id },
-        dns
-          ? { $set: { dns, updatedAt: new Date() } }
-          : { $unset: { dns: "" }, $set: { updatedAt: new Date() } }
-      );
-
-      if (result.matchedCount === 0) {
-        throw new NotFoundError("Database not found");
-      }
-
-      repo.delCachedData();
-      return result;
-    } catch (error) {
-      if (error instanceof NotFoundError) throw error;
-      throw new InternalServerError("Failed to update database DNS");
+      oid = new ObjectId(id);
+    } catch {
+      throw new BadRequestError("Invalid database ID format.");
     }
+
+    const result = await repo.collection.updateOne(
+      { _id: oid },
+      {
+        $set: {
+          "backup.lastBackup": new Date(),
+          updatedAt: new Date(),
+        },
+      }
+    );
+
+    if (!result.matchedCount) {
+      throw new NotFoundError("Database not found.");
+    }
+    repo.delCachedData();
   }
 
   /**
-   * Store (or clear) the TLS configuration on a database document.
-   * Pass `null` to remove existing TLS info.
+   * Update backup configuration for a database.
    */
-  async function updateTLS(_id: string | ObjectId, tls: TDatabaseTLS | null) {
+  async function updateBackupConfig(id: string, backup: TDatabaseBackup): Promise<void> {
+    let oid: ObjectId;
     try {
-      _id = new ObjectId(_id);
+      oid = new ObjectId(id);
     } catch {
-      throw new BadRequestError("Invalid database ID");
+      throw new BadRequestError("Invalid database ID format.");
     }
 
-    try {
-      const result = await repo.collection.updateOne(
-        { _id },
-        tls
-          ? { $set: { tls, updatedAt: new Date() } }
-          : { $unset: { tls: "" }, $set: { updatedAt: new Date() } }
-      );
-
-      if (result.matchedCount === 0) {
-        throw new NotFoundError("Database not found");
+    const result = await repo.collection.updateOne(
+      { _id: oid },
+      {
+        $set: {
+          backup,
+          updatedAt: new Date(),
+        },
       }
+    );
 
-      repo.delCachedData();
-      return result;
-    } catch (error) {
-      if (error instanceof NotFoundError) throw error;
-      throw new InternalServerError("Failed to update database TLS");
+    if (!result.matchedCount) {
+      throw new NotFoundError("Database not found.");
     }
+    repo.delCachedData();
+  }
+
+  // ===========================================================================
+  // DNS Management
+  // ===========================================================================
+
+  /**
+   * Update DNS configuration for a database.
+   */
+  async function updateDNS(id: string, dns: TDatabaseDNS): Promise<void> {
+    let oid: ObjectId;
+    try {
+      oid = new ObjectId(id);
+    } catch {
+      throw new BadRequestError("Invalid database ID format.");
+    }
+
+    const result = await repo.collection.updateOne(
+      { _id: oid },
+      {
+        $set: {
+          dns,
+          "credentials.srvConnectionString": dns.srvConnectionString,
+          updatedAt: new Date(),
+        },
+      }
+    );
+
+    if (!result.matchedCount) {
+      throw new NotFoundError("Database not found.");
+    }
+    repo.delCachedData();
+  }
+
+  /**
+   * Remove DNS configuration from a database.
+   */
+  async function removeDNS(id: string): Promise<void> {
+    let oid: ObjectId;
+    try {
+      oid = new ObjectId(id);
+    } catch {
+      throw new BadRequestError("Invalid database ID format.");
+    }
+
+    const result = await repo.collection.updateOne(
+      { _id: oid },
+      {
+        $unset: { dns: "", "credentials.srvConnectionString": "" },
+        $set: { updatedAt: new Date() },
+      }
+    );
+
+    if (!result.matchedCount) {
+      throw new NotFoundError("Database not found.");
+    }
+    repo.delCachedData();
+  }
+
+  // ===========================================================================
+  // Deployment Logs
+  // ===========================================================================
+
+  /**
+   * Append a log entry to the deployment logs.
+   */
+  async function appendLog(id: string, log: string): Promise<void> {
+    let oid: ObjectId;
+    try {
+      oid = new ObjectId(id);
+    } catch {
+      throw new BadRequestError("Invalid database ID format.");
+    }
+
+    const result = await repo.collection.updateOne(
+      { _id: oid },
+      {
+        $push: { deploymentLogs: log } as any,
+        $set: { updatedAt: new Date() },
+      }
+    );
+
+    if (!result.matchedCount) {
+      throw new NotFoundError("Database not found.");
+    }
+    repo.delCachedData();
+  }
+
+  /**
+   * Clear all deployment logs for a database.
+   */
+  async function clearLogs(id: string): Promise<void> {
+    let oid: ObjectId;
+    try {
+      oid = new ObjectId(id);
+    } catch {
+      throw new BadRequestError("Invalid database ID format.");
+    }
+
+    const result = await repo.collection.updateOne(
+      { _id: oid },
+      { $set: { deploymentLogs: [], updatedAt: new Date() } }
+    );
+
+    if (!result.matchedCount) {
+      throw new NotFoundError("Database not found.");
+    }
+    repo.delCachedData();
+  }
+
+  // ===========================================================================
+  // TLS Management
+  // ===========================================================================
+
+  /**
+   * Update TLS configuration for a database.
+   */
+  async function updateTLS(id: string, tls: TDatabaseTLS): Promise<void> {
+    let oid: ObjectId;
+    try {
+      oid = new ObjectId(id);
+    } catch {
+      throw new BadRequestError("Invalid database ID format.");
+    }
+
+    const result = await repo.collection.updateOne(
+      { _id: oid },
+      {
+        $set: {
+          tls,
+          updatedAt: new Date(),
+        },
+      }
+    );
+
+    if (!result.matchedCount) {
+      throw new NotFoundError("Database not found.");
+    }
+    repo.delCachedData();
+  }
+
+  /**
+   * Remove TLS configuration from a database.
+   */
+  async function removeTLS(id: string): Promise<void> {
+    let oid: ObjectId;
+    try {
+      oid = new ObjectId(id);
+    } catch {
+      throw new BadRequestError("Invalid database ID format.");
+    }
+
+    const result = await repo.collection.updateOne(
+      { _id: oid },
+      {
+        $unset: { tls: "" },
+        $set: { updatedAt: new Date() },
+      }
+    );
+
+    if (!result.matchedCount) {
+      throw new NotFoundError("Database not found.");
+    }
+    repo.delCachedData();
   }
 
   return {
     createIndexes,
     add,
     getById,
+    getByName,
     getAll,
     updateById,
     updateStatus,
-    updateBackupTime,
-    addBackupRecord,
-    getBackupRecords,
-    deleteBackupRecord,
     deleteById,
-    getByServerId,
-    countByServerId,
     addNode,
     removeNode,
     updateNodeStatus,
+    getByServerId,
+    countByServerId,
+    updateBackupTime,
+    updateBackupConfig,
     updateDNS,
+    removeDNS,
     updateTLS,
+    removeTLS,
+    appendLog,
+    clearLogs,
   };
 }

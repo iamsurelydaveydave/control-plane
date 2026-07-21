@@ -39,6 +39,24 @@ export const ROOT_USERNAME = process.env.ROOT_USERNAME as string;
 export const ROOT_USER_EMAIL = process.env.ROOT_USER_EMAIL as string;
 export const ROOT_USER_PASSWORD = process.env.ROOT_USER_PASSWORD as string;
 
-// Caddy reverse proxy
-export const CADDY_ADMIN_URL = (process.env.CADDY_ADMIN_URL || "http://localhost:2019") as string;
-export const CADDY_ENABLED = process.env.CADDY_ENABLED !== "false"; // Enabled by default
+// Kubernetes
+export const K8S_KUBECONFIG = process.env.K8S_KUBECONFIG as string;
+export const K8S_NAMESPACE = (process.env.K8S_NAMESPACE || "controlplane") as string;
+
+// Rate Limiting
+export const RATE_LIMIT_ENABLED = process.env.RATE_LIMIT_ENABLED !== "false";
+export const RATE_LIMIT_WINDOW_MS = parseInt(process.env.RATE_LIMIT_WINDOW_MS || "60000", 10);
+export const RATE_LIMIT_MAX = parseInt(process.env.RATE_LIMIT_MAX || "100", 10);
+
+// Auth Rate Limiting (stricter)
+export const RATE_LIMIT_AUTH_WINDOW_MS = parseInt(process.env.RATE_LIMIT_AUTH_WINDOW_MS || "900000", 10); // 15 minutes
+export const RATE_LIMIT_AUTH_MAX = parseInt(process.env.RATE_LIMIT_AUTH_MAX || "5", 10);
+
+// Heavy Operations Rate Limiting
+export const RATE_LIMIT_HEAVY_WINDOW_MS = parseInt(process.env.RATE_LIMIT_HEAVY_WINDOW_MS || "60000", 10);
+export const RATE_LIMIT_HEAVY_MAX = parseInt(process.env.RATE_LIMIT_HEAVY_MAX || "10", 10);
+
+// GitHub Integration
+export const GITHUB_APP_ID = process.env.GITHUB_APP_ID as string;
+export const GITHUB_PRIVATE_KEY = process.env.GITHUB_PRIVATE_KEY as string;
+export const GITHUB_WEBHOOK_SECRET = process.env.GITHUB_WEBHOOK_SECRET as string;

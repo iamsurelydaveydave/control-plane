@@ -1,32 +1,56 @@
 import Joi from "joi";
 import { ObjectId } from "mongodb";
-import { BadRequestError } from "../../utils";
+import { BadRequestError } from "../../utils/error";
+
+// =============================================================================
+// Enums
+// =============================================================================
+
+export const sshKeyTypes = ["ed25519", "rsa"] as const;
+export type TSSHKeyType = (typeof sshKeyTypes)[number];
+
+// =============================================================================
+// Types
+// =============================================================================
 
 export type TSSHKey = {
   _id?: ObjectId;
   name: string;
   publicKey: string;
-  privateKey: string; // Encrypted at rest
+  privateKey: string;        // Encrypted
   fingerprint: string;
-  type: "ed25519" | "rsa";
+  type: TSSHKeyType;
   isDefault: boolean;
-  createdAt?: Date;
-  updatedAt?: Date;
+  createdAt: Date;
+  updatedAt: Date;
 };
 
-export type TSSHKeyPublic = Omit<TSSHKey, "privateKey">;
-
-const schemaSSHKeyBase = {
-  name: Joi.string().max(100).required(),
-  publicKey: Joi.string().required(),
-  privateKey: Joi.string().required(),
-  fingerprint: Joi.string().required(),
-  type: Joi.string().valid("ed25519", "rsa").default("ed25519"),
-  isDefault: Joi.boolean().default(false),
+// Response type - never includes private key
+export type TSSHKeyResponse = {
+  _id: string;
+  name: string;
+  publicKey: string;
+  fingerprint: string;
+  type: TSSHKeyType;
+  isDefault: boolean;
+  createdAt: Date;
+  updatedAt: Date;
 };
+
+// =============================================================================
+// Joi Schemas
+// =============================================================================
 
 export const schemaSSHKeyCreate = Joi.object({
-  ...schemaSSHKeyBase,
+  name: Joi.string().max(100).required(),
+  type: Joi.string().valid(...sshKeyTypes).required(),
+  isDefault: Joi.boolean().default(false),
+});
+
+export const schemaSSHKeyImport = Joi.object({
+  name: Joi.string().max(100).required(),
+  privateKey: Joi.string().required(),
+  isDefault: Joi.boolean().default(false),
 });
 
 export const schemaSSHKeyUpdate = Joi.object({
@@ -34,36 +58,45 @@ export const schemaSSHKeyUpdate = Joi.object({
   isDefault: Joi.boolean().optional(),
 });
 
-export function modelSSHKey(data: Partial<TSSHKey>): TSSHKey {
-  const { error, value } = schemaSSHKeyCreate.validate(data);
+// =============================================================================
+// Model Function
+// =============================================================================
 
-  if (error) {
-    throw new BadRequestError(`SSH Key validation error: ${error.message}`);
-  }
-
-  if (data._id && typeof data._id === "string") {
-    try {
-      data._id = new ObjectId(data._id);
-    } catch {
-      throw new BadRequestError(`Invalid _id format: ${data._id}`);
-    }
-  }
+export function modelSSHKey(data: {
+  name: string;
+  publicKey: string;
+  privateKey: string;
+  fingerprint: string;
+  type: TSSHKeyType;
+  isDefault?: boolean;
+}): Omit<TSSHKey, "_id"> {
+  const now = new Date();
 
   return {
-    _id: data._id,
-    name: value.name,
-    publicKey: value.publicKey,
-    privateKey: value.privateKey,
-    fingerprint: value.fingerprint,
-    type: value.type,
-    isDefault: value.isDefault,
-    createdAt: data.createdAt ?? new Date(),
-    updatedAt: data.updatedAt ?? new Date(),
+    name: data.name,
+    publicKey: data.publicKey,
+    privateKey: data.privateKey,
+    fingerprint: data.fingerprint,
+    type: data.type,
+    isDefault: data.isDefault ?? false,
+    createdAt: now,
+    updatedAt: now,
   };
 }
 
-/** Strip private key for API responses */
-export function toPublicSSHKey(key: TSSHKey): TSSHKeyPublic {
-  const { privateKey: _, ...publicKey } = key;
-  return publicKey;
+// =============================================================================
+// Helper to convert to response (strips private key)
+// =============================================================================
+
+export function sshKeyToResponse(key: TSSHKey): TSSHKeyResponse {
+  return {
+    _id: key._id!.toString(),
+    name: key.name,
+    publicKey: key.publicKey,
+    fingerprint: key.fingerprint,
+    type: key.type,
+    isDefault: key.isDefault,
+    createdAt: key.createdAt,
+    updatedAt: key.updatedAt,
+  };
 }

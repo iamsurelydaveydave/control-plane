@@ -1,6 +1,7 @@
 import Redis from "ioredis";
 import { REDIS_URL, REDIS_HOST, REDIS_PORT, REDIS_PASSWORD } from "../config";
 import { logger } from "./logger";
+import { setRedisStatus } from "./prometheus";
 
 let redisClient: Redis | null = null;
 
@@ -40,18 +41,24 @@ export function useRedis() {
       }
 
       redisClient.on("connect", () => {
-        logger.log({
-          level: "info",
-          message: "Redis connected",
-        });
-      });
+              logger.log({
+                level: "info",
+                message: "Redis connected",
+              });
+              setRedisStatus(true);
+            });
 
-      redisClient.on("error", (err) => {
-        logger.log({
-          level: "error",
-          message: `Redis error: ${err.message}`,
-        });
-      });
+            redisClient.on("error", (err) => {
+              logger.log({
+                level: "error",
+                message: `Redis error: ${err.message}`,
+              });
+              setRedisStatus(false);
+            });
+
+            redisClient.on("close", () => {
+              setRedisStatus(false);
+            });
     }
 
     return redisClient;

@@ -2,27 +2,23 @@ declare type TAppSource = {
   type: 'image' | 'git'
   image?: string
   gitUrl?: string
-  gitBranch?: string
+  repository?: string
+  branch?: string
   dockerfile?: string
 }
 
 declare type TAppProxy = {
   ssl: boolean
   host: string
-  appPort: number
+  port: number
+  appPort?: number
   healthcheckPath?: string
   healthcheckInterval?: number
 }
 
-declare type TAppRegistry = {
-  server: string
-  username: string
-  password: string
-}
-
 declare type TAppResources = {
   memory?: string
-  cpus?: number
+  cpu?: string
 }
 
 declare type TAppHealthCheck = {
@@ -31,39 +27,63 @@ declare type TAppHealthCheck = {
   timeout?: number
 }
 
-declare type TAppVolume = {
-  host: string
-  container: string
-  readonly?: boolean
+declare type TAppK8sConfig = {
+  replicas: number
+  image: string
+  port: number
+  domain?: string
+  envVars: Record<string, string>
+  resourceRequests?: TAppResources
+  resourceLimits?: TAppResources
 }
+
+declare type TAppGitHub = {
+  enabled: boolean
+  owner: string
+  repo: string
+  branch?: string
+  autoDeployOnPush?: boolean
+  installationId?: string
+}
+
+declare type TAppEnvironment = 'development' | 'staging' | 'production'
 
 declare type TApp = {
   _id: string
   name: string
-  source: TAppSource
-  registry?: TAppRegistry
-  serverIds: string[]
+  image?: string
+  source?: TAppSource
+  k8s?: TAppK8sConfig
   proxy?: TAppProxy
-  env: Record<string, string>
-  secretNames: string[]
+  env?: Record<string, string>
+  secretNames?: string[]
   resources?: TAppResources
   healthCheck?: TAppHealthCheck
-  volumes?: TAppVolume[]
-  status: 'pending' | 'deploying' | 'running' | 'stopped' | 'failed'
+  status: 'pending' | 'deploying' | 'running' | 'stopped' | 'failed' | 'unknown'
   currentVersion?: string
   currentImage?: string
+  desiredReplicas?: number
   deployedAt?: string
   createdAt?: string
+  updatedAt?: string
+  // CI/CD Integration
+  github?: TAppGitHub
+  environment?: TAppEnvironment
+  requireApproval?: boolean
+  // Registry reference
+  registryId?: string
 }
 
 declare type TAppForm = {
   name: string
   source: TAppSource
-  registry?: TAppRegistry
-  serverIds: string[]
+  k8s?: Partial<TAppK8sConfig>
   proxy?: TAppProxy
   env?: Record<string, string>
   resources?: TAppResources
   healthCheck?: TAppHealthCheck
-  volumes?: TAppVolume[]
+  github?: TAppGitHub
+  environment?: TAppEnvironment
+  requireApproval?: boolean
+  registryId?: string
 }

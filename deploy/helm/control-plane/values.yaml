@@ -1,0 +1,344 @@
+# Control Plane Helm Chart Values
+# ================================
+
+# -- Global settings
+global:
+  # -- Image pull secrets for private registries
+  imagePullSecrets: []
+  # - name: regcred
+
+# ================================
+# API (Express Backend)
+# ================================
+api:
+  # -- Number of API replicas
+  replicas: 2
+
+  image:
+    # -- API image repository
+    repository: ghcr.io/yourorg/controlplane-api
+    # -- API image tag (defaults to Chart appVersion)
+    tag: ""
+    # -- Image pull policy
+    pullPolicy: IfNotPresent
+
+  # -- Pod annotations
+  podAnnotations: {}
+
+  # -- Pod security context
+  podSecurityContext:
+    fsGroup: 1000
+
+  # -- Container security context
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    readOnlyRootFilesystem: false
+    allowPrivilegeEscalation: false
+
+  # -- Resource requests and limits
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+  # -- Node selector
+  nodeSelector: {}
+
+  # -- Tolerations
+  tolerations: []
+
+  # -- Affinity rules
+  affinity: {}
+
+  # -- Service configuration
+  service:
+    type: ClusterIP
+    port: 5005
+
+  # -- Liveness probe
+  livenessProbe:
+    httpGet:
+      path: /api/health
+      port: http
+    initialDelaySeconds: 15
+    periodSeconds: 20
+    timeoutSeconds: 5
+    failureThreshold: 3
+
+  # -- Readiness probe
+  readinessProbe:
+    httpGet:
+      path: /api/health
+      port: http
+    initialDelaySeconds: 5
+    periodSeconds: 10
+    timeoutSeconds: 5
+    failureThreshold: 3
+
+  # -- MongoDB connection settings
+  mongodb:
+    # -- MongoDB connection URI (required)
+    # Use MongoDB Atlas or external MongoDB
+    # Example: mongodb+srv://user:pass@cluster.mongodb.net/controlplane?retryWrites=true&w=majority
+    uri: ""
+    # -- Use existing secret for MongoDB URI
+    # If set, will use this secret instead of creating one
+    existingSecret: ""
+    # -- Key in the existing secret containing the URI
+    existingSecretKey: "mongodb-uri"
+
+  # -- Redis connection settings
+  redis:
+    # -- Redis host (use internal service name if redis.enabled=true)
+    host: ""
+    # -- Redis port
+    port: 6379
+    # -- Redis password (optional)
+    password: ""
+    # -- Use existing secret for Redis password
+    existingSecret: ""
+    existingSecretKey: "redis-password"
+
+  # -- JWT authentication settings
+  jwt:
+    # -- JWT secret (auto-generated if empty)
+    secret: ""
+    # -- JWT token expiration
+    expiresIn: "7d"
+    # -- Use existing secret for JWT
+    existingSecret: ""
+    existingSecretKey: "jwt-secret"
+
+  # -- Additional environment variables
+  # Example:
+  #   LOG_LEVEL: debug
+  #   FEATURE_FLAG: enabled
+  env: {}
+
+  # -- Additional environment variables from secrets/configmaps
+  # Example:
+  #   - name: MY_SECRET
+  #     valueFrom:
+  #       secretKeyRef:
+  #         name: my-secret
+  #         key: value
+  envFrom: []
+
+# ================================
+# Web (Nuxt Frontend)
+# ================================
+web:
+  # -- Number of Web replicas
+  replicas: 2
+
+  image:
+    # -- Web image repository
+    repository: ghcr.io/yourorg/controlplane-web
+    # -- Web image tag (defaults to Chart appVersion)
+    tag: ""
+    # -- Image pull policy
+    pullPolicy: IfNotPresent
+
+  # -- Pod annotations
+  podAnnotations: {}
+
+  # -- Pod security context
+  podSecurityContext:
+    fsGroup: 9999
+
+  # -- Container security context
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 9999
+    readOnlyRootFilesystem: true
+    allowPrivilegeEscalation: false
+
+  # -- Resource requests and limits
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      cpu: 200m
+      memory: 256Mi
+
+  # -- Node selector
+  nodeSelector: {}
+
+  # -- Tolerations
+  tolerations: []
+
+  # -- Affinity rules
+  affinity: {}
+
+  # -- Service configuration
+  service:
+    type: ClusterIP
+    port: 3000
+
+  # -- Liveness probe
+  livenessProbe:
+    httpGet:
+      path: /health
+      port: http
+    initialDelaySeconds: 15
+    periodSeconds: 20
+    timeoutSeconds: 5
+    failureThreshold: 3
+
+  # -- Readiness probe
+  readinessProbe:
+    httpGet:
+      path: /health
+      port: http
+    initialDelaySeconds: 5
+    periodSeconds: 10
+    timeoutSeconds: 5
+    failureThreshold: 3
+
+  # -- Additional environment variables
+  env: {}
+
+# ================================
+# Ingress Configuration
+# ================================
+ingress:
+  # -- Enable ingress
+  enabled: true
+
+  # -- Ingress class name (traefik, nginx, etc.)
+  className: traefik
+
+  # -- Host for the ingress (required when enabled)
+  # Example: cp.example.com
+  host: ""
+
+  # -- Additional ingress annotations
+  annotations: {}
+    # traefik.ingress.kubernetes.io/router.middlewares: default-redirect-https@kubernetescrd
+
+  # -- TLS configuration
+  tls:
+    # -- Enable TLS
+    enabled: true
+    # -- cert-manager ClusterIssuer name
+    issuer: letsencrypt-prod
+    # -- Use existing TLS secret (if not using cert-manager)
+    existingSecret: ""
+
+  # -- Path configuration
+  paths:
+    # -- API path prefix
+    api: /api
+    # -- Web path (catch-all)
+    web: /
+
+# ================================
+# Traefik IngressRoute (alternative to standard Ingress)
+# ================================
+ingressRoute:
+  # -- Use Traefik IngressRoute CRD instead of standard Ingress
+  enabled: false
+
+  # -- Entry points
+  entryPoints:
+    - websecure
+
+  # -- TLS configuration for IngressRoute
+  tls:
+    # -- Enable TLS
+    enabled: true
+    # -- cert-manager Certificate name (will create Certificate resource)
+    certResolver: ""
+    # -- Use existing secret
+    secretName: ""
+
+  # -- Additional middlewares
+  middlewares: []
+    # - name: redirect-https
+    #   namespace: traefik
+
+# ================================
+# ServiceAccount & RBAC
+# ================================
+serviceAccount:
+  # -- Create service account
+  create: true
+  # -- Service account name (generated if not set)
+  name: ""
+  # -- Annotations for the service account
+  annotations: {}
+
+rbac:
+  # -- Create RBAC resources (ClusterRole, ClusterRoleBinding)
+  create: true
+
+# ================================
+# Redis (Optional Subchart)
+# ================================
+redis:
+  # -- Enable Redis subchart
+  # Set to false if using external Redis
+  enabled: false
+
+  # -- Redis architecture (standalone or replication)
+  architecture: standalone
+
+  # -- Redis authentication
+  auth:
+    enabled: true
+    password: ""
+    existingSecret: ""
+    existingSecretPasswordKey: "redis-password"
+
+  # -- Redis master configuration
+  master:
+    persistence:
+      enabled: true
+      size: 1Gi
+
+    resources:
+      requests:
+        cpu: 50m
+        memory: 64Mi
+      limits:
+        cpu: 200m
+        memory: 128Mi
+
+# ================================
+# Pod Disruption Budget
+# ================================
+podDisruptionBudget:
+  # -- Enable PDB for API
+  api:
+    enabled: false
+    minAvailable: 1
+    # maxUnavailable: 1
+
+  # -- Enable PDB for Web
+  web:
+    enabled: false
+    minAvailable: 1
+
+# ================================
+# Horizontal Pod Autoscaler
+# ================================
+autoscaling:
+  api:
+    # -- Enable HPA for API
+    enabled: false
+    minReplicas: 2
+    maxReplicas: 10
+    targetCPUUtilizationPercentage: 80
+    targetMemoryUtilizationPercentage: 80
+
+  web:
+    # -- Enable HPA for Web
+    enabled: false
+    minReplicas: 2
+    maxReplicas: 10
+    targetCPUUtilizationPercentage: 80

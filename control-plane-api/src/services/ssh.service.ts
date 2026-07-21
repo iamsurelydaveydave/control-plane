@@ -1,353 +1,243 @@
-import { Client, ConnectConfig } from "ssh2";
-import { logger } from "../utils";
+import { NodeSSH, SSHExecCommandResponse } from 'node-ssh'
+import { logger } from '../utils'
+import { InternalServerError } from '../utils/error'
 
-export type TSSHConnectionParams = {
-  host: string;
-  port: number;
-  username: string;
-  privateKey: string;
-};
+/** Default SSH connection timeout in milliseconds */
+const DEFAULT_CONNECT_TIMEOUT = 30_000
 
-export type TSSHServerInfo = {
-  os: string;
-  hostname: string;
-  uptime: string;
-};
+/** Default command execution timeout in milliseconds */
+const DEFAULT_COMMAND_TIMEOUT = 60_000
 
-export type TSSHSystemResources = {
-  cpuCores: number;
-  memoryMb: number;
-  diskGb: number;
-};
+interface SSHConnectionOptions {
+  host: string
+  port?: number
+  username: string
+  privateKey: string
+  /** Connection timeout in milliseconds (default: 30s) */
+  timeout?: number
+}
 
-export type TSSHConnectionResult = {
-  success: boolean;
-  error?: string;
-  serverInfo?: TSSHServerInfo;
-};
+interface CommandResult {
+  stdout: string
+  stderr: string
+  code: number
+}
 
-export type TSSHHealthCheckResult = {
-  success: boolean;
-  error?: string;
-  serverInfo?: TSSHServerInfo;
-  resources?: TSSHSystemResources;
-};
-
-const SSH_TIMEOUT_MS = 10000;
+interface TestConnectionResult {
+  success: boolean
+  error?: string
+}
 
 /**
- * SSH Service
- * Handles SSH connections and command execution
+ * Creates an SSH service instance for managing remote connections.
+ * Each call returns a fresh instance with its own connection state.
+ *
+ * @example
+ * const ssh = useSSHService()
+ * await ssh.connect({ host: '192.168.1.100', username: 'root', privateKey: '...' })
+ * const result = await ssh.executeCommand('uname -a')
+ * await ssh.disconnect()
  */
 export function useSSHService() {
-  /**
-   * Execute a command over SSH and return the output
-   */
-  function execCommand(
-    conn: Client,
-    command: string
-  ): Promise<{ stdout: string; stderr: string; code: number }> {
-    return new Promise((resolve, reject) => {
-      conn.exec(command, (err, stream) => {
-        if (err) {
-          reject(err);
-          return;
-        }
-
-        let stdout = "";
-        let stderr = "";
-
-        stream.on("close", (code: number) => {
-          resolve({ stdout: stdout.trim(), stderr: stderr.trim(), code });
-        });
-
-        stream.on("data", (data: Buffer) => {
-          stdout += data.toString();
-        });
-
-        stream.stderr.on("data", (data: Buffer) => {
-          stderr += data.toString();
-        });
-      });
-    });
-  }
+  let ssh: NodeSSH | null = null
+  let currentHost: string | null = null
 
   /**
-   * Parse uptime output to a human-readable format
+   * Establishes an SSH connection to a remote host.
+   *
+   * @throws {InternalServerError} If connection fails
    */
-  function parseUptime(uptimeOutput: string): string {
-    // uptime output looks like: " 14:32:10 up 45 days,  2:15,  1 user,  load average: 0.00, 0.01, 0.05"
-    const match = uptimeOutput.match(/up\s+(.+?),\s+\d+\s+user/);
-    if (match) {
-      return match[1].trim();
+  async function connect(opts: SSHConnectionOptions): Promise<void> {
+    const { host, port = 22, username, privateKey, timeout = DEFAULT_CONNECT_TIMEOUT } = opts
+
+    // Disconnect any existing connection first
+    if (ssh?.isConnected()) {
+      logger.debug(`[SSH] Disconnecting existing connection to ${currentHost}`)
+      await disconnect()
     }
-    // Fallback: try to extract just the uptime portion
-    const simpleMatch = uptimeOutput.match(/up\s+(.+?)(?:,\s+load|$)/);
-    if (simpleMatch) {
-      return simpleMatch[1].trim();
-    }
-    return uptimeOutput.trim();
-  }
 
-  /**
-   * Test SSH connection to a server
-   * Connects, runs diagnostic commands, and returns server info
-   */
-  async function testConnection(
-    params: TSSHConnectionParams
-  ): Promise<TSSHConnectionResult> {
-    const { host, port, username, privateKey } = params;
+    logger.info(`[SSH] Connecting to ${username}@${host}:${port}`)
 
-    const conn = new Client();
+    try {
+      ssh = new NodeSSH()
 
-    return new Promise((resolve) => {
-      const timeout = setTimeout(() => {
-        conn.end();
-        resolve({
-          success: false,
-          error: `Connection timeout after ${SSH_TIMEOUT_MS / 1000} seconds`,
-        });
-      }, SSH_TIMEOUT_MS);
-
-      conn.on("ready", async () => {
-        clearTimeout(timeout);
-
-        try {
-          // Run diagnostic commands
-          const [unameResult, hostnameResult, uptimeResult] = await Promise.all([
-            execCommand(conn, "uname -a"),
-            execCommand(conn, "hostname"),
-            execCommand(conn, "uptime"),
-          ]);
-
-          conn.end();
-
-          if (unameResult.code !== 0) {
-            resolve({
-              success: false,
-              error: `Failed to execute uname: ${unameResult.stderr}`,
-            });
-            return;
-          }
-
-          resolve({
-            success: true,
-            serverInfo: {
-              os: unameResult.stdout,
-              hostname: hostnameResult.stdout,
-              uptime: parseUptime(uptimeResult.stdout),
-            },
-          });
-        } catch (error: any) {
-          conn.end();
-          resolve({
-            success: false,
-            error: `Command execution failed: ${error.message}`,
-          });
-        }
-      });
-
-      conn.on("error", (err) => {
-        clearTimeout(timeout);
-        conn.end();
-
-        let errorMessage = err.message;
-
-        // Provide more helpful error messages for common issues
-        if (err.message.includes("ECONNREFUSED")) {
-          errorMessage = `Connection refused to ${host}:${port}`;
-        } else if (err.message.includes("ETIMEDOUT")) {
-          errorMessage = `Connection timed out to ${host}:${port}`;
-        } else if (err.message.includes("ENOTFOUND")) {
-          errorMessage = `Host not found: ${host}`;
-        } else if (err.message.includes("authentication")) {
-          errorMessage = `Authentication failed for user ${username}`;
-        }
-
-        logger.log({
-          level: "warn",
-          message: `SSH connection failed to ${host}:${port}: ${err.message}`,
-        });
-
-        resolve({
-          success: false,
-          error: errorMessage,
-        });
-      });
-
-      const connectConfig: ConnectConfig = {
+      await ssh.connect({
         host,
         port,
         username,
         privateKey,
-        readyTimeout: SSH_TIMEOUT_MS,
-        // Disable host key verification for now (common in dev/provisioning scenarios)
-        // In production, you might want to implement known_hosts checking
-        algorithms: {
-          serverHostKey: [
-            "ssh-ed25519",
-            "ecdsa-sha2-nistp256",
-            "ecdsa-sha2-nistp384",
-            "ecdsa-sha2-nistp521",
-            "rsa-sha2-512",
-            "rsa-sha2-256",
-            "ssh-rsa",
-          ],
-        },
-      };
+        readyTimeout: timeout,
+        keepaliveInterval: 10_000,
+        keepaliveCountMax: 3,
+      })
 
-      try {
-        conn.connect(connectConfig);
-      } catch (error: any) {
-        clearTimeout(timeout);
-        resolve({
-          success: false,
-          error: `Failed to initiate connection: ${error.message}`,
-        });
-      }
-    });
+      currentHost = host
+      logger.info(`[SSH] Connected to ${host}`)
+    } catch (error) {
+      ssh = null
+      currentHost = null
+      const message = error instanceof Error ? error.message : 'Unknown SSH connection error'
+      logger.error(`[SSH] Connection failed to ${host}: ${message}`)
+      throw new InternalServerError(`SSH connection failed: ${message}`)
+    }
   }
 
   /**
-   * Get system resources via SSH
-   * Gathers CPU cores, memory, and disk info
+   * Executes a command on the remote host.
+   *
+   * @param command - The shell command to execute
+   * @param options - Optional execution options
+   * @returns Command result with stdout, stderr, and exit code
+   * @throws {InternalServerError} If not connected or command execution fails
    */
-  async function getSystemResources(
-    params: TSSHConnectionParams
-  ): Promise<TSSHHealthCheckResult> {
-    const { host, port, username, privateKey } = params;
+  async function executeCommand(
+    command: string,
+    options?: {
+      /** Working directory for the command */
+      cwd?: string
+      /** Command timeout in milliseconds (default: 60s) */
+      timeout?: number
+      /** Stream stdout/stderr to logger */
+      stream?: boolean
+    }
+  ): Promise<CommandResult> {
+    if (!ssh?.isConnected()) {
+      throw new InternalServerError('SSH not connected. Call connect() first.')
+    }
 
-    const conn = new Client();
+    const { cwd, timeout = DEFAULT_COMMAND_TIMEOUT, stream = false } = options ?? {}
 
-    return new Promise((resolve) => {
-      const timeout = setTimeout(() => {
-        conn.end();
-        resolve({
-          success: false,
-          error: `Connection timeout after ${SSH_TIMEOUT_MS / 1000} seconds`,
-        });
-      }, SSH_TIMEOUT_MS);
+    logger.debug(`[SSH] Executing on ${currentHost}: ${command}`)
 
-      conn.on("ready", async () => {
-        clearTimeout(timeout);
+    try {
+      // Create abort controller for timeout
+      const controller = new AbortController()
+      const timeoutId = setTimeout(() => controller.abort(), timeout)
 
-        try {
-          // Run diagnostic and resource commands
-          const [
-            unameResult,
-            hostnameResult,
-            uptimeResult,
-            cpuResult,
-            memoryResult,
-            diskResult,
-          ] = await Promise.all([
-            execCommand(conn, "uname -a"),
-            execCommand(conn, "hostname"),
-            execCommand(conn, "uptime"),
-            execCommand(conn, "nproc"),
-            execCommand(conn, "free -m | awk '/^Mem:/ {print $2}'"),
-            execCommand(conn, "df -BG / | awk 'NR==2 {gsub(/G/,\"\"); print $2}'"),
-          ]);
+      const execOptions: Parameters<NodeSSH['execCommand']>[1] = {
+        cwd,
+        onStdout: stream
+          ? (chunk: Buffer) => logger.debug(`[SSH:stdout] ${chunk.toString().trim()}`)
+          : undefined,
+        onStderr: stream
+          ? (chunk: Buffer) => logger.warn(`[SSH:stderr] ${chunk.toString().trim()}`)
+          : undefined,
+      }
 
-          conn.end();
+      const result: SSHExecCommandResponse = await Promise.race([
+        ssh.execCommand(command, execOptions),
+        new Promise<never>((_, reject) => {
+          controller.signal.addEventListener('abort', () => {
+            reject(new Error(`Command timed out after ${timeout}ms`))
+          })
+        }),
+      ])
 
-          if (unameResult.code !== 0) {
-            resolve({
-              success: false,
-              error: `Failed to execute uname: ${unameResult.stderr}`,
-            });
-            return;
-          }
+      clearTimeout(timeoutId)
 
-          // Parse resource values
-          const cpuCores = parseInt(cpuResult.stdout, 10) || 0;
-          const memoryMb = parseInt(memoryResult.stdout, 10) || 0;
-          const diskGb = parseInt(diskResult.stdout, 10) || 0;
+      logger.debug(`[SSH] Command completed with code ${result.code ?? 0}`)
 
-          resolve({
-            success: true,
-            serverInfo: {
-              os: unameResult.stdout,
-              hostname: hostnameResult.stdout,
-              uptime: parseUptime(uptimeResult.stdout),
-            },
-            resources: {
-              cpuCores,
-              memoryMb,
-              diskGb,
-            },
-          });
-        } catch (error: any) {
-          conn.end();
-          resolve({
-            success: false,
-            error: `Command execution failed: ${error.message}`,
-          });
-        }
-      });
+      return {
+        stdout: result.stdout,
+        stderr: result.stderr,
+        code: result.code ?? 0,
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unknown command execution error'
+      logger.error(`[SSH] Command failed on ${currentHost}: ${message}`)
+      throw new InternalServerError(`SSH command failed: ${message}`)
+    }
+  }
 
-      conn.on("error", (err) => {
-        clearTimeout(timeout);
-        conn.end();
+  /**
+   * Closes the SSH connection and cleans up resources.
+   */
+  async function disconnect(): Promise<void> {
+    if (ssh) {
+      const host = currentHost
+      try {
+        ssh.dispose()
+        logger.info(`[SSH] Disconnected from ${host}`)
+      } catch (error) {
+        const message = error instanceof Error ? error.message : 'Unknown disconnect error'
+        logger.warn(`[SSH] Error during disconnect from ${host}: ${message}`)
+      } finally {
+        ssh = null
+        currentHost = null
+      }
+    }
+  }
 
-        let errorMessage = err.message;
+  /**
+   * Tests if SSH connection can be established to a host.
+   * Automatically cleans up the test connection.
+   *
+   * @returns Object indicating success/failure with optional error message
+   */
+  async function testConnection(opts: SSHConnectionOptions): Promise<TestConnectionResult> {
+    const { host, port = 22, username, privateKey, timeout = 10_000 } = opts
+    const testSSH = new NodeSSH()
 
-        // Provide more helpful error messages for common issues
-        if (err.message.includes("ECONNREFUSED")) {
-          errorMessage = `Connection refused to ${host}:${port}`;
-        } else if (err.message.includes("ETIMEDOUT")) {
-          errorMessage = `Connection timed out to ${host}:${port}`;
-        } else if (err.message.includes("ENOTFOUND")) {
-          errorMessage = `Host not found: ${host}`;
-        } else if (err.message.includes("authentication")) {
-          errorMessage = `Authentication failed for user ${username}`;
-        }
+    logger.info(`[SSH] Testing connection to ${username}@${host}:${port}`)
 
-        logger.log({
-          level: "warn",
-          message: `SSH health check failed to ${host}:${port}: ${err.message}`,
-        });
-
-        resolve({
-          success: false,
-          error: errorMessage,
-        });
-      });
-
-      const connectConfig: ConnectConfig = {
+    try {
+      await testSSH.connect({
         host,
         port,
         username,
         privateKey,
-        readyTimeout: SSH_TIMEOUT_MS,
-        algorithms: {
-          serverHostKey: [
-            "ssh-ed25519",
-            "ecdsa-sha2-nistp256",
-            "ecdsa-sha2-nistp384",
-            "ecdsa-sha2-nistp521",
-            "rsa-sha2-512",
-            "rsa-sha2-256",
-            "ssh-rsa",
-          ],
-        },
-      };
+        readyTimeout: timeout,
+      })
 
-      try {
-        conn.connect(connectConfig);
-      } catch (error: any) {
-        clearTimeout(timeout);
-        resolve({
-          success: false,
-          error: `Failed to initiate connection: ${error.message}`,
-        });
+      // Run a simple command to verify the connection works
+      const result = await testSSH.execCommand('echo "connection_test"')
+
+      testSSH.dispose()
+
+      if (result.stdout.trim() === 'connection_test') {
+        logger.info(`[SSH] Connection test successful for ${host}`)
+        return { success: true }
       }
-    });
+
+      logger.warn(`[SSH] Connection test unexpected output for ${host}: ${result.stdout}`)
+      return { success: false, error: 'Unexpected command output' }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unknown error'
+      logger.warn(`[SSH] Connection test failed for ${host}: ${message}`)
+
+      // Clean up on error
+      try {
+        testSSH.dispose()
+      } catch {
+        // Ignore cleanup errors
+      }
+
+      return { success: false, error: message }
+    }
+  }
+
+  /**
+   * Checks if currently connected.
+   */
+  function isConnected(): boolean {
+    return ssh?.isConnected() ?? false
+  }
+
+  /**
+   * Gets the current host if connected.
+   */
+  function getHost(): string | null {
+    return currentHost
   }
 
   return {
+    connect,
+    executeCommand,
+    disconnect,
     testConnection,
-    getSystemResources,
-    execCommand,
-  };
+    isConnected,
+    getHost,
+  }
 }
+
+export type SSHService = ReturnType<typeof useSSHService>

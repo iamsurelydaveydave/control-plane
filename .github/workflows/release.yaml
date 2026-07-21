@@ -1,0 +1,162 @@
+# Create GitHub Release
+# Auto-generates release notes from commits when a tag is pushed
+
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Create Release
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Extract version from tag
+        id: version
+        run: |
+          VERSION=${GITHUB_REF#refs/tags/v}
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "tag=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+
+      - name: Get previous tag
+        id: prev_tag
+        run: |
+          PREV_TAG=$(git tag --sort=-version:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sed -n '2p')
+          if [ -z "$PREV_TAG" ]; then
+            PREV_TAG=$(git rev-list --max-parents=0 HEAD)
+          fi
+          echo "prev_tag=$PREV_TAG" >> $GITHUB_OUTPUT
+          echo "Previous tag: $PREV_TAG"
+
+      - name: Generate changelog
+        id: changelog
+        run: |
+          echo "## What's Changed" > CHANGELOG_RELEASE.md
+          echo "" >> CHANGELOG_RELEASE.md
+          
+          # Features
+          FEATURES=$(git log ${{ steps.prev_tag.outputs.prev_tag }}..${{ steps.version.outputs.tag }} --pretty=format:"- %s (%h)" --grep="^feat" --no-merges 2>/dev/null || true)
+          if [ -n "$FEATURES" ]; then
+            echo "### 🚀 Features" >> CHANGELOG_RELEASE.md
+            echo "" >> CHANGELOG_RELEASE.md
+            echo "$FEATURES" >> CHANGELOG_RELEASE.md
+            echo "" >> CHANGELOG_RELEASE.md
+          fi
+          
+          # Bug fixes
+          FIXES=$(git log ${{ steps.prev_tag.outputs.prev_tag }}..${{ steps.version.outputs.tag }} --pretty=format:"- %s (%h)" --grep="^fix" --no-merges 2>/dev/null || true)
+          if [ -n "$FIXES" ]; then
+            echo "### 🐛 Bug Fixes" >> CHANGELOG_RELEASE.md
+            echo "" >> CHANGELOG_RELEASE.md
+            echo "$FIXES" >> CHANGELOG_RELEASE.md
+            echo "" >> CHANGELOG_RELEASE.md
+          fi
+          
+          # Breaking changes
+          BREAKING=$(git log ${{ steps.prev_tag.outputs.prev_tag }}..${{ steps.version.outputs.tag }} --pretty=format:"- %s (%h)" --grep="BREAKING" --no-merges 2>/dev/null || true)
+          if [ -n "$BREAKING" ]; then
+            echo "### ⚠️ Breaking Changes" >> CHANGELOG_RELEASE.md
+            echo "" >> CHANGELOG_RELEASE.md
+            echo "$BREAKING" >> CHANGELOG_RELEASE.md
+            echo "" >> CHANGELOG_RELEASE.md
+          fi
+          
+          # Other changes
+          OTHER=$(git log ${{ steps.prev_tag.outputs.prev_tag }}..${{ steps.version.outputs.tag }} --pretty=format:"- %s (%h)" --grep="^chore\|^docs\|^refactor\|^style\|^perf\|^test" --no-merges 2>/dev/null || true)
+          if [ -n "$OTHER" ]; then
+            echo "### 🔧 Other Changes" >> CHANGELOG_RELEASE.md
+            echo "" >> CHANGELOG_RELEASE.md
+            echo "$OTHER" >> CHANGELOG_RELEASE.md
+            echo "" >> CHANGELOG_RELEASE.md
+          fi
+          
+          # All commits if nothing matched
+          if [ ! -s CHANGELOG_RELEASE.md ] || [ $(wc -l < CHANGELOG_RELEASE.md) -le 2 ]; then
+            echo "### All Changes" >> CHANGELOG_RELEASE.md
+            echo "" >> CHANGELOG_RELEASE.md
+            git log ${{ steps.prev_tag.outputs.prev_tag }}..${{ steps.version.outputs.tag }} --pretty=format:"- %s (%h)" --no-merges >> CHANGELOG_RELEASE.md
+            echo "" >> CHANGELOG_RELEASE.md
+          fi
+          
+          # Docker images section
+          echo "---" >> CHANGELOG_RELEASE.md
+          echo "" >> CHANGELOG_RELEASE.md
+          echo "## 🐳 Docker Images" >> CHANGELOG_RELEASE.md
+          echo "" >> CHANGELOG_RELEASE.md
+          echo "\`\`\`bash" >> CHANGELOG_RELEASE.md
+          echo "# Pull the images" >> CHANGELOG_RELEASE.md
+          echo "docker pull ghcr.io/${{ github.repository_owner }}/control-plane-api:${{ steps.version.outputs.version }}" >> CHANGELOG_RELEASE.md
+          echo "docker pull ghcr.io/${{ github.repository_owner }}/control-plane-web:${{ steps.version.outputs.version }}" >> CHANGELOG_RELEASE.md
+          echo "\`\`\`" >> CHANGELOG_RELEASE.md
+          echo "" >> CHANGELOG_RELEASE.md
+          
+          # Installation section
+          echo "## 📦 Installation" >> CHANGELOG_RELEASE.md
+          echo "" >> CHANGELOG_RELEASE.md
+          echo "### Quick Install (Docker)" >> CHANGELOG_RELEASE.md
+          echo "\`\`\`bash" >> CHANGELOG_RELEASE.md
+          echo "curl -fsSL https://raw.githubusercontent.com/${{ github.repository }}/main/deploy/install.sh | bash" >> CHANGELOG_RELEASE.md
+          echo "\`\`\`" >> CHANGELOG_RELEASE.md
+          echo "" >> CHANGELOG_RELEASE.md
+          echo "### Helm" >> CHANGELOG_RELEASE.md
+          echo "\`\`\`bash" >> CHANGELOG_RELEASE.md
+          echo "helm upgrade --install control-plane ./deploy/helm/control-plane \\" >> CHANGELOG_RELEASE.md
+          echo "  --set image.tag=${{ steps.version.outputs.version }}" >> CHANGELOG_RELEASE.md
+          echo "\`\`\`" >> CHANGELOG_RELEASE.md
+          
+          cat CHANGELOG_RELEASE.md
+
+      - name: Determine prerelease
+        id: prerelease
+        run: |
+          if [[ "${{ steps.version.outputs.version }}" == *"-"* ]]; then
+            echo "is_prerelease=true" >> $GITHUB_OUTPUT
+          else
+            echo "is_prerelease=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: Control Plane ${{ steps.version.outputs.tag }}
+          body_path: CHANGELOG_RELEASE.md
+          draft: false
+          prerelease: ${{ steps.prerelease.outputs.is_prerelease }}
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Update CHANGELOG.md
+        run: |
+          # Prepend release notes to CHANGELOG.md
+          if [ -f CHANGELOG.md ]; then
+            echo "# Changelog" > CHANGELOG_NEW.md
+            echo "" >> CHANGELOG_NEW.md
+            echo "## [${{ steps.version.outputs.tag }}] - $(date +%Y-%m-%d)" >> CHANGELOG_NEW.md
+            echo "" >> CHANGELOG_NEW.md
+            cat CHANGELOG_RELEASE.md >> CHANGELOG_NEW.md
+            echo "" >> CHANGELOG_NEW.md
+            # Append existing changelog (skip the header)
+            tail -n +2 CHANGELOG.md >> CHANGELOG_NEW.md
+            mv CHANGELOG_NEW.md CHANGELOG.md
+          fi
+
+      - name: Commit CHANGELOG update
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: "docs: update CHANGELOG for ${{ steps.version.outputs.tag }}"
+          file_pattern: CHANGELOG.md
+          branch: main
+        continue-on-error: true

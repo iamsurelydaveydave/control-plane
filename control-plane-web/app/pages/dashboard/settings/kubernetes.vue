@@ -19,7 +19,7 @@ definePageMeta({
 })
 
 const toast = useToast()
-const { getK8sConfig, getK8sNodes, getK8sAgentCommand } = useSettings()
+const { getK8sConfig, getK8sNodes, getK8sAgentCommand, refreshK8sToken } = useSettings()
 
 // ---------------------------------------------------------------------------
 // Load K8s configuration status
@@ -82,6 +82,37 @@ function copyCommand() {
   if (agentCommand.value?.command) {
     navigator.clipboard.writeText(agentCommand.value.command)
     toast.add({ title: 'Command copied to clipboard', color: 'success', icon: 'i-lucide-check' })
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Refresh K3s token
+// ---------------------------------------------------------------------------
+const refreshTokenLoading = ref(false)
+
+async function handleRefreshToken() {
+  refreshTokenLoading.value = true
+  try {
+    const result = await refreshK8sToken()
+    toast.add({
+      title: 'Token refreshed',
+      description: result.hasToken ? 'Join token updated from K3s' : 'Token not available',
+      color: result.hasToken ? 'success' : 'warning',
+      icon: result.hasToken ? 'i-lucide-check' : 'i-lucide-alert-triangle'
+    })
+    // Reset agent command so it will be reloaded with new token
+    agentCommand.value = null
+    showAgentCommand.value = false
+    await refreshConfig()
+  } catch (e: unknown) {
+    const err = e as { data?: { message?: string } }
+    toast.add({
+      title: 'Failed to refresh token',
+      description: err?.data?.message || 'Unknown error',
+      color: 'error'
+    })
+  } finally {
+    refreshTokenLoading.value = false
   }
 }
 
@@ -312,7 +343,7 @@ useHead({ title: 'Kubernetes Settings · Control Plane' })
 
     <!-- Add Agent Command -->
     <div
-      v-if="config?.kubernetes.enabled && config?.hasK3sToken"
+      v-if="config?.kubernetes.enabled"
       class="rounded-xl border border-default bg-elevated/50 p-6 space-y-4"
     >
       <div class="flex items-center justify-between">
@@ -324,15 +355,50 @@ useHead({ title: 'Kubernetes Settings · Control Plane' })
             Run this command on a database server to join it to the cluster
           </p>
         </div>
-        <UButton
-          v-if="!showAgentCommand"
-          icon="i-lucide-terminal"
-          :loading="agentCommandLoading"
-          @click="loadAgentCommand"
-        >
-          Show command
-        </UButton>
+        <div class="flex items-center gap-2">
+          <UButton
+            v-if="config?.hasK3sToken"
+            icon="i-lucide-refresh-cw"
+            color="neutral"
+            variant="ghost"
+            size="sm"
+            :loading="refreshTokenLoading"
+            @click="handleRefreshToken"
+          >
+            Refresh Token
+          </UButton>
+          <UButton
+            v-if="!showAgentCommand && config?.hasK3sToken"
+            icon="i-lucide-terminal"
+            :loading="agentCommandLoading"
+            @click="loadAgentCommand"
+          >
+            Show Command
+          </UButton>
+        </div>
       </div>
+
+      <!-- No token available -->
+      <UAlert
+        v-if="!config?.hasK3sToken"
+        color="warning"
+        variant="subtle"
+        icon="i-lucide-alert-triangle"
+        title="Join token not available"
+        description="The K3s join token could not be read. Make sure the Control Plane is running on the K3s master node with access to /var/lib/rancher/k3s/server/token, or set K3S_TOKEN in your environment."
+      >
+        <template #actions>
+          <UButton
+            color="warning"
+            variant="soft"
+            size="sm"
+            :loading="refreshTokenLoading"
+            @click="handleRefreshToken"
+          >
+            Try to Read Token
+          </UButton>
+        </template>
+      </UAlert>
 
       <div
         v-if="showAgentCommand && agentCommand"

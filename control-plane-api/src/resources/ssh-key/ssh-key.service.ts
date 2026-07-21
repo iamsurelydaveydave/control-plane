@@ -1,76 +1,133 @@
 import crypto from "crypto";
 import { execSync } from "child_process";
-import { mkdtempSync, writeFileSync, readFileSync, rmSync } from "fs";
-import { tmpdir } from "os";
-import { join } from "path";
+import fs from "fs";
+import os from "os";
+import path from "path";
 import { useSSHKeyRepo } from "./ssh-key.repository";
-import { TSSHKey, TSSHKeyPublic, toPublicSSHKey } from "./ssh-key.model";
+import { modelSSHKey, TSSHKey, TSSHKeyType, TSSHKeyResponse, sshKeyToResponse } from "./ssh-key.model";
+import { BadRequestError, NotFoundError } from "../../utils/error";
+import { logger } from "../../utils";
 
+/**
+ * SSH Key Service - handles key generation, import, and management
+ */
 export function useSSHKeyService() {
   const repo = useSSHKeyRepo();
 
   /**
-   * Generate a new SSH keypair
+   * Generate an SSH keypair using system ssh-keygen
+   * Returns the raw key material (not stored in DB)
    */
-  function generateKeyPair(type: "ed25519" | "rsa" = "ed25519"): {
+  function generateKeyPair(type: TSSHKeyType): {
     publicKey: string;
     privateKey: string;
     fingerprint: string;
   } {
-    const tempDir = mkdtempSync(join(tmpdir(), "ssh-keygen-"));
-    const keyPath = join(tempDir, "key");
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "ssh-keygen-"));
+    const keyPath = path.join(tmpDir, "id_key");
 
     try {
-      const keyType = type === "ed25519" ? "ed25519" : "rsa";
-      const bits = type === "rsa" ? "-b 4096" : "";
-      
-      execSync(
-        `ssh-keygen -t ${keyType} ${bits} -f "${keyPath}" -N "" -C "control-plane"`,
-        { stdio: "pipe" }
-      );
+      // Generate the key using ssh-keygen
+      const keygenArgs = type === "ed25519"
+        ? `-t ed25519 -f "${keyPath}" -N "" -C "control-plane"`
+        : `-t rsa -b 4096 -f "${keyPath}" -N "" -C "control-plane"`;
 
-      const privateKey = readFileSync(keyPath, "utf-8");
-      const publicKey = readFileSync(`${keyPath}.pub`, "utf-8").trim();
-      
-      // Generate fingerprint
+      execSync(`ssh-keygen ${keygenArgs}`, { stdio: "pipe" });
+
+      // Read the generated keys
+      const privateKey = fs.readFileSync(keyPath, "utf-8");
+      const publicKey = fs.readFileSync(`${keyPath}.pub`, "utf-8").trim();
+
+      // Get fingerprint
       const fingerprintOutput = execSync(`ssh-keygen -lf "${keyPath}.pub"`, { encoding: "utf-8" });
-      const fingerprint = fingerprintOutput.split(" ")[1];
+      // Format: "256 SHA256:xxxx comment (ED25519)" - extract SHA256:xxxx
+      const match = fingerprintOutput.match(/SHA256:[^\s]+/);
+      const fingerprint = match ? match[0] : generateFingerprint(publicKey);
 
       return { publicKey, privateKey, fingerprint };
     } finally {
       // Clean up temp files
-      rmSync(tempDir, { recursive: true, force: true });
+      try {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      } catch {
+        // Ignore cleanup errors
+      }
     }
   }
 
   /**
-   * Calculate fingerprint from a public key
+   * Extract public key from a private key using ssh-keygen
    */
-  function getFingerprint(publicKey: string): string {
-    const tempDir = mkdtempSync(join(tmpdir(), "ssh-fp-"));
-    const keyPath = join(tempDir, "key.pub");
+  function extractPublicKey(privateKey: string): {
+    publicKey: string;
+    fingerprint: string;
+    type: TSSHKeyType;
+  } {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "ssh-extract-"));
+    const keyPath = path.join(tmpDir, "id_key");
 
     try {
-      writeFileSync(keyPath, publicKey);
-      const output = execSync(`ssh-keygen -lf "${keyPath}"`, { encoding: "utf-8" });
-      return output.split(" ")[1];
+      // Write private key to temp file
+      fs.writeFileSync(keyPath, privateKey, { mode: 0o600 });
+
+      // Extract public key
+      const publicKey = execSync(`ssh-keygen -y -f "${keyPath}"`, { encoding: "utf-8" }).trim();
+
+      // Get fingerprint
+      const pubKeyPath = `${keyPath}.pub`;
+      fs.writeFileSync(pubKeyPath, publicKey);
+      const fingerprintOutput = execSync(`ssh-keygen -lf "${pubKeyPath}"`, { encoding: "utf-8" });
+      const match = fingerprintOutput.match(/SHA256:[^\s]+/);
+      const fingerprint = match ? match[0] : generateFingerprint(publicKey);
+
+      // Detect key type from public key
+      let type: TSSHKeyType = "rsa";
+      if (publicKey.startsWith("ssh-ed25519")) {
+        type = "ed25519";
+      }
+
+      return { publicKey, fingerprint, type };
+    } catch (error: any) {
+      throw new BadRequestError(
+        "Invalid private key format. Please provide a valid OpenSSH private key."
+      );
     } finally {
-      rmSync(tempDir, { recursive: true, force: true });
+      try {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      } catch {
+        // Ignore cleanup errors
+      }
     }
   }
 
   /**
-   * Create a new SSH key (generate keypair).
-   * Returns the full public key info AND the private key (only available at creation time).
+   * Generate a fingerprint from a public key (fallback)
+   */
+  function generateFingerprint(publicKey: string): string {
+    const hash = crypto.createHash("sha256").update(publicKey).digest("base64");
+    return `SHA256:${hash.replace(/=+$/, "")}`;
+  }
+
+  /**
+   * Create a new SSH key (generates keypair and stores)
+   * Returns the key metadata and the private key (one time only)
    */
   async function create(
     name: string,
-    type: "ed25519" | "rsa" = "ed25519",
-    isDefault = false
-  ): Promise<{ key: TSSHKeyPublic; privateKey: string }> {
+    type: TSSHKeyType,
+    isDefault: boolean = false
+  ): Promise<{ key: TSSHKeyResponse; privateKey: string }> {
+    // Check if name already exists
+    const existing = await repo.getByName(name).catch(() => null);
+    if (existing) {
+      throw new BadRequestError(`SSH key with name '${name}' already exists.`);
+    }
+
+    // Generate keypair
     const { publicKey, privateKey, fingerprint } = generateKeyPair(type);
 
-    const id = await repo.add({
+    // Create the key model
+    const keyData = modelSSHKey({
       name,
       publicKey,
       privateKey,
@@ -79,115 +136,161 @@ export function useSSHKeyService() {
       isDefault,
     });
 
-    const key = await repo.getById(id);
-    return {
-      key: toPublicSSHKey(key!),
-      privateKey, // Only returned at creation time
-    };
+    // Store in database
+    const id = await repo.add(keyData);
+
+    logger.log({
+      level: "info",
+      message: `SSH key created: ${name} (${type})`,
+    });
+
+    // Return the response (without private key) plus the private key separately
+    const storedKey = { ...keyData, _id: id } as any;
+    const response = sshKeyToResponse(storedKey);
+
+    return { key: response, privateKey };
   }
 
   /**
-   * Import an existing SSH key
+   * Import an existing private key
    */
   async function importKey(
     name: string,
     privateKey: string,
-    isDefault = false
-  ): Promise<TSSHKeyPublic> {
-    // Extract public key from private key
-    const tempDir = mkdtempSync(join(tmpdir(), "ssh-import-"));
-    const keyPath = join(tempDir, "key");
+    isDefault: boolean = false
+  ): Promise<TSSHKeyResponse> {
+    // Check if name already exists
+    const existingByName = await repo.getByName(name).catch(() => null);
+    if (existingByName) {
+      throw new BadRequestError(`SSH key with name '${name}' already exists.`);
+    }
 
+    // Extract public key and determine type
+    const { publicKey, fingerprint, type } = extractPublicKey(privateKey);
+
+    // Create the key model
+    const keyData = modelSSHKey({
+      name,
+      publicKey,
+      privateKey,
+      fingerprint,
+      type,
+      isDefault,
+    });
+
+    // Store in database
+    const id = await repo.add(keyData);
+
+    logger.log({
+      level: "info",
+      message: `SSH key imported: ${name} (${type})`,
+    });
+
+    const storedKey = { ...keyData, _id: id } as any;
+    return sshKeyToResponse(storedKey);
+  }
+
+  /**
+   * Get all SSH keys (public info only)
+   */
+  async function getAll(): Promise<TSSHKeyResponse[]> {
+    const keys = await repo.getAll();
+    return keys.map(sshKeyToResponse);
+  }
+
+  /**
+   * Get an SSH key by ID (public info only)
+   */
+  async function getById(id: string): Promise<TSSHKeyResponse | null> {
     try {
-      writeFileSync(keyPath, privateKey, { mode: 0o600 });
-      
-      const publicKey = execSync(`ssh-keygen -y -f "${keyPath}"`, { encoding: "utf-8" }).trim();
-      const fingerprintOutput = execSync(`ssh-keygen -lf "${keyPath}"`, { encoding: "utf-8" });
-      const fingerprint = fingerprintOutput.split(" ")[1];
-      
-      // Detect key type
-      const type = privateKey.includes("BEGIN OPENSSH PRIVATE KEY") 
-        ? (publicKey.startsWith("ssh-ed25519") ? "ed25519" : "rsa")
-        : "rsa";
-
-      const id = await repo.add({
-        name,
-        publicKey,
-        privateKey,
-        fingerprint,
-        type,
-        isDefault,
-      });
-
       const key = await repo.getById(id);
-      return toPublicSSHKey(key!);
-    } finally {
-      rmSync(tempDir, { recursive: true, force: true });
+      return sshKeyToResponse(key);
+    } catch (error) {
+      if (error instanceof NotFoundError) {
+        return null;
+      }
+      throw error;
     }
   }
 
   /**
-   * Get all SSH keys (without private keys)
-   */
-  async function getAll(): Promise<TSSHKeyPublic[]> {
-    const keys = await repo.getAll();
-    return keys.map(toPublicSSHKey);
-  }
-
-  /**
-   * Get SSH key by ID (without private key)
-   */
-  async function getById(id: string): Promise<TSSHKeyPublic | null> {
-    const key = await repo.getById(id);
-    return key ? toPublicSSHKey(key) : null;
-  }
-
-  /**
-   * Get full SSH key by ID (including private key) - internal use only
+   * Get the full SSH key with private key (for internal use only)
    */
   async function getFullById(id: string): Promise<TSSHKey | null> {
-    return repo.getById(id);
+    try {
+      return await repo.getById(id);
+    } catch (error) {
+      if (error instanceof NotFoundError) {
+        return null;
+      }
+      throw error;
+    }
   }
 
   /**
-   * Get default SSH key
+   * Get the default SSH key (for internal use)
    */
-  async function getDefault(): Promise<TSSHKeyPublic | null> {
+  async function getDefault(): Promise<TSSHKeyResponse | null> {
     const key = await repo.getDefault();
-    return key ? toPublicSSHKey(key) : null;
+    return key ? sshKeyToResponse(key) : null;
   }
 
   /**
-   * Get default SSH key with private key - internal use only
+   * Get the default SSH key with private key (for internal provisioning)
    */
   async function getDefaultFull(): Promise<TSSHKey | null> {
     return repo.getDefault();
   }
 
   /**
-   * Update SSH key
-   */
-  async function update(id: string, data: { name?: string; isDefault?: boolean }): Promise<boolean> {
-    return repo.updateById(id, data);
-  }
-
-  /**
-   * Delete SSH key
-   */
-  async function deleteKey(id: string): Promise<boolean> {
-    return repo.deleteById(id);
-  }
-
-  /**
-   * Set a key as default
+   * Set a key as the default
    */
   async function setDefault(id: string): Promise<boolean> {
-    return repo.updateById(id, { isDefault: true });
+    await repo.updateById(id, { isDefault: true });
+    return true;
+  }
+
+  /**
+   * Update an SSH key
+   */
+  async function update(
+    id: string,
+    data: { name?: string; isDefault?: boolean }
+  ): Promise<boolean> {
+    // If changing name, check for conflicts
+    if (data.name) {
+      const existing = await repo.getByName(data.name).catch(() => null);
+      if (existing && existing._id?.toString() !== id) {
+        throw new BadRequestError(`SSH key with name '${data.name}' already exists.`);
+      }
+    }
+
+    await repo.updateById(id, data);
+    return true;
+  }
+
+  /**
+   * Delete an SSH key
+   */
+  async function deleteKey(id: string): Promise<boolean> {
+    await repo.deleteById(id);
+    logger.log({
+      level: "info",
+      message: `SSH key deleted: ${id}`,
+    });
+    return true;
+  }
+
+  /**
+   * Count SSH keys
+   */
+  async function count(): Promise<number> {
+    return repo.count();
   }
 
   return {
     generateKeyPair,
-    getFingerprint,
+    extractPublicKey,
     create,
     importKey,
     getAll,
@@ -195,8 +298,9 @@ export function useSSHKeyService() {
     getFullById,
     getDefault,
     getDefaultFull,
+    setDefault,
     update,
     deleteKey,
-    setDefault,
+    count,
   };
 }

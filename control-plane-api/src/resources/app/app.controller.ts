@@ -1,15 +1,12 @@
 import { Request, Response, NextFunction } from "express";
 import { useAppRepo } from "./app.repository";
-import { useServerRepo } from "../server/server.repository";
-import { useKamalExecutor } from "../../services/kamal.executor";
-import { schemaAppCreate, schemaAppUpdate, schemaAppDeploy } from "./app.model";
-import { BadRequestError, NotFoundError, generateSslipHost, isSslipHost, logBroker } from "../../utils";
-import { useDNSService } from "../../services/dns.service";
+import { useAppService } from "./app.service";
+import { schemaAppCreate, schemaAppUpdate, schemaAppDeploy, schemaAppScale, TAppStatus, TApp } from "./app.model";
+import { BadRequestError, NotFoundError } from "../../utils";
 
 export function useAppController() {
   const repo = useAppRepo();
-  const serverRepo = useServerRepo();
-  const kamal = useKamalExecutor();
+  const appService = useAppService();
 
   // ---------------------------------------------------------------------------
   // CRUD
@@ -17,43 +14,7 @@ export function useAppController() {
 
   async function add(req: Request, res: Response, next: NextFunction) {
     try {
-      // -----------------------------------------------------------------------
-      // Auto-assign a hostname when none is provided.
-      // Priority: 1) explicit proxy.host  2) DNS subdomain  3) sslip.io
-      // -----------------------------------------------------------------------
       const body = { ...req.body };
-
-      if (!body.proxy?.host && Array.isArray(body.serverIds) && body.serverIds.length > 0) {
-        const firstServer = await serverRepo.getById(body.serverIds[0]);
-        const serverIp = firstServer?.host;
-
-        if (serverIp) {
-          const dns = useDNSService();
-          const appsConfig = await dns.getAppsConfig();
-          const appName = (body.name as string) || "app";
-
-          let host: string;
-          let ssl = false;
-
-          if (appsConfig?.baseDomain) {
-            // DNS configured — use the registered subdomain
-            const safeName = appName.toLowerCase().replace(/[^a-z0-9-]/g, "-");
-            host = `${safeName}.${appsConfig.baseDomain}`;
-            ssl  = true;
-          } else {
-            // No DNS — fall back to sslip.io (no SSL)
-            host = generateSslipHost(appName, serverIp);
-            ssl  = false;
-          }
-
-          body.proxy = {
-            appPort: 3000,
-            ssl,
-            ...body.proxy,
-            host,               // always override the empty/missing host
-          };
-        }
-      }
 
       const { error, value } = schemaAppCreate.validate(body);
       if (error) {
@@ -61,26 +22,14 @@ export function useAppController() {
         return;
       }
 
-      // Validate servers exist and are online
-      for (const serverId of value.serverIds) {
-        const server = await serverRepo.getById(serverId);
-        if (!server) {
-          next(new NotFoundError(`Server not found: ${serverId}`));
-          return;
-        }
-      }
-
       const id = await repo.add(value);
-      const isSslip = isSslipHost(value.proxy?.host ?? "");
 
+      const domain = value.k8s?.domain ?? value.proxy?.host;
       res.status(201).json({
         message: "App created",
         appId: id,
-        url: value.proxy?.host
-          ? `${value.proxy.ssl ? "https" : "http"}://${value.proxy.host}`
-          : null,
-        urlType: value.proxy?.host
-          ? (isSslip ? "sslip" : "custom")
+        url: domain
+          ? `${value.proxy?.ssl !== false ? "https" : "http"}://${domain}`
           : null,
       });
     } catch (error) {
@@ -106,7 +55,17 @@ export function useAppController() {
           : undefined,
       };
 
-      res.json({ app: safeApp });
+      // Optionally include K8s deployment status
+      let deploymentStatus = null;
+      if (req.query.includeStatus === "true") {
+        try {
+          deploymentStatus = await appService.getDeploymentStatus(id);
+        } catch {
+          // Ignore errors getting deployment status
+        }
+      }
+
+      res.json({ app: safeApp, deploymentStatus });
     } catch (error) {
       next(error);
     }
@@ -120,11 +79,11 @@ export function useAppController() {
         search: search as string,
         page: page ? Number(page) : 1,
         limit: limit ? Number(limit) : 10,
-        status: status as any,
+        status: status as TAppStatus | undefined,
       });
 
       // Mask registry passwords
-      const safeItems = data.items.map((app: any) => ({
+      const safeItems = data.items.map((app: TApp) => ({
         ...app,
         registry: app.registry
           ? { ...app.registry, password: "****" }
@@ -156,20 +115,20 @@ export function useAppController() {
   async function deleteById(req: Request, res: Response, next: NextFunction) {
     try {
       const id = req.params.id as string;
-      
+
       const app = await repo.getById(id);
       if (!app) {
         next(new NotFoundError("App not found"));
         return;
       }
 
-      // Stop the app if running
-      if (app.status === "running") {
-        await kamal.stop(id).catch(() => {});
-      }
+      // Delete app and all K8s resources
+      const result = await appService.deleteApp(id);
 
-      await repo.deleteById(id);
-      res.json({ message: "App deleted" });
+      res.json({
+        message: result.message,
+        errors: result.errors.length > 0 ? result.errors : undefined,
+      });
     } catch (error) {
       next(error);
     }
@@ -199,25 +158,13 @@ export function useAppController() {
         return;
       }
 
-      const userId = req.cookies?.user;
+      const result = await appService.deploy(id, { version: value.version });
 
-      // Start deployment in background
-      kamal
-        .deploy({
-          appId: id,
-          version: value.version,
-          force: value.force,
-          triggeredBy: userId,
-          onLog: (line) => logBroker.addLine(id, line),
-        })
-        .catch((err) => {
-          logBroker.addLine(id, `[ERROR] ${err.message}`);
-          logBroker.complete(id, "failed");
-        });
-
-      res.status(202).json({
-        message: "Deployment started",
-        status: "deploying",
+      res.json({
+        message: result.message,
+        appId: id,
+        version: value.version,
+        errors: result.errors.length > 0 ? result.errors : undefined,
       });
     } catch (error) {
       next(error);
@@ -228,7 +175,7 @@ export function useAppController() {
     try {
       const id = req.params.id as string;
       const app = await repo.getById(id);
-      
+
       if (!app) {
         next(new NotFoundError("App not found"));
         return;
@@ -239,22 +186,13 @@ export function useAppController() {
         return;
       }
 
-      const userId = req.cookies?.user;
+      // Redeploy is just a deploy with the current version
+      const result = await appService.deploy(id, { version: app.currentVersion });
 
-      kamal
-        .redeploy({
-          appId: id,
-          triggeredBy: userId,
-          onLog: (line) => logBroker.addLine(id, line),
-        })
-        .catch((err) => {
-          logBroker.addLine(id, `[ERROR] ${err.message}`);
-          logBroker.complete(id, "failed");
-        });
-
-      res.status(202).json({
-        message: "Redeployment started",
-        status: "deploying",
+      res.json({
+        message: result.message,
+        appId: id,
+        errors: result.errors.length > 0 ? result.errors : undefined,
       });
     } catch (error) {
       next(error);
@@ -272,23 +210,37 @@ export function useAppController() {
         return;
       }
 
-      const userId = req.cookies?.user;
+      if (!version) {
+        next(new BadRequestError("Version is required for rollback"));
+        return;
+      }
 
-      kamal
-        .rollback({
-          appId: id,
-          version,
-          triggeredBy: userId,
-          onLog: (line) => logBroker.addLine(id, line),
-        })
-        .catch((err) => {
-          logBroker.addLine(id, `[ERROR] ${err.message}`);
-          logBroker.complete(id, "failed");
-        });
+      // For rollback, we need to update the image to the specified version and redeploy
+      // This assumes the image tag matches the version
+      const k8sConfig = app.k8s;
+      if (!k8sConfig?.image) {
+        next(new BadRequestError("App has no image configured"));
+        return;
+      }
 
-      res.status(202).json({
-        message: "Rollback started",
-        version: version || "previous",
+      // Update image tag to rollback version
+      const baseImage = k8sConfig.image.split(":")[0];
+      const rollbackImage = `${baseImage}:${version}`;
+
+      await repo.updateById(id, {
+        k8s: {
+          ...k8sConfig,
+          image: rollbackImage,
+        },
+      });
+
+      const result = await appService.deploy(id, { version });
+
+      res.json({
+        message: `Rolled back to version ${version}`,
+        appId: id,
+        version,
+        errors: result.errors.length > 0 ? result.errors : undefined,
       });
     } catch (error) {
       next(error);
@@ -303,18 +255,23 @@ export function useAppController() {
     try {
       const id = req.params.id as string;
       const app = await repo.getById(id);
-      
+
       if (!app) {
         next(new NotFoundError("App not found"));
         return;
       }
 
-      const result = await kamal.stop(id);
-      
+      if (app.status === "stopped") {
+        next(new BadRequestError("App is already stopped"));
+        return;
+      }
+
+      const result = await appService.stop(id);
+
       res.json({
-        message: result.success ? "App stopped" : "Failed to stop app",
-        success: result.success,
-        error: result.success ? undefined : result.stderr,
+        message: result.message,
+        appId: id,
+        errors: result.errors.length > 0 ? result.errors : undefined,
       });
     } catch (error) {
       next(error);
@@ -325,18 +282,23 @@ export function useAppController() {
     try {
       const id = req.params.id as string;
       const app = await repo.getById(id);
-      
+
       if (!app) {
         next(new NotFoundError("App not found"));
         return;
       }
 
-      const result = await kamal.start(id);
-      
+      if (app.status === "running") {
+        next(new BadRequestError("App is already running"));
+        return;
+      }
+
+      const result = await appService.start(id);
+
       res.json({
-        message: result.success ? "App started" : "Failed to start app",
-        success: result.success,
-        error: result.success ? undefined : result.stderr,
+        message: result.message,
+        appId: id,
+        errors: result.errors.length > 0 ? result.errors : undefined,
       });
     } catch (error) {
       next(error);
@@ -346,17 +308,53 @@ export function useAppController() {
   async function restart(req: Request, res: Response, next: NextFunction) {
     try {
       const id = req.params.id as string;
-      const userId = req.cookies?.user;
+      const app = await repo.getById(id);
 
-      // Redeploy is effectively a restart in Kamal
-      kamal
-        .redeploy({
-          appId: id,
-          triggeredBy: userId,
-        })
-        .catch(() => {});
+      if (!app) {
+        next(new NotFoundError("App not found"));
+        return;
+      }
 
-      res.status(202).json({ message: "Restart initiated" });
+      if (app.status !== "running") {
+        next(new BadRequestError("App must be running to restart"));
+        return;
+      }
+
+      const result = await appService.restart(id);
+
+      res.json({
+        message: result.message,
+        appId: id,
+        errors: result.errors.length > 0 ? result.errors : undefined,
+      });
+    } catch (error) {
+      next(error);
+    }
+  }
+
+  async function scale(req: Request, res: Response, next: NextFunction) {
+    try {
+      const id = req.params.id as string;
+      const { error, value } = schemaAppScale.validate(req.body);
+      if (error) {
+        next(new BadRequestError(error.message));
+        return;
+      }
+
+      const app = await repo.getById(id);
+      if (!app) {
+        next(new NotFoundError("App not found"));
+        return;
+      }
+
+      const result = await appService.scale(id, value.replicas);
+
+      res.json({
+        message: result.message,
+        appId: id,
+        replicas: value.replicas,
+        errors: result.errors.length > 0 ? result.errors : undefined,
+      });
     } catch (error) {
       next(error);
     }
@@ -369,7 +367,9 @@ export function useAppController() {
   async function getLogs(req: Request, res: Response, next: NextFunction) {
     try {
       const id = req.params.id as string;
-      const lines = req.query.lines ? Number(req.query.lines) : 100;
+      const tailLines = req.query.lines ? Number(req.query.lines) : 100;
+      const podName = req.query.pod as string | undefined;
+      const container = req.query.container as string | undefined;
 
       const app = await repo.getById(id);
       if (!app) {
@@ -377,8 +377,12 @@ export function useAppController() {
         return;
       }
 
-      const result = await kamal.getLogs(id, lines);
-      res.json(result);
+      const results = await appService.getLogs(id, { tailLines, podName, container });
+
+      res.json({
+        appId: id,
+        logs: results,
+      });
     } catch (error) {
       next(error);
     }
@@ -388,14 +392,39 @@ export function useAppController() {
     try {
       const id = req.params.id as string;
       const app = await repo.getById(id);
-      
+
       if (!app) {
         next(new NotFoundError("App not found"));
         return;
       }
 
-      const version = await kamal.getVersion(id);
-      res.json({ version });
+      res.json({
+        version: app.currentVersion || "unknown",
+        image: app.currentImage || app.k8s?.image || "unknown",
+      });
+    } catch (error) {
+      next(error);
+    }
+  }
+
+  async function getStatus(req: Request, res: Response, next: NextFunction) {
+    try {
+      const id = req.params.id as string;
+      const app = await repo.getById(id);
+
+      if (!app) {
+        next(new NotFoundError("App not found"));
+        return;
+      }
+
+      const deploymentStatus = await appService.getDeploymentStatus(id);
+
+      res.json({
+        appId: id,
+        name: app.name,
+        status: app.status,
+        deployment: deploymentStatus,
+      });
     } catch (error) {
       next(error);
     }
@@ -408,7 +437,7 @@ export function useAppController() {
   async function appExec(req: Request, res: Response, next: NextFunction) {
     try {
       const id = req.params.id as string;
-      const { command } = req.body;
+      const { command } = req.body as { command?: string };
 
       if (!command) {
         next(new BadRequestError("command is required"));
@@ -421,11 +450,12 @@ export function useAppController() {
         return;
       }
 
-      const result = await kamal.appExec(id, command);
-      res.json({
-        success: result.success,
-        output: result.stdout,
-        error: result.stderr,
+      // TODO: Implement kubectl exec via Kubernetes client
+      // This requires WebSocket support for interactive exec
+      res.status(501).json({
+        message: "Exec is not yet implemented - requires WebSocket support",
+        appId: id,
+        command,
       });
     } catch (error) {
       next(error);
@@ -436,7 +466,10 @@ export function useAppController() {
     try {
       const id = req.params.id as string;
       const app = await repo.getById(id);
-      if (!app) { next(new NotFoundError("App not found")); return; }
+      if (!app) {
+        next(new NotFoundError("App not found"));
+        return;
+      }
 
       const limit = req.query.limit ? Math.min(Number(req.query.limit), 50) : 10;
       const { useDeploymentRepo } = await import("../deployment");
@@ -444,6 +477,91 @@ export function useAppController() {
       const deployments = await deploymentRepo.getByAppId(id, { page: 1, limit });
 
       res.json({ deployments: deployments.items });
+    } catch (error) {
+      next(error);
+    }
+  }
+
+  async function getLatestDeployment(req: Request, res: Response, next: NextFunction) {
+    try {
+      const id = req.params.id as string;
+      const app = await repo.getById(id);
+      if (!app) {
+        next(new NotFoundError("App not found"));
+        return;
+      }
+
+      const { useDeploymentRepo } = await import("../deployment");
+      const deploymentRepo = useDeploymentRepo();
+      const deployment = await deploymentRepo.getLatestByAppId(id);
+
+      if (!deployment) {
+        res.json({
+          deploymentId: null,
+          status: "none",
+          message: "No deployments found",
+        });
+        return;
+      }
+
+      // Calculate duration if completed
+      let duration: number | undefined;
+      if (deployment.startedAt && deployment.completedAt) {
+        duration = new Date(deployment.completedAt).getTime() - new Date(deployment.startedAt).getTime();
+      }
+
+      res.json({
+        deploymentId: deployment._id?.toString(),
+        status: deployment.status,
+        startedAt: deployment.startedAt,
+        completedAt: deployment.completedAt,
+        version: deployment.version || deployment.image,
+        environment: deployment.environment,
+        logs: deployment.logs,
+        duration,
+        url: deployment.url,
+      });
+    } catch (error) {
+      next(error);
+    }
+  }
+
+  async function getDeploymentStatus(req: Request, res: Response, next: NextFunction) {
+    try {
+      const id = req.params.id as string;
+      const deploymentId = req.params.deploymentId as string;
+      const app = await repo.getById(id);
+      if (!app) {
+        next(new NotFoundError("App not found"));
+        return;
+      }
+
+      const { useDeploymentRepo } = await import("../deployment");
+      const deploymentRepo = useDeploymentRepo();
+      const deployment = await deploymentRepo.getById(deploymentId);
+
+      if (!deployment) {
+        next(new NotFoundError("Deployment not found"));
+        return;
+      }
+
+      // Calculate duration if completed
+      let duration: number | undefined;
+      if (deployment.startedAt && deployment.completedAt) {
+        duration = new Date(deployment.completedAt).getTime() - new Date(deployment.startedAt).getTime();
+      }
+
+      res.json({
+        deploymentId: deployment._id?.toString(),
+        status: deployment.status,
+        startedAt: deployment.startedAt,
+        completedAt: deployment.completedAt,
+        version: deployment.version || deployment.image,
+        environment: deployment.environment,
+        logs: deployment.logs,
+        duration,
+        url: deployment.url,
+      });
     } catch (error) {
       next(error);
     }
@@ -461,9 +579,13 @@ export function useAppController() {
     stop,
     start,
     restart,
+    scale,
     getLogs,
     getVersion,
+    getStatus,
     appExec,
     getDeployments,
+    getLatestDeployment,
+    getDeploymentStatus,
   };
 }

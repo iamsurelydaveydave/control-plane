@@ -1,4 +1,5 @@
 import { useRedis } from "./ioredis";
+import { recordCacheHit, recordCacheMiss } from "./prometheus";
 
 const DEFAULT_TTL = 300; // 5 minutes
 
@@ -8,9 +9,15 @@ export function useCache(namespace = "default") {
   async function getCache<T = unknown>(key: string): Promise<T | null> {
     try {
       const cached = await getRedis().get(key);
-      return cached ? (JSON.parse(cached) as T) : null;
+      if (cached) {
+        recordCacheHit();
+        return JSON.parse(cached) as T;
+      }
+      recordCacheMiss();
+      return null;
     } catch (err) {
       console.warn(`[Cache][Get] Error: ${err instanceof Error ? err.message : err}`);
+      recordCacheMiss();
       return null;
     }
   }

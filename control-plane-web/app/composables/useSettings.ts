@@ -96,6 +96,14 @@ export default function useSettings() {
     }>('/settings/k8s/agent-command', { method: 'GET' })
   }
 
+  function refreshK8sToken() {
+    return useNuxtApp().$api<{
+      message: string
+      hasToken: boolean
+      apiServerUrl?: string
+    }>('/settings/k8s/refresh-token', { method: 'POST' })
+  }
+
   return {
     // DNS
     getDNSConfig,
@@ -106,6 +114,7 @@ export default function useSettings() {
     // Kubernetes
     getK8sConfig,
     getK8sNodes,
-    getK8sAgentCommand
+    getK8sAgentCommand,
+    refreshK8sToken
   }
 }

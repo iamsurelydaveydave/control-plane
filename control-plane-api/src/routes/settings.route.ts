@@ -1,9 +1,10 @@
 import express, { Request, Response, NextFunction } from "express";
-import { requireAuth } from "../utils";
+import { requireAuth, requirePermission } from "../utils";
 import { useSettingsRepo } from "../resources/settings";
 import { useDNSService } from "../services/dns.service";
 import { useK8sService } from "../services/k8s.service";
-import { getProvisionerType } from "../services/mongodb.provisioner.factory";
+import { useClusterRepo, useClusterService } from "../resources/cluster";
+import { usePerconaService } from "../services/percona.service";
 import { BadRequestError } from "../utils";
 
 const router = express.Router();
@@ -75,7 +76,7 @@ async function resolveAndSave(
 // Test a Cloudflare token + domain. Returns discovered zone details.
 // Body: { apiToken, baseDomain }
 // ---------------------------------------------------------------------------
-router.post("/dns/verify", requireAuth, async (req: Request, res: Response, next: NextFunction) => {
+router.post("/dns/verify", requireAuth, requirePermission("settings:update"), async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { apiToken, baseDomain } = req.body;
 
@@ -107,7 +108,7 @@ router.post("/dns/verify", requireAuth, async (req: Request, res: Response, next
 // GET /api/settings/dns
 // Returns both apps and db DNS configs (token masked).
 // ---------------------------------------------------------------------------
-router.get("/dns", requireAuth, async (req: Request, res: Response, next: NextFunction) => {
+router.get("/dns", requireAuth, requirePermission("settings:read"), async (req: Request, res: Response, next: NextFunction) => {
   try {
     const dns = useDNSService();
 
@@ -139,7 +140,7 @@ router.get("/dns", requireAuth, async (req: Request, res: Response, next: NextFu
 // Save only the shared API token (without requiring a full scope config).
 // Body: { apiToken }
 // ---------------------------------------------------------------------------
-router.put("/dns/token", requireAuth, async (req: Request, res: Response, next: NextFunction) => {
+router.put("/dns/token", requireAuth, requirePermission("settings:update"), async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { apiToken } = req.body;
     if (!apiToken) {
@@ -162,7 +163,7 @@ router.put("/dns/token", requireAuth, async (req: Request, res: Response, next: 
 // Save DNS config for apps (subdomains for deployed applications).
 // Body: { apiToken, baseDomain, zoneId? }
 // ---------------------------------------------------------------------------
-router.put("/dns/apps", requireAuth, async (req: Request, res: Response, next: NextFunction) => {
+router.put("/dns/apps", requireAuth, requirePermission("settings:update"), async (req: Request, res: Response, next: NextFunction) => {
   try {
     await resolveAndSave("apps", req.body, res, next);
   } catch (error) {
@@ -175,7 +176,7 @@ router.put("/dns/apps", requireAuth, async (req: Request, res: Response, next: N
 // Save DNS config for databases (SRV records for replica sets).
 // Body: { apiToken, baseDomain, zoneId? }
 // ---------------------------------------------------------------------------
-router.put("/dns/db", requireAuth, async (req: Request, res: Response, next: NextFunction) => {
+router.put("/dns/db", requireAuth, requirePermission("settings:update"), async (req: Request, res: Response, next: NextFunction) => {
   try {
     await resolveAndSave("db", req.body, res, next);
   } catch (error) {
@@ -187,7 +188,7 @@ router.put("/dns/db", requireAuth, async (req: Request, res: Response, next: Nex
 // DELETE /api/settings/dns/:scope
 // Clear a specific scope's config. scope = "apps" | "db"
 // ---------------------------------------------------------------------------
-router.delete("/dns/:scope", requireAuth, async (req: Request, res: Response, next: NextFunction) => {
+router.delete("/dns/:scope", requireAuth, requirePermission("settings:update"), async (req: Request, res: Response, next: NextFunction) => {
   try {
     const scope = req.params.scope as "apps" | "db";
     if (scope !== "apps" && scope !== "db") {
@@ -215,10 +216,9 @@ router.delete("/dns/:scope", requireAuth, async (req: Request, res: Response, ne
 // ---------------------------------------------------------------------------
 
 // GET /api/settings/k8s — Get Kubernetes configuration status
-router.get("/k8s", requireAuth, async (req: Request, res: Response, next: NextFunction) => {
+router.get("/k8s", requireAuth, requirePermission("settings:read"), async (req: Request, res: Response, next: NextFunction) => {
   try {
     const k8sEnabled = process.env.K8S_ENABLED === "true";
-    const provisionerType = getProvisionerType();
     
     let k8sStatus: {
       enabled: boolean;
@@ -232,11 +232,16 @@ router.get("/k8s", requireAuth, async (req: Request, res: Response, next: NextFu
       nodes: 0,
     };
 
+    // Get cluster info from our cluster record
+    const clusterRepo = useClusterRepo();
+    const localCluster = await clusterRepo.getLocalCluster().catch(() => null);
+    const hasK3sToken = !!localCluster?.joinToken || !!process.env.K3S_TOKEN;
+
     if (k8sEnabled) {
       try {
         const k8s = useK8sService();
         k8sStatus.available = await k8s.isAvailable();
-        k8sStatus.serverUrl = process.env.K3S_SERVER_URL;
+        k8sStatus.serverUrl = localCluster?.apiServerUrl || process.env.K3S_SERVER_URL;
         
         if (k8sStatus.available) {
           const nodes = await k8s.getNodes();
@@ -250,8 +255,8 @@ router.get("/k8s", requireAuth, async (req: Request, res: Response, next: NextFu
 
     res.json({
       kubernetes: k8sStatus,
-      provisioner: provisionerType,
-      hasK3sToken: !!process.env.K3S_TOKEN,
+      provisioner: k8sEnabled ? "k8s" : "ansible",
+      hasK3sToken,
     });
   } catch (error) {
     next(error);
@@ -259,7 +264,7 @@ router.get("/k8s", requireAuth, async (req: Request, res: Response, next: NextFu
 });
 
 // GET /api/settings/k8s/nodes — List K8s cluster nodes
-router.get("/k8s/nodes", requireAuth, async (req: Request, res: Response, next: NextFunction) => {
+router.get("/k8s/nodes", requireAuth, requirePermission("settings:read"), async (req: Request, res: Response, next: NextFunction) => {
   try {
     if (process.env.K8S_ENABLED !== "true") {
       res.json({ enabled: false, nodes: [] });
@@ -301,25 +306,30 @@ router.get("/k8s/nodes", requireAuth, async (req: Request, res: Response, next: 
 });
 
 // GET /api/settings/k8s/agent-command — Get the command to join a server as K3s agent
-router.get("/k8s/agent-command", requireAuth, async (req: Request, res: Response, next: NextFunction) => {
+router.get("/k8s/agent-command", requireAuth, requirePermission("settings:read"), async (req: Request, res: Response, next: NextFunction) => {
   try {
     if (process.env.K8S_ENABLED !== "true") {
       next(new BadRequestError("Kubernetes is not enabled. Set K8S_ENABLED=true to enable."));
       return;
     }
 
-    const serverUrl = process.env.K3S_SERVER_URL;
-    const token = process.env.K3S_TOKEN;
+    // Try to get join token from cluster service (reads from k3s token file)
+    const clusterRepo = useClusterRepo();
+    const localCluster = await clusterRepo.getLocalCluster();
+
+    let serverUrl = localCluster?.apiServerUrl || process.env.K3S_SERVER_URL;
+    let token = localCluster?.joinToken || process.env.K3S_TOKEN;
 
     if (!serverUrl || !token) {
       next(new BadRequestError(
-        "K3S_SERVER_URL and K3S_TOKEN are not configured. " +
-        "Run the K3s server setup script first."
+        "K3S join token is not available. " +
+        "Ensure the Control Plane API is running on the K3s master node, " +
+        "or set K3S_SERVER_URL and K3S_TOKEN environment variables."
       ));
       return;
     }
 
-    const command = `curl -sfL https://get.k3s.io | K3S_URL=${serverUrl} K3S_TOKEN=${token} sh -`;
+    const command = `curl -sfL https://get.k3s.io | K3S_URL=${serverUrl} K3S_TOKEN=${token} sh -s - agent`;
 
     res.json({
       serverUrl,
@@ -327,9 +337,62 @@ router.get("/k8s/agent-command", requireAuth, async (req: Request, res: Response
       instructions: [
         "SSH into the database server as root",
         "Run the command above",
-        "The server will automatically join the K3s cluster",
+        "The server will automatically join the K3s cluster as an agent",
         "New databases will use K8s-based provisioning",
       ],
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// GET /api/settings/k8s/operator — Get Percona MongoDB Operator status
+router.get("/k8s/operator", requireAuth, requirePermission("settings:read"), async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    if (process.env.K8S_ENABLED !== "true") {
+      res.json({
+        installed: false,
+        version: null,
+        namespace: "cp-databases",
+        status: "unknown",
+        error: "Kubernetes is not enabled",
+      });
+      return;
+    }
+
+    const percona = usePerconaService();
+    const operatorInfo = await percona.getOperatorStatus();
+
+    res.json(operatorInfo);
+  } catch (error) {
+    next(error);
+  }
+});
+
+// POST /api/settings/k8s/refresh-token — Refresh the K3s join token from the token file
+router.post("/k8s/refresh-token", requireAuth, requirePermission("settings:update"), async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    if (process.env.K8S_ENABLED !== "true") {
+      next(new BadRequestError("Kubernetes is not enabled. Set K8S_ENABLED=true to enable."));
+      return;
+    }
+
+    const clusterRepo = useClusterRepo();
+    const clusterService = useClusterService();
+    const localCluster = await clusterRepo.getLocalCluster();
+
+    if (!localCluster) {
+      next(new BadRequestError("No local cluster found. Initialize the cluster first."));
+      return;
+    }
+
+    // Refresh the token from the k3s token file
+    const updatedCluster = await clusterService.refreshJoinToken(localCluster._id!.toString());
+
+    res.json({
+      message: "Join token refreshed successfully.",
+      hasToken: !!updatedCluster.joinToken,
+      apiServerUrl: updatedCluster.apiServerUrl,
     });
   } catch (error) {
     next(error);
@@ -339,7 +402,7 @@ router.get("/k8s/agent-command", requireAuth, async (req: Request, res: Response
 // ---------------------------------------------------------------------------
 // GET /api/settings — all non-sensitive settings (token masked)
 // ---------------------------------------------------------------------------
-router.get("/", requireAuth, async (req: Request, res: Response, next: NextFunction) => {
+router.get("/", requireAuth, requirePermission("settings:read"), async (req: Request, res: Response, next: NextFunction) => {
   try {
     const repo = useSettingsRepo();
     const all = await repo.getAll();
@@ -359,7 +422,7 @@ router.get("/", requireAuth, async (req: Request, res: Response, next: NextFunct
 // ---------------------------------------------------------------------------
 // PUT /api/settings/:key — upsert a single generic setting
 // ---------------------------------------------------------------------------
-router.put("/:key", requireAuth, async (req: Request, res: Response, next: NextFunction) => {
+router.put("/:key", requireAuth, requirePermission("settings:update"), async (req: Request, res: Response, next: NextFunction) => {
   try {
     const key = req.params.key as string;
     const { value } = req.body;

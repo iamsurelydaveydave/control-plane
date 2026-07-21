@@ -8,11 +8,9 @@ export default function useApp() {
   const app = ref<TApp>({
     _id: '',
     name: '',
-    source: { type: 'image' },
-    serverIds: [],
-    env: {},
-    secretNames: [],
-    status: 'pending'
+    image: '',
+    status: 'pending',
+    desiredReplicas: 1
   })
 
   function getAll(options: { page?: number, search?: string } = {}) {
@@ -119,6 +117,46 @@ export default function useApp() {
     }>(`/apps/${id}/deployments`, { method: 'GET' })
   }
 
+  function getLatestDeployment(id: string) {
+    return useNuxtApp().$api<TDeploymentLatest>(`/apps/${id}/deployments/latest`, {
+      method: 'GET'
+    })
+  }
+
+  function getDeploymentStatus(appId: string, deploymentId: string) {
+    return useNuxtApp().$api<TDeploymentLatest>(
+      `/apps/${appId}/deployments/${deploymentId}/status`,
+      { method: 'GET' }
+    )
+  }
+
+  function requestDeploymentApproval(
+    id: string,
+    params: { version: string; environment: TDeploymentEnvironment }
+  ) {
+    return useNuxtApp().$api<{ message: string; approvalId: string; status: string }>(
+      `/apps/${id}/deploy/request`,
+      { method: 'POST', body: params }
+    )
+  }
+
+  function getApprovals(id: string, options?: { page?: number; limit?: number }) {
+    return useNuxtApp().$api<{
+      items: TDeploymentApproval[]
+      pages: number
+    }>(`/apps/${id}/approvals`, {
+      method: 'GET',
+      query: options
+    })
+  }
+
+  function updateGitHubSettings(id: string, github: TAppGitHub) {
+    return useNuxtApp().$api<{ message: string }>(`/apps/${id}`, {
+      method: 'PATCH',
+      body: { github }
+    })
+  }
+
   return {
     app,
     getAll,
@@ -134,6 +172,11 @@ export default function useApp() {
     restart,
     getLogs,
     getDeployments,
+    getLatestDeployment,
+    getDeploymentStatus,
+    requestDeploymentApproval,
+    getApprovals,
+    updateGitHubSettings,
     getVersion,
     exec
   }

@@ -1,0 +1,114 @@
+# =============================================================================
+# ServiceMonitor for Control Plane API
+#
+# This tells Prometheus to scrape the /api/prometheus/metrics endpoint
+# exposed by the control-plane-api service.
+#
+# Apply with:
+#   kubectl apply -f servicemonitor.yaml -n control-plane
+#
+# Prerequisites:
+#   - Prometheus Operator installed (via kube-prometheus-stack)
+#   - control-plane-api service exposing port 3000
+#   - control-plane-api exposing /api/prometheus/metrics endpoint
+# =============================================================================
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: control-plane-api
+  namespace: control-plane
+  labels:
+    app: control-plane-api
+    release: monitoring  # Must match Prometheus Operator release name
+spec:
+  # Selector for the Service to monitor
+  selector:
+    matchLabels:
+      app: control-plane-api
+  
+  # Namespaces to look for the Service
+  namespaceSelector:
+    matchNames:
+      - control-plane
+  
+  # Endpoints to scrape
+  endpoints:
+    - port: http  # Must match the Service port name
+      path: /api/prometheus/metrics
+      interval: 30s
+      scrapeTimeout: 10s
+      
+      # Basic auth if metrics endpoint is protected
+      # basicAuth:
+      #   username:
+      #     name: prometheus-basic-auth
+      #     key: username
+      #   password:
+      #     name: prometheus-basic-auth
+      #     key: password
+      
+      # TLS config if using HTTPS
+      # scheme: https
+      # tlsConfig:
+      #   insecureSkipVerify: true
+      
+      # Metric relabeling (optional)
+      metricRelabelings:
+        # Keep only metrics we care about (optional, reduces storage)
+        # - sourceLabels: [__name__]
+        #   regex: '(http_request_duration_seconds.*|nodejs_.*|process_.*|mongodb_.*|redis_.*|control_plane_.*)'
+        #   action: keep
+        
+        # Add a static label
+        - targetLabel: service
+          replacement: control-plane-api
+      
+      # Relabel configs (for adding/modifying labels)
+      relabelings:
+        # Add pod name as a label
+        - sourceLabels: [__meta_kubernetes_pod_name]
+          targetLabel: pod
+        
+        # Add node name as a label
+        - sourceLabels: [__meta_kubernetes_pod_node_name]
+          targetLabel: node
+
+---
+# =============================================================================
+# Optional: PodMonitor (alternative if you don't have a Service)
+# =============================================================================
+# apiVersion: monitoring.coreos.com/v1
+# kind: PodMonitor
+# metadata:
+#   name: control-plane-api
+#   namespace: control-plane
+#   labels:
+#     app: control-plane-api
+# spec:
+#   selector:
+#     matchLabels:
+#       app: control-plane-api
+#   podMetricsEndpoints:
+#     - port: http
+#       path: /api/prometheus/metrics
+#       interval: 30s
+
+---
+# =============================================================================
+# Dashboard ConfigMap for Grafana
+#
+# This makes the dashboard available to Grafana when using the
+# dashboardsConfigMaps feature in kube-prometheus-stack.
+# =============================================================================
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: control-plane-dashboard
+  namespace: monitoring
+  labels:
+    grafana_dashboard: "1"  # Label for Grafana sidecar to pick up
+data:
+  control-plane-dashboard.json: |
+    # Content from control-plane-dashboard.json goes here
+    # In production, use kustomize or helm to template this
+    # See: deploy/monitoring/control-plane-dashboard.json

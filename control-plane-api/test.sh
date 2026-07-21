@@ -161,7 +161,36 @@ function run_watch_mode() {
         setup_test_env
     fi
     
-    yarn test -- --watch
+    yarn test:watch
+}
+
+function run_coverage() {
+    print_header "Running Tests with Coverage"
+    
+    # Ensure test environment is running
+    if ! docker ps | grep -q cp-mongo-test; then
+        print_warning "Test environment not running. Starting it now..."
+        setup_test_env
+    fi
+    
+    # Check if c8 is installed
+    if ! yarn list --pattern c8 --depth=0 2>/dev/null | grep -q c8; then
+        print_warning "Coverage tool (c8) is not installed."
+        echo "To enable coverage, run:"
+        echo "  yarn add -D c8"
+        echo ""
+        echo "Then you can run tests with coverage using:"
+        echo "  npx c8 yarn test"
+        echo ""
+        echo "Running tests without coverage for now..."
+        yarn test
+        return
+    fi
+    
+    # Run with c8 coverage
+    npx c8 --reporter=text --reporter=html yarn test
+    
+    print_success "Coverage report generated in ./coverage/"
 }
 
 # Main command handler
@@ -183,6 +212,9 @@ case "${1:-all}" in
         ;;
     watch)
         run_watch_mode
+        ;;
+    coverage)
+        run_coverage
         ;;
     help|--help|-h)
         show_usage

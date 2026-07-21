@@ -1,21 +1,36 @@
 # Control Plane Web Dockerfile
 # Multi-stage build for Nuxt 4 SSR production
 
+# Build arguments for metadata
+ARG VERSION=dev
+ARG BUILD_DATE
+ARG VCS_REF
+
 # ================================
-# Stage 1: Build
+# Stage 1: Dependencies
 # ================================
-FROM node:22-alpine AS builder
+FROM node:22-alpine AS deps
 
 WORKDIR /app
 
 # Enable corepack for pnpm
 RUN corepack enable && corepack prepare pnpm@11.13.1 --activate
 
-# Copy package files
-COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+# Copy package files first for better layer caching
+COPY package.json pnpm-lock.yaml ./
+
+# Copy workspace config if it exists
+COPY pnpm-workspace.yaml* ./
 
 # Install dependencies
 RUN pnpm install --frozen-lockfile
+
+# ================================
+# Stage 2: Build
+# ================================
+FROM deps AS builder
+
+WORKDIR /app
 
 # Copy source code
 COPY . .
@@ -55,6 +70,14 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
 
 # Run as non-root user
 USER controlplane
+
+# Labels for metadata
+LABEL org.opencontainers.image.title="Control Plane Web" \
+      org.opencontainers.image.description="Control Plane Web UI" \
+      org.opencontainers.image.version="${VERSION}" \
+      org.opencontainers.image.created="${BUILD_DATE}" \
+      org.opencontainers.image.revision="${VCS_REF}" \
+      org.opencontainers.image.source="https://github.com/goweekdays/control-plane"
 
 # Start the Nuxt server
 CMD ["node", ".output/server/index.mjs"]

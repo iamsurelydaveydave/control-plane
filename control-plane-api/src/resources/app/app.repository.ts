@@ -23,6 +23,9 @@ export function useAppRepo() {
         { key: { status: 1 } },
         { key: { "proxy.host": 1 }, sparse: true },
         { key: { serverIds: 1 } },
+        // GitHub integration indexes
+        { key: { "github.owner": 1, "github.repo": 1 }, sparse: true },
+        { key: { environment: 1 }, sparse: true },
       ]);
     } catch (error) {
       logger.log({
@@ -275,6 +278,41 @@ export function useAppRepo() {
     }
   }
 
+  async function getByGitHubRepo(owner: string, repoName: string): Promise<TApp[]> {
+    const cacheKey = makeCacheKey(namespace_collection, {
+      owner,
+      repo: repoName,
+      tag: "by-github-repo",
+    });
+
+    try {
+      const cached = await repo.getCache<TApp[]>(cacheKey);
+      if (cached) {
+        return cached;
+      }
+
+      const apps = await repo.collection
+        .find<TApp>({
+          "github.enabled": true,
+          "github.owner": owner,
+          "github.repo": repoName,
+        })
+        .toArray();
+
+      repo.setCache(cacheKey, apps, 60).catch((err) => {
+        logger.log({
+          level: "error",
+          message: `Failed to set cache for apps by GitHub repo: ${err.message}`,
+        });
+      });
+
+      return apps;
+    } catch (error) {
+      logger.log({ level: "error", message: `${error}` });
+      throw new InternalServerError("Failed to get apps by GitHub repo");
+    }
+  }
+
   return {
     createIndexes,
     add,
@@ -286,5 +324,6 @@ export function useAppRepo() {
     countByServerId,
     getByServerId,
     deleteById,
+    getByGitHubRepo,
   };
 }

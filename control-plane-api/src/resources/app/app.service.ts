@@ -1,94 +1,762 @@
 import { ObjectId } from "mongodb";
+import * as k8s from "@kubernetes/client-node";
 import { useAppRepo } from "./app.repository";
-import { useInstanceRepo } from "../instance/instance.repository";
-import { useServerRepo } from "../server/server.repository";
-import { useCaddyService, TAppForCaddy, TInstanceForCaddy, TServerForCaddy } from "../../services/caddy.service";
-import { useDockerExecutor } from "../../services/docker.executor";
-import { TApp } from "./app.model";
-import { TServer } from "../server/server.model";
-import { BadRequestError, NotFoundError, logger } from "../../utils";
+import { TApp, TAppK8sConfig } from "./app.model";
+import { useKubernetesService } from "../../services/kubernetes.service";
+import { BadRequestError, NotFoundError, InternalServerError, logger } from "../../utils";
+import { useWebhookService } from "../webhook/webhook.service";
+
+// K8s namespace for all apps deployed via Control Plane
+const CP_APPS_NAMESPACE = "cp-apps";
+
+// Check if K8s is enabled
+const K8S_ENABLED = process.env.K8S_ENABLED === "true";
+
+// Resource naming helpers
+function getDeploymentName(appName: string): string {
+  return `cp-app-${appName}`;
+}
+
+function getServiceName(appName: string): string {
+  return `cp-app-${appName}`;
+}
+
+function getIngressName(appName: string): string {
+  return `cp-app-${appName}`;
+}
+
+function getSecretName(appName: string): string {
+  return `cp-app-${appName}-env`;
+}
 
 /**
  * App Service
- * Business logic for app deployment, scaling, and routing
- * 
- * In the Kamal-style model:
- * - One instance per server (serverIds defines the servers to deploy to)
- * - No "replicas" concept - you scale by adding/removing servers
- * - Each server gets one container running the app
+ * Business logic for K8s-based app deployment, scaling, and routing
  */
 export function useAppService() {
   const appRepo = useAppRepo();
-  const instanceRepo = useInstanceRepo();
-  const serverRepo = useServerRepo();
-  const caddyService = useCaddyService();
-  const dockerExecutor = useDockerExecutor();
+  const k8s = useKubernetesService();
+  const webhookService = useWebhookService();
 
   /**
-   * Helper: Load server by ID
+   * Check if K8s is enabled and available
    */
-  async function loadServer(serverId: ObjectId): Promise<TServer> {
-    const server = await serverRepo.getById(serverId);
-    if (!server) {
-      throw new NotFoundError(`Server ${serverId} not found`);
+  async function ensureK8sAvailable(): Promise<void> {
+    if (!K8S_ENABLED) {
+      throw new BadRequestError("Kubernetes integration is not enabled. Set K8S_ENABLED=true to enable.");
     }
-    return server;
+    k8s.init();
+    const available = await k8s.isAvailable();
+    if (!available) {
+      throw new InternalServerError("Kubernetes cluster is not reachable. Check cluster connectivity.");
+    }
   }
 
   /**
-   * Helper: Load servers as a Map for Caddy
+   * Ensure the cp-apps namespace exists
    */
-  async function loadServersMap(
-    serverIds: ObjectId[]
-  ): Promise<Map<string, TServerForCaddy>> {
-    const serverMap = new Map<string, TServerForCaddy>();
-
-    for (const serverId of serverIds) {
-      const server = await serverRepo.getById(serverId);
-      if (server) {
-        serverMap.set(serverId.toString(), {
-          _id: server._id!,
-          host: server.host,
-          privateIp: server.privateIp,
-        });
-      }
-    }
-
-    return serverMap;
+  async function ensureNamespace(): Promise<void> {
+    await k8s.createNamespace(CP_APPS_NAMESPACE, {
+      "app.kubernetes.io/part-of": "control-plane",
+    });
   }
 
   /**
-   * Helper: Convert app to Caddy format
+   * Get app by ID
    */
-  function appForCaddy(app: TApp): TAppForCaddy {
+  async function getApp(appId: string | ObjectId): Promise<TApp | null> {
+    return appRepo.getById(appId);
+  }
+
+  /**
+   * Build K8s Deployment spec from app configuration
+   */
+  function buildDeploymentSpec(app: TApp, k8sConfig: TAppK8sConfig): k8s.V1Deployment {
+    const deploymentName = getDeploymentName(app.name);
+    const secretName = getSecretName(app.name);
+
+    const deployment: k8s.V1Deployment = {
+      apiVersion: "apps/v1",
+      kind: "Deployment",
+      metadata: {
+        name: deploymentName,
+        namespace: CP_APPS_NAMESPACE,
+        labels: {
+          app: app.name,
+          "app.kubernetes.io/name": app.name,
+          "app.kubernetes.io/managed-by": "controlplane",
+          ...app.labels,
+        },
+      },
+      spec: {
+        replicas: k8sConfig.replicas,
+        selector: {
+          matchLabels: {
+            app: app.name,
+          },
+        },
+        template: {
+          metadata: {
+            labels: {
+              app: app.name,
+              "app.kubernetes.io/name": app.name,
+              "app.kubernetes.io/managed-by": "controlplane",
+            },
+          },
+          spec: {
+            containers: [
+              {
+                name: "app",
+                image: k8sConfig.image,
+                ports: [
+                  {
+                    containerPort: k8sConfig.port,
+                    protocol: "TCP",
+                  },
+                ],
+                envFrom: [
+                  {
+                    secretRef: {
+                      name: secretName,
+                    },
+                  },
+                ],
+                resources: {
+                  requests: {
+                    memory: k8sConfig.resourceRequests?.memory ?? "128Mi",
+                    cpu: k8sConfig.resourceRequests?.cpu ?? "100m",
+                  },
+                  limits: {
+                    memory: k8sConfig.resourceLimits?.memory ?? "512Mi",
+                    cpu: k8sConfig.resourceLimits?.cpu ?? "500m",
+                  },
+                },
+              },
+            ],
+          },
+        },
+      },
+    };
+
+    // Add health check if configured
+    if (app.healthCheck) {
+      const container = deployment.spec!.template.spec!.containers[0];
+      container.readinessProbe = {
+        httpGet: {
+          path: app.healthCheck.path,
+          port: app.healthCheck.port ?? k8sConfig.port,
+        },
+        initialDelaySeconds: app.healthCheck.startPeriod ?? 10,
+        periodSeconds: app.healthCheck.interval ?? 30,
+        timeoutSeconds: app.healthCheck.timeout ?? 5,
+        failureThreshold: app.healthCheck.retries ?? 3,
+      };
+      container.livenessProbe = {
+        httpGet: {
+          path: app.healthCheck.path,
+          port: app.healthCheck.port ?? k8sConfig.port,
+        },
+        initialDelaySeconds: (app.healthCheck.startPeriod ?? 10) + 10,
+        periodSeconds: app.healthCheck.interval ?? 30,
+        timeoutSeconds: app.healthCheck.timeout ?? 5,
+        failureThreshold: app.healthCheck.retries ?? 3,
+      };
+    }
+
+    return deployment;
+  }
+
+  /**
+   * Build K8s Service spec from app configuration
+   */
+  function buildServiceSpec(app: TApp, k8sConfig: TAppK8sConfig): k8s.V1Service {
+    const serviceName = getServiceName(app.name);
+
     return {
-      _id: app._id!,
-      domain: app.proxy?.host, // Domain comes from proxy.host
-      healthCheck: app.healthCheck ? {
-        path: app.healthCheck.path,
-        interval: app.healthCheck.interval || 30,
-        timeout: app.healthCheck.timeout || 5,
-      } : undefined,
-      loadBalancer: { policy: "round_robin" },
+      apiVersion: "v1",
+      kind: "Service",
+      metadata: {
+        name: serviceName,
+        namespace: CP_APPS_NAMESPACE,
+        labels: {
+          app: app.name,
+          "app.kubernetes.io/name": app.name,
+          "app.kubernetes.io/managed-by": "controlplane",
+        },
+      },
+      spec: {
+        type: "ClusterIP",
+        selector: {
+          app: app.name,
+        },
+        ports: [
+          {
+            port: k8sConfig.port,
+            targetPort: k8sConfig.port,
+            protocol: "TCP",
+            name: "http",
+          },
+        ],
+      },
     };
   }
 
   /**
-   * Helper: Convert instances to Caddy format
+   * Build K8s Ingress spec from app configuration (Traefik-compatible)
    */
-  function instancesForCaddy(instances: Array<{ _id?: ObjectId; appId: ObjectId; serverId: ObjectId; port: number; status: string }>): TInstanceForCaddy[] {
-    return instances.map((i) => ({
-      _id: i._id!,
-      appId: i.appId,
-      serverId: i.serverId,
-      port: i.port,
-      status: i.status,
-    }));
+  function buildIngressSpec(app: TApp, k8sConfig: TAppK8sConfig): k8s.V1Ingress | null {
+    const domain = k8sConfig.domain ?? app.proxy?.host;
+    if (!domain) {
+      return null; // No domain configured, skip Ingress
+    }
+
+    const ingressName = getIngressName(app.name);
+    const serviceName = getServiceName(app.name);
+
+    const ingress: k8s.V1Ingress = {
+      apiVersion: "networking.k8s.io/v1",
+      kind: "Ingress",
+      metadata: {
+        name: ingressName,
+        namespace: CP_APPS_NAMESPACE,
+        labels: {
+          app: app.name,
+          "app.kubernetes.io/name": app.name,
+          "app.kubernetes.io/managed-by": "controlplane",
+        },
+        annotations: {
+          // Traefik-specific annotations (K3s default ingress controller)
+          "traefik.ingress.kubernetes.io/router.entrypoints": app.proxy?.ssl ? "websecure" : "web",
+        },
+      },
+      spec: {
+        rules: [
+          {
+            host: domain,
+            http: {
+              paths: [
+                {
+                  path: "/",
+                  pathType: "Prefix",
+                  backend: {
+                    service: {
+                      name: serviceName,
+                      port: {
+                        number: k8sConfig.port,
+                      },
+                    },
+                  },
+                },
+              ],
+            },
+          },
+        ],
+      },
+    };
+
+    // Add TLS configuration if SSL is enabled
+    if (app.proxy?.ssl) {
+      ingress.metadata!.annotations = {
+        ...ingress.metadata!.annotations,
+        "traefik.ingress.kubernetes.io/router.tls": "true",
+        "traefik.ingress.kubernetes.io/router.tls.certresolver": "letsencrypt",
+      };
+      ingress.spec!.tls = [
+        {
+          hosts: [domain],
+          secretName: `${app.name}-tls`,
+        },
+      ];
+    }
+
+    return ingress;
   }
 
   /**
-   * Sync Caddy routing for an app
-   * Call after any change that affects routing
+   * Deploy an app to Kubernetes
+   * Creates/updates Deployment, Service, Ingress, and Secret
+   */
+  async function deploy(
+    appId: string | ObjectId,
+    options: { version?: string } = {}
+  ): Promise<{ message: string; errors: string[] }> {
+    // Ensure K8s is available before proceeding
+    await ensureK8sAvailable();
+
+    const app = await appRepo.getById(appId);
+    if (!app) {
+      throw new NotFoundError("App not found");
+    }
+
+    // Validate K8s configuration
+    const k8sConfig = getK8sConfig(app);
+    if (!k8sConfig) {
+      throw new BadRequestError(
+        "App must have k8s configuration with image specified. Update the app with k8s: { image, port, replicas, domain, envVars }"
+      );
+    }
+
+    const errors: string[] = [];
+
+    // Update status to deploying
+    await appRepo.updateStatus(appId, "deploying");
+
+    try {
+      // Ensure namespace exists
+      await ensureNamespace();
+
+      // 1. Create/update Secret for environment variables
+      const secretName = getSecretName(app.name);
+      const envVars = {
+        ...app.env,
+        ...k8sConfig.envVars,
+      };
+      await k8s.createSecret(CP_APPS_NAMESPACE, secretName, envVars, {
+        app: app.name,
+      });
+      logger.log({ level: "info", message: `[AppService] Created/updated secret ${secretName}` });
+
+      // 2. Create/update Deployment
+      const deploymentName = getDeploymentName(app.name);
+      const deploymentSpec = buildDeploymentSpec(app, k8sConfig);
+
+      const existingDeployment = await k8s.getDeployment(CP_APPS_NAMESPACE, deploymentName);
+      if (existingDeployment) {
+        // Preserve resourceVersion for update
+        deploymentSpec.metadata!.resourceVersion = existingDeployment.metadata?.resourceVersion;
+        await k8s.updateDeployment(CP_APPS_NAMESPACE, deploymentName, deploymentSpec);
+        logger.log({ level: "info", message: `[AppService] Updated deployment ${deploymentName}` });
+      } else {
+        await k8s.createDeployment(CP_APPS_NAMESPACE, deploymentSpec);
+        logger.log({ level: "info", message: `[AppService] Created deployment ${deploymentName}` });
+      }
+
+      // 3. Create/update Service
+      const serviceName = getServiceName(app.name);
+      const serviceSpec = buildServiceSpec(app, k8sConfig);
+
+      const existingService = await k8s.getService(CP_APPS_NAMESPACE, serviceName);
+      if (existingService) {
+        // Preserve clusterIP and resourceVersion for update
+        serviceSpec.spec!.clusterIP = existingService.spec?.clusterIP;
+        serviceSpec.metadata!.resourceVersion = existingService.metadata?.resourceVersion;
+        await k8s.updateService(CP_APPS_NAMESPACE, serviceName, serviceSpec);
+        logger.log({ level: "info", message: `[AppService] Updated service ${serviceName}` });
+      } else {
+        await k8s.createService(CP_APPS_NAMESPACE, serviceSpec);
+        logger.log({ level: "info", message: `[AppService] Created service ${serviceName}` });
+      }
+
+      // 4. Create/update Ingress (if domain is configured)
+      const ingressSpec = buildIngressSpec(app, k8sConfig);
+      if (ingressSpec) {
+        const ingressName = getIngressName(app.name);
+        const existingIngress = await k8s.getIngress(CP_APPS_NAMESPACE, ingressName);
+        if (existingIngress) {
+          ingressSpec.metadata!.resourceVersion = existingIngress.metadata?.resourceVersion;
+          await k8s.updateIngress(CP_APPS_NAMESPACE, ingressName, ingressSpec);
+          logger.log({ level: "info", message: `[AppService] Updated ingress ${ingressName}` });
+        } else {
+          await k8s.createIngress(CP_APPS_NAMESPACE, ingressSpec);
+          logger.log({ level: "info", message: `[AppService] Created ingress ${ingressName}` });
+        }
+      }
+
+      // Update app record with deployment info
+      await appRepo.updateById(appId, {
+        currentImage: k8sConfig.image,
+        currentVersion: options.version ?? extractVersionFromImage(k8sConfig.image),
+        desiredReplicas: k8sConfig.replicas,
+      });
+      await appRepo.updateStatus(appId, "running");
+
+      const domain = k8sConfig.domain ?? app.proxy?.host;
+
+      // Trigger webhook notification
+      webhookService.trigger("app.deployed", {
+        appId: app._id?.toString(),
+        appName: app.name,
+        version: options.version ?? extractVersionFromImage(k8sConfig.image),
+        domain,
+        replicas: k8sConfig.replicas,
+        deployedAt: new Date().toISOString(),
+      });
+
+      return {
+        message: `Successfully deployed ${app.name}${domain ? ` to ${domain}` : ""}`,
+        errors,
+      };
+    } catch (error: any) {
+      logger.log({
+        level: "error",
+        message: `[AppService] Deploy failed for ${app.name}: ${error.message}`,
+      });
+      errors.push(error.message);
+      await appRepo.updateStatus(appId, "failed");
+
+      // Trigger webhook notification for failure
+      webhookService.trigger("app.failed", {
+        appId: typeof appId === "string" ? appId : appId.toString(),
+        appName: app.name,
+        error: error.message,
+        failedAt: new Date().toISOString(),
+      });
+
+      throw new InternalServerError(`Deployment failed: ${error.message}`);
+    }
+  }
+
+  /**
+   * Stop an app (scale to 0 replicas)
+   */
+  async function stop(appId: string | ObjectId): Promise<{ message: string; errors: string[] }> {
+    const app = await appRepo.getById(appId);
+    if (!app) {
+      throw new NotFoundError("App not found");
+    }
+
+    const errors: string[] = [];
+
+    try {
+      const deploymentName = getDeploymentName(app.name);
+
+      // Get current replica count before scaling down
+      const deployment = await k8s.getDeployment(CP_APPS_NAMESPACE, deploymentName);
+      if (!deployment) {
+        throw new BadRequestError(`App ${app.name} has no active deployment`);
+      }
+
+      const currentReplicas = deployment.spec?.replicas ?? 1;
+
+      // Store current replicas before scaling to 0
+      await appRepo.updateById(appId, { desiredReplicas: currentReplicas });
+
+      // Scale to 0
+      await k8s.scaleDeployment(CP_APPS_NAMESPACE, deploymentName, 0);
+      await appRepo.updateStatus(appId, "stopped");
+
+      // Trigger webhook notification
+      webhookService.trigger("app.stopped", {
+        appId: app._id?.toString(),
+        appName: app.name,
+        previousReplicas: currentReplicas,
+        stoppedAt: new Date().toISOString(),
+      });
+
+      logger.log({
+        level: "info",
+        message: `[AppService] Stopped app ${app.name} (was ${currentReplicas} replicas)`,
+      });
+
+      return {
+        message: `Stopped ${app.name}`,
+        errors,
+      };
+    } catch (error: any) {
+      logger.log({
+        level: "error",
+        message: `[AppService] Stop failed for ${app.name}: ${error.message}`,
+      });
+      errors.push(error.message);
+      throw error;
+    }
+  }
+
+  /**
+   * Start an app (scale back to desired replicas)
+   */
+  async function start(appId: string | ObjectId): Promise<{ message: string; errors: string[] }> {
+    const app = await appRepo.getById(appId);
+    if (!app) {
+      throw new NotFoundError("App not found");
+    }
+
+    const errors: string[] = [];
+
+    try {
+      const deploymentName = getDeploymentName(app.name);
+
+      // Check deployment exists
+      const deployment = await k8s.getDeployment(CP_APPS_NAMESPACE, deploymentName);
+      if (!deployment) {
+        throw new BadRequestError(`App ${app.name} has no active deployment. Run deploy first.`);
+      }
+
+      // Get desired replicas from app record (stored when stopped) or default to 1
+      const replicas = app.desiredReplicas ?? app.k8s?.replicas ?? 1;
+
+      // Scale up
+      await k8s.scaleDeployment(CP_APPS_NAMESPACE, deploymentName, replicas);
+      await appRepo.updateStatus(appId, "running");
+
+      // Trigger webhook notification
+      webhookService.trigger("app.started", {
+        appId: app._id?.toString(),
+        appName: app.name,
+        replicas,
+        startedAt: new Date().toISOString(),
+      });
+
+      logger.log({
+        level: "info",
+        message: `[AppService] Started app ${app.name} with ${replicas} replicas`,
+      });
+
+      return {
+        message: `Started ${app.name} with ${replicas} replicas`,
+        errors,
+      };
+    } catch (error: any) {
+      logger.log({
+        level: "error",
+        message: `[AppService] Start failed for ${app.name}: ${error.message}`,
+      });
+      errors.push(error.message);
+      throw error;
+    }
+  }
+
+  /**
+   * Restart an app (rolling restart via annotation update)
+   */
+  async function restart(appId: string | ObjectId): Promise<{ message: string; errors: string[] }> {
+    const app = await appRepo.getById(appId);
+    if (!app) {
+      throw new NotFoundError("App not found");
+    }
+
+    const errors: string[] = [];
+
+    try {
+      const deploymentName = getDeploymentName(app.name);
+
+      // Check deployment exists
+      const deployment = await k8s.getDeployment(CP_APPS_NAMESPACE, deploymentName);
+      if (!deployment) {
+        throw new BadRequestError(`App ${app.name} has no active deployment`);
+      }
+
+      // Trigger rolling restart
+      await k8s.restartDeployment(CP_APPS_NAMESPACE, deploymentName);
+
+      logger.log({
+        level: "info",
+        message: `[AppService] Restarted app ${app.name}`,
+      });
+
+      return {
+        message: `Restarted ${app.name}`,
+        errors,
+      };
+    } catch (error: any) {
+      logger.log({
+        level: "error",
+        message: `[AppService] Restart failed for ${app.name}: ${error.message}`,
+      });
+      errors.push(error.message);
+      throw error;
+    }
+  }
+
+  /**
+   * Scale an app to specified replicas
+   */
+  async function scale(
+    appId: string | ObjectId,
+    replicas: number
+  ): Promise<{ message: string; errors: string[] }> {
+    const app = await appRepo.getById(appId);
+    if (!app) {
+      throw new NotFoundError("App not found");
+    }
+
+    if (replicas < 0) {
+      throw new BadRequestError("Replicas must be >= 0");
+    }
+
+    const errors: string[] = [];
+
+    try {
+      const deploymentName = getDeploymentName(app.name);
+
+      // Check deployment exists
+      const deployment = await k8s.getDeployment(CP_APPS_NAMESPACE, deploymentName);
+      if (!deployment) {
+        throw new BadRequestError(`App ${app.name} has no active deployment`);
+      }
+
+      // Scale
+      await k8s.scaleDeployment(CP_APPS_NAMESPACE, deploymentName, replicas);
+
+      // Update app record
+      await appRepo.scale(appId, replicas);
+
+      // Update status based on replica count
+      if (replicas === 0) {
+        await appRepo.updateStatus(appId, "stopped");
+      } else if (app.status === "stopped") {
+        await appRepo.updateStatus(appId, "running");
+      }
+
+      logger.log({
+        level: "info",
+        message: `[AppService] Scaled app ${app.name} to ${replicas} replicas`,
+      });
+
+      return {
+        message: `Scaled ${app.name} to ${replicas} replicas`,
+        errors,
+      };
+    } catch (error: any) {
+      logger.log({
+        level: "error",
+        message: `[AppService] Scale failed for ${app.name}: ${error.message}`,
+      });
+      errors.push(error.message);
+      throw error;
+    }
+  }
+
+  /**
+   * Delete an app and all its K8s resources
+   */
+  async function deleteApp(appId: string | ObjectId): Promise<{ message: string; errors: string[] }> {
+    const app = await appRepo.getById(appId);
+    if (!app) {
+      throw new NotFoundError("App not found");
+    }
+
+    const errors: string[] = [];
+
+    // Delete K8s resources (best effort - don't fail if resources don't exist)
+    try {
+      const deploymentName = getDeploymentName(app.name);
+      await k8s.deleteDeployment(CP_APPS_NAMESPACE, deploymentName);
+      logger.log({ level: "info", message: `[AppService] Deleted deployment ${deploymentName}` });
+    } catch (error: any) {
+      logger.log({
+        level: "warn",
+        message: `[AppService] Failed to delete deployment: ${error.message}`,
+      });
+      errors.push(`Deployment deletion: ${error.message}`);
+    }
+
+    try {
+      const serviceName = getServiceName(app.name);
+      await k8s.deleteService(CP_APPS_NAMESPACE, serviceName);
+      logger.log({ level: "info", message: `[AppService] Deleted service ${serviceName}` });
+    } catch (error: any) {
+      logger.log({
+        level: "warn",
+        message: `[AppService] Failed to delete service: ${error.message}`,
+      });
+      errors.push(`Service deletion: ${error.message}`);
+    }
+
+    try {
+      const ingressName = getIngressName(app.name);
+      await k8s.deleteIngress(CP_APPS_NAMESPACE, ingressName);
+      logger.log({ level: "info", message: `[AppService] Deleted ingress ${ingressName}` });
+    } catch (error: any) {
+      logger.log({
+        level: "warn",
+        message: `[AppService] Failed to delete ingress: ${error.message}`,
+      });
+      errors.push(`Ingress deletion: ${error.message}`);
+    }
+
+    try {
+      const secretName = getSecretName(app.name);
+      await k8s.deleteSecret(CP_APPS_NAMESPACE, secretName);
+      logger.log({ level: "info", message: `[AppService] Deleted secret ${secretName}` });
+    } catch (error: any) {
+      logger.log({
+        level: "warn",
+        message: `[AppService] Failed to delete secret: ${error.message}`,
+      });
+      errors.push(`Secret deletion: ${error.message}`);
+    }
+
+    // Delete app record from MongoDB
+    await appRepo.deleteById(appId);
+
+    logger.log({
+      level: "info",
+      message: `[AppService] Deleted app ${app.name} and all resources`,
+    });
+
+    return {
+      message: `Deleted ${app.name} and all associated resources`,
+      errors,
+    };
+  }
+
+  /**
+   * Get logs from app pods
+   */
+  async function getLogs(
+    appId: string | ObjectId,
+    options: { tailLines?: number; container?: string; podName?: string } = {}
+  ): Promise<{ logs: string; podName: string }[]> {
+    const app = await appRepo.getById(appId);
+    if (!app) {
+      throw new NotFoundError("App not found");
+    }
+
+    const tailLines = options.tailLines ?? 100;
+    const results: { logs: string; podName: string }[] = [];
+
+    try {
+      // List pods for this app
+      const pods = await k8s.listPods(CP_APPS_NAMESPACE, `app=${app.name}`);
+
+      if (pods.length === 0) {
+        throw new BadRequestError(`No pods found for app ${app.name}`);
+      }
+
+      // If specific pod requested, get just that one
+      const targetPods = options.podName
+        ? pods.filter((p) => p.metadata?.name === options.podName)
+        : pods;
+
+      if (targetPods.length === 0) {
+        throw new BadRequestError(`Pod ${options.podName} not found for app ${app.name}`);
+      }
+
+      // Get logs from each pod
+      for (const pod of targetPods) {
+        const podName = pod.metadata?.name;
+        if (!podName) continue;
+
+        try {
+          const logs = await k8s.getPodLogs(
+            CP_APPS_NAMESPACE,
+            podName,
+            options.container ?? "app",
+            tailLines
+          );
+          results.push({ podName, logs });
+        } catch (error: any) {
+          logger.log({
+            level: "warn",
+            message: `[AppService] Failed to get logs for pod ${podName}: ${error.message}`,
+          });
+          results.push({ podName, logs: `Error: ${error.message}` });
+        }
+      }
+
+      return results;
+    } catch (error: any) {
+      logger.log({
+        level: "error",
+        message: `[AppService] getLogs failed for ${app.name}: ${error.message}`,
+      });
+      throw error;
+    }
+  }
+
+  /**
+   * Sync routing for an app (update Ingress)
    */
   async function syncRouting(appId: string | ObjectId): Promise<void> {
     const app = await appRepo.getById(appId);
@@ -100,387 +768,211 @@ export function useAppService() {
       return;
     }
 
-    const instances = await instanceRepo.getByAppId(appId);
-    const serverMap = await loadServersMap(app.serverIds);
-
-    await caddyService.syncAppRouting(
-      appForCaddy(app),
-      instancesForCaddy(instances),
-      serverMap
-    );
-  }
-
-  /**
-   * Deploy an app
-   * Creates one instance per server and updates routing
-   */
-  async function deploy(
-    appId: string | ObjectId,
-    options: { version?: string } = {}
-  ): Promise<{ message: string; instances: ObjectId[]; errors: string[] }> {
-    const app = await appRepo.getById(appId);
-    if (!app) {
-      throw new NotFoundError("App not found");
-    }
-
-    // Pre-flight: verify all target servers are ready before touching any state
-    for (const serverId of app.serverIds) {
-      const server = await serverRepo.getById(serverId);
-      if (!server) {
-        throw new NotFoundError(`Server ${serverId} not found`);
-      }
-      if (server.status !== "online") {
-        throw new BadRequestError(
-          `Server "${server.name}" is not ready for deployment (status: ${server.status}). Complete server setup first.`
-        );
-      }
-      if (!server.dockerInstalled) {
-        throw new BadRequestError(
-          `Server "${server.name}" does not have Docker installed. Complete server setup first.`
-        );
-      }
-    }
-
-    // Update version/image if provided
-    if (options.version && app.source.type === "image") {
-      const newImage = app.source.image?.replace(/:.*$/, `:${options.version}`) || options.version;
-      await appRepo.updateById(appId, { 
-        source: { ...app.source, image: newImage },
-        currentVersion: options.version,
-        currentImage: newImage,
-      });
-      app.source.image = newImage;
-      app.currentVersion = options.version;
-      app.currentImage = newImage;
-    }
-
-    // Set status to deploying
-    await appRepo.updateStatus(appId, "deploying");
-
-    // Get existing instances
-    const existingInstances = await instanceRepo.getByAppId(appId);
-
-    // In Kamal-style: one instance per server
-    const desiredServerIds = new Set(app.serverIds.map(id => id.toString()));
-    const existingServerIds = new Set(existingInstances.map(i => i.serverId.toString()));
-
-    const newInstanceIds: ObjectId[] = [];
-    const errors: string[] = [];
-
-    try {
-      // Create instances for new servers
-      for (const serverId of app.serverIds) {
-        if (!existingServerIds.has(serverId.toString())) {
-          // Calculate port (base port + offset for this server)
-          const existingOnServer = existingInstances.filter(
-            (inst) => inst.serverId.equals(serverId)
-          ).length;
-          const port = 3001 + existingOnServer;
-
-          const instanceId = await instanceRepo.add({
-            appId: new ObjectId(appId),
-            serverId,
-            port,
-          });
-
-          newInstanceIds.push(instanceId);
-
-          // Deploy container
-          const server = await loadServer(serverId);
-          const instance = await instanceRepo.getById(instanceId);
-          
-          if (instance) {
-            const result = await dockerExecutor.deployContainer(app, instance, server);
-            
-            if (result.success) {
-              await instanceRepo.updateStatus(instanceId, "running", result.containerId);
-            } else {
-              await instanceRepo.updateStatus(instanceId, "unhealthy");
-              errors.push(`Instance on ${server.host}: ${result.error}`);
-            }
-          }
-        }
-      }
-
-      // Redeploy existing instances (for image/config updates)
-      for (const instance of existingInstances) {
-        if (desiredServerIds.has(instance.serverId.toString())) {
-          const server = await loadServer(instance.serverId);
-          const result = await dockerExecutor.deployContainer(app, instance, server);
-          
-          if (result.success) {
-            await instanceRepo.updateStatus(instance._id!, "running", result.containerId);
-          } else {
-            await instanceRepo.updateStatus(instance._id!, "unhealthy");
-            errors.push(`Instance on ${server.host}: ${result.error}`);
-          }
-        }
-      }
-
-      // Remove instances from servers no longer in serverIds
-      for (const instance of existingInstances) {
-        if (!desiredServerIds.has(instance.serverId.toString())) {
-          const server = await loadServer(instance.serverId);
-          await dockerExecutor.stopContainer(app.name, instance, server);
-          await instanceRepo.deleteById(instance._id!);
-        }
-      }
-
-      // Update app status based on results
-      const allInstances = await instanceRepo.getByAppId(appId);
-      const runningCount = allInstances.filter((i) => i.status === "running").length;
-      const totalCount = app.serverIds.length;
-      
-      if (runningCount === 0) {
-        await appRepo.updateStatus(appId, "failed");
-      } else {
-        await appRepo.updateStatus(appId, "running");
-        if (runningCount < totalCount) {
-          logger.log({
-            level: "warn",
-            message: `App ${app.name} deployed with ${runningCount}/${totalCount} instances`,
-          });
-        }
-      }
-
-      // Sync routing with Caddy
-      await syncRouting(appId);
-
+    const k8sConfig = getK8sConfig(app);
+    if (!k8sConfig) {
       logger.log({
-        level: "info",
-        message: `Deployed app ${app.name} with ${runningCount}/${totalCount} instances`,
-      });
-
-      return {
-        message: `Deployed ${app.name} with ${runningCount}/${totalCount} instances`,
-        instances: [...existingInstances.map((i) => i._id!), ...newInstanceIds],
-        errors,
-      };
-    } catch (error: any) {
-      // Mark as failed on error
-      await appRepo.updateStatus(appId, "failed");
-
-      logger.log({
-        level: "error",
-        message: `Deploy failed for app ${app.name}: ${error.message}`,
-      });
-
-      throw error;
-    }
-  }
-
-  /**
-   * Restart an app
-   * Restarts all instances and syncs routing
-   */
-  async function restart(appId: string | ObjectId): Promise<{ message: string; errors: string[] }> {
-    const app = await appRepo.getById(appId);
-    if (!app) {
-      throw new NotFoundError("App not found");
-    }
-
-    await appRepo.updateStatus(appId, "deploying");
-
-    const instances = await instanceRepo.getByAppId(appId);
-    const errors: string[] = [];
-
-    for (const instance of instances) {
-      await instanceRepo.updateStatus(instance._id!, "starting");
-      
-      const server = await loadServer(instance.serverId);
-      const result = await dockerExecutor.restartContainer(app.name, instance, server);
-      
-      if (result.success) {
-        await instanceRepo.updateStatus(instance._id!, "running");
-      } else {
-        await instanceRepo.updateStatus(instance._id!, "unhealthy");
-        errors.push(`Instance on ${server.host}: ${result.error}`);
-      }
-    }
-
-    await appRepo.updateStatus(appId, "running");
-
-    // Sync routing (in case any instances changed)
-    await syncRouting(appId);
-
-    logger.log({
-      level: "info",
-      message: `Restarted app ${app.name}`,
-    });
-
-    return { message: `Restarted ${app.name}`, errors };
-  }
-
-  /**
-   * Stop an app
-   * Stops all instances and removes routing
-   */
-  async function stop(appId: string | ObjectId): Promise<{ message: string; errors: string[] }> {
-    const app = await appRepo.getById(appId);
-    if (!app) {
-      throw new NotFoundError("App not found");
-    }
-
-    const instances = await instanceRepo.getByAppId(appId);
-    const errors: string[] = [];
-
-    for (const instance of instances) {
-      const server = await loadServer(instance.serverId);
-      const result = await dockerExecutor.stopContainer(app.name, instance, server);
-      
-      if (!result.success) {
-        errors.push(`Instance on ${server.host}: ${result.error}`);
-      }
-      
-      await instanceRepo.updateStatus(instance._id!, "stopped");
-    }
-
-    await appRepo.updateStatus(appId, "stopped");
-
-    // Remove routing from Caddy
-    await caddyService.removeAppRouting(appId.toString());
-
-    logger.log({
-      level: "info",
-      message: `Stopped app ${app.name}`,
-    });
-
-    return { message: `Stopped ${app.name}`, errors };
-  }
-
-  /**
-   * Delete an app
-   * Removes all instances and routing
-   */
-  async function deleteApp(appId: string | ObjectId): Promise<{ message: string; errors: string[] }> {
-    const app = await appRepo.getById(appId);
-    if (!app) {
-      throw new NotFoundError("App not found");
-    }
-
-    // Stop and delete all instances
-    const instances = await instanceRepo.getByAppId(appId);
-    const errors: string[] = [];
-    
-    for (const instance of instances) {
-      const server = await loadServer(instance.serverId);
-      const result = await dockerExecutor.stopContainer(app.name, instance, server);
-      
-      if (!result.success) {
-        errors.push(`Instance on ${server.host}: ${result.error}`);
-      }
-      
-      await instanceRepo.deleteById(instance._id!);
-    }
-
-    // Remove routing from Caddy
-    await caddyService.removeAppRouting(appId.toString());
-
-    // Delete the app
-    await appRepo.deleteById(appId);
-
-    logger.log({
-      level: "info",
-      message: `Deleted app ${app.name}`,
-    });
-
-    return { message: `Deleted ${app.name}`, errors };
-  }
-
-  /**
-   * Rebuild all Caddy routes
-   * Call on control plane startup
-   */
-  async function rebuildAllRoutes(): Promise<void> {
-    logger.log({
-      level: "info",
-      message: "Rebuilding all Caddy routes...",
-    });
-
-    // Get all running apps
-    const { items: apps } = await appRepo.getAll({ limit: 1000 });
-    const runningApps = (apps as TApp[]).filter((app) => app.status === "running" && app.proxy?.host);
-
-    if (runningApps.length === 0) {
-      logger.log({
-        level: "info",
-        message: "No running apps with domains to route",
+        level: "debug",
+        message: `App ${app.name} has no K8s config, skipping routing sync`,
       });
       return;
     }
 
-    // Collect all server IDs
-    const allServerIds = new Set<string>();
-    for (const app of runningApps) {
-      for (const serverId of app.serverIds) {
-        allServerIds.add(serverId.toString());
+    const ingressSpec = buildIngressSpec(app, k8sConfig);
+    if (!ingressSpec) {
+      logger.log({
+        level: "debug",
+        message: `App ${app.name} has no domain configured, skipping routing sync`,
+      });
+      return;
+    }
+
+    try {
+      const ingressName = getIngressName(app.name);
+      const existingIngress = await k8s.getIngress(CP_APPS_NAMESPACE, ingressName);
+      if (existingIngress) {
+        ingressSpec.metadata!.resourceVersion = existingIngress.metadata?.resourceVersion;
+        await k8s.updateIngress(CP_APPS_NAMESPACE, ingressName, ingressSpec);
+      } else {
+        await k8s.createIngress(CP_APPS_NAMESPACE, ingressSpec);
       }
+      logger.log({
+        level: "info",
+        message: `[AppService] Synced routing for ${app.name}`,
+      });
+    } catch (error: any) {
+      logger.log({
+        level: "error",
+        message: `[AppService] syncRouting failed for ${app.name}: ${error.message}`,
+      });
     }
+  }
 
-    // Load all servers
-    const servers: TServerForCaddy[] = [];
-    for (const serverId of allServerIds) {
-      const server = await serverRepo.getById(serverId);
-      if (server) {
-        servers.push({
-          _id: server._id!,
-          host: server.host,
-          privateIp: server.privateIp,
-        });
-      }
-    }
-
-    // Load all instances for running apps
-    const allInstances: TInstanceForCaddy[] = [];
-    for (const app of runningApps) {
-      const instances = await instanceRepo.getByAppId(app._id!);
-      allInstances.push(...instancesForCaddy(instances));
-    }
-
-    // Rebuild full config
-    await caddyService.rebuildFullConfig(
-      runningApps.map(appForCaddy),
-      allInstances,
-      servers
-    );
-
+  /**
+   * Rebuild all routes (reconcile all Ingresses)
+   */
+  async function rebuildAllRoutes(): Promise<void> {
     logger.log({
       level: "info",
-      message: `Rebuilt Caddy routes for ${runningApps.length} apps`,
+      message: "[AppService] Rebuilding all routes...",
+    });
+
+    try {
+      const apps = await appRepo.getAll({ limit: 1000 });
+      for (const app of apps.items as TApp[]) {
+        try {
+          await syncRouting(app._id!);
+        } catch (error: any) {
+          logger.log({
+            level: "warn",
+            message: `[AppService] Failed to sync routing for ${app.name}: ${error.message}`,
+          });
+        }
+      }
+      logger.log({
+        level: "info",
+        message: "[AppService] Finished rebuilding all routes",
+      });
+    } catch (error: any) {
+      logger.log({
+        level: "error",
+        message: `[AppService] rebuildAllRoutes failed: ${error.message}`,
+      });
+    }
+  }
+
+  /**
+   * Get K8s deployment status for an app
+   */
+  async function getDeploymentStatus(appId: string | ObjectId): Promise<{
+    ready: boolean;
+    replicas: number;
+    availableReplicas: number;
+    pods: Array<{
+      name: string;
+      phase: string;
+      ready: boolean;
+      restartCount: number;
+    }>;
+  } | null> {
+    const app = await appRepo.getById(appId);
+    if (!app) {
+      throw new NotFoundError("App not found");
+    }
+
+    try {
+      const deploymentName = getDeploymentName(app.name);
+      const deployment = await k8s.getDeployment(CP_APPS_NAMESPACE, deploymentName);
+
+      if (!deployment) {
+        return null;
+      }
+
+      const pods = await k8s.listPods(CP_APPS_NAMESPACE, `app=${app.name}`);
+
+      return {
+        ready:
+          (deployment.status?.readyReplicas ?? 0) ===
+          (deployment.spec?.replicas ?? 0),
+        replicas: deployment.spec?.replicas ?? 0,
+        availableReplicas: deployment.status?.availableReplicas ?? 0,
+        pods: pods.map((pod) => ({
+          name: pod.metadata?.name ?? "",
+          phase: pod.status?.phase ?? "Unknown",
+          ready:
+            pod.status?.containerStatuses?.every((cs) => cs.ready) ?? false,
+          restartCount:
+            pod.status?.containerStatuses?.reduce(
+              (sum, cs) => sum + (cs.restartCount ?? 0),
+              0
+            ) ?? 0,
+        })),
+      };
+    } catch (error: any) {
+      logger.log({
+        level: "error",
+        message: `[AppService] getDeploymentStatus failed for ${app.name}: ${error.message}`,
+      });
+      return null;
+    }
+  }
+
+  /**
+   * Mark instance as unhealthy (no-op for K8s - handled by probes)
+   */
+  async function markInstanceUnhealthy(_instanceId: string | ObjectId): Promise<void> {
+    // K8s handles health checks natively via readiness/liveness probes
+    logger.log({
+      level: "debug",
+      message: "markInstanceUnhealthy called - K8s handles this natively via probes",
     });
   }
 
   /**
-   * Mark instance as unhealthy and sync routing
-   * Called by health check worker
+   * Mark instance as healthy (no-op for K8s - handled by probes)
    */
-  async function markInstanceUnhealthy(instanceId: string | ObjectId): Promise<void> {
-    const instance = await instanceRepo.getById(instanceId);
-    if (!instance) return;
+  async function markInstanceHealthy(_instanceId: string | ObjectId): Promise<void> {
+    // K8s handles health checks natively via readiness/liveness probes
+    logger.log({
+      level: "debug",
+      message: "markInstanceHealthy called - K8s handles this natively via probes",
+    });
+  }
 
-    await instanceRepo.updateStatus(instanceId, "unhealthy");
-    await syncRouting(instance.appId);
+  // ===========================================================================
+  // Helpers
+  // ===========================================================================
+
+  /**
+   * Get K8s config from app, falling back to legacy fields
+   */
+  function getK8sConfig(app: TApp): TAppK8sConfig | null {
+    // Use explicit k8s config if present
+    if (app.k8s?.image) {
+      return app.k8s;
+    }
+
+    // Fall back to legacy source.image
+    if (app.source?.type === "image" && app.source.image) {
+      return {
+        replicas: app.desiredReplicas ?? 1,
+        image: app.source.image,
+        port: app.proxy?.appPort ?? 3000,
+        domain: app.proxy?.host,
+        envVars: app.env ?? {},
+        resourceRequests: {
+          memory: app.resources?.memory ?? "128Mi",
+          cpu: String(app.resources?.cpus ?? 0.1),
+        },
+        resourceLimits: {
+          memory: app.resources?.memory ?? "512Mi",
+          cpu: String(app.resources?.cpus ?? 0.5),
+        },
+      };
+    }
+
+    return null;
   }
 
   /**
-   * Mark instance as healthy and sync routing
-   * Called by health check worker
+   * Extract version/tag from image URL
    */
-  async function markInstanceHealthy(instanceId: string | ObjectId): Promise<void> {
-    const instance = await instanceRepo.getById(instanceId);
-    if (!instance) return;
-
-    await instanceRepo.updateStatus(instanceId, "running");
-    await syncRouting(instance.appId);
+  function extractVersionFromImage(imageUrl: string): string {
+    const parts = imageUrl.split(":");
+    return parts.length > 1 ? parts[parts.length - 1] : "latest";
   }
 
   return {
+    getApp,
     deploy,
-    restart,
     stop,
+    start,
+    restart,
+    scale,
     deleteApp,
+    getLogs,
     syncRouting,
     rebuildAllRoutes,
+    getDeploymentStatus,
     markInstanceUnhealthy,
     markInstanceHealthy,
   };

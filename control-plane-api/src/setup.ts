@@ -1,26 +1,38 @@
 import { logger, useRedis, hashPassword } from "./utils";
 import {
   useUserRepo,
-  useServerRepo,
   useAppRepo,
-  useDatabaseRepo,
-  useInstanceRepo,
   useDeploymentRepo,
+  useDeploymentApprovalRepo,
   useAuditLogRepo,
   useSettingsRepo,
-  useSSHKeyRepo,
   useAPITokenRepo,
+  useClusterRepo,
+  useClusterService,
+  useNodeRepo,
+  useSSHKeyRepo,
+  useDatabaseRepo,
+  useAlertRepo,
+  useRoleRepo,
+  useRoleService,
+  useWebhookRepo,
+  useScheduledTaskRepo,
+  useTaskHistoryRepo,
+  useOrganizationRepo,
+  useOrganizationMemberRepo,
+  useOrganizationInviteRepo,
+  useAddonRepo,
+  useRegistryRepo,
+  useSSOConfigRepo,
+  usePipelineRepo,
+  usePromotionRepo,
 } from "./resources";
-import { useAppService } from "./resources/app/app.service";
-import { useCaddyService } from "./services/caddy.service";
 import {
   REDIS_HOST,
   REDIS_PORT,
   ROOT_USERNAME,
   ROOT_USER_EMAIL,
   ROOT_USER_PASSWORD,
-  CADDY_ENABLED,
-  CADDY_ADMIN_URL,
 } from "./config";
 
 /**
@@ -30,15 +42,36 @@ import {
 export async function createAllIndexes() {
   const repositories = [
     { name: "user", repo: useUserRepo() },
-    { name: "server", repo: useServerRepo() },
     { name: "app", repo: useAppRepo() },
-    { name: "database", repo: useDatabaseRepo() },
-    { name: "instance", repo: useInstanceRepo() },
     { name: "deployment", repo: useDeploymentRepo() },
+    { name: "deploymentApproval", repo: useDeploymentApprovalRepo() },
     { name: "auditLog", repo: useAuditLogRepo() },
     { name: "settings", repo: useSettingsRepo() },
-    { name: "sshKey", repo: useSSHKeyRepo() },
     { name: "apiToken", repo: useAPITokenRepo() },
+    { name: "role", repo: useRoleRepo() },
+    // K8s-native resources
+    { name: "cluster", repo: useClusterRepo() },
+    { name: "node", repo: useNodeRepo() },
+    { name: "sshKey", repo: useSSHKeyRepo() },
+    { name: "database", repo: useDatabaseRepo() },
+    { name: "alert", repo: useAlertRepo() },
+    // Webhooks & tasks
+    { name: "webhook", repo: useWebhookRepo() },
+    { name: "scheduledTask", repo: useScheduledTaskRepo() },
+    { name: "taskHistory", repo: useTaskHistoryRepo() },
+    // Organizations (multi-tenancy)
+    { name: "organization", repo: useOrganizationRepo() },
+    { name: "organizationMember", repo: useOrganizationMemberRepo() },
+    { name: "organizationInvite", repo: useOrganizationInviteRepo() },
+    // Addons (Helm-deployed services)
+    { name: "addon", repo: useAddonRepo() },
+    // Container Registries
+    { name: "registry", repo: useRegistryRepo() },
+    // SSO (Single Sign-On) configs
+    { name: "ssoConfig", repo: useSSOConfigRepo() },
+    // Pipelines (deployment stages and promotions)
+    { name: "pipeline", repo: usePipelineRepo() },
+    { name: "promotion", repo: usePromotionRepo() },
   ];
 
   for (const { name, repo } of repositories) {
@@ -83,6 +116,28 @@ async function initRedis() {
 }
 
 /**
+ * Seed default roles on first run.
+ */
+async function seedDefaultRoles() {
+  try {
+    const roleRepo = useRoleRepo();
+    const result = await roleRepo.seedDefaultRoles();
+    
+    if (result.created > 0) {
+      logger.log({
+        level: "info",
+        message: `Seeded ${result.created} default roles (${result.skipped} already existed)`,
+      });
+    }
+  } catch (error) {
+    logger.log({
+      level: "error",
+      message: `Failed to seed default roles: ${error}`,
+    });
+  }
+}
+
+/**
  * Main setup function called on server startup.
  */
 export default async function setup() {
@@ -97,16 +152,39 @@ export default async function setup() {
   // Create all indexes
   await createAllIndexes();
 
+  // Seed default roles (must run before creating initial admin user)
+  await seedDefaultRoles();
+
   // Create initial admin user if configured
   await createInitialAdminUser();
 
-  // Initialize Caddy routing
-  await initCaddyRouting();
+  // Initialize local K8s cluster
+  await initLocalCluster();
 
   logger.log({
     level: "info",
     message: "Setup complete",
   });
+}
+
+/**
+ * Initialize the local Kubernetes cluster.
+ * Creates the cluster record in DB and syncs status.
+ */
+async function initLocalCluster() {
+  try {
+    const clusterService = useClusterService();
+    await clusterService.initLocalCluster();
+    logger.log({
+      level: "info",
+      message: "Local K8s cluster initialized",
+    });
+  } catch (error) {
+    logger.log({
+      level: "warn",
+      message: `Failed to initialize local K8s cluster: ${error}. This is expected if not running on K8s.`,
+    });
+  }
 }
 
 /**
@@ -123,6 +201,7 @@ async function createInitialAdminUser() {
   }
 
   const userRepo = useUserRepo();
+  const roleService = useRoleService();
   
   // Check if any users exist
   const userCount = await userRepo.count();
@@ -147,66 +226,24 @@ async function createInitialAdminUser() {
   try {
     const hashedPassword = await hashPassword(ROOT_USER_PASSWORD);
     
+    // Get the admin role ID
+    const adminRoleId = await roleService.getAdminRoleId();
+    
     await userRepo.add({
       email: ROOT_USER_EMAIL,
       password: hashedPassword,
       role: "admin",
+      roleId: adminRoleId ? new (require("mongodb").ObjectId)(adminRoleId) : undefined,
     });
 
     logger.log({
       level: "info",
-      message: `Initial admin user created: ${ROOT_USER_EMAIL}`,
+      message: `Initial admin user created: ${ROOT_USER_EMAIL}${adminRoleId ? " with admin role" : ""}`,
     });
   } catch (error) {
     logger.log({
       level: "error",
       message: `Failed to create initial admin user: ${error}`,
-    });
-  }
-}
-
-/**
- * Initialize Caddy reverse proxy routing.
- * Rebuilds routes from database state on startup.
- */
-async function initCaddyRouting() {
-  if (!CADDY_ENABLED) {
-    logger.log({
-      level: "info",
-      message: "Caddy integration disabled (CADDY_ENABLED=false)",
-    });
-    return;
-  }
-
-  logger.log({
-    level: "info",
-    message: `Initializing Caddy routing (${CADDY_ADMIN_URL})...`,
-  });
-
-  const caddyService = useCaddyService();
-
-  // Health check Caddy
-  const health = await caddyService.healthCheck();
-  if (!health.healthy) {
-    logger.log({
-      level: "warn",
-      message: `Caddy not reachable: ${health.error || "unknown error"}. Routing will be synced when Caddy becomes available.`,
-    });
-    return;
-  }
-
-  // Rebuild all routes from database
-  try {
-    const appService = useAppService();
-    await appService.rebuildAllRoutes();
-    logger.log({
-      level: "info",
-      message: "Caddy routing initialized",
-    });
-  } catch (error) {
-    logger.log({
-      level: "error",
-      message: `Failed to rebuild Caddy routes: ${error}`,
     });
   }
 }

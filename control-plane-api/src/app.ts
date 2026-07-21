@@ -1,34 +1,72 @@
 import express from "express";
-import helmet from "helmet";
-import cors from "cors";
 import cookieParser from "cookie-parser";
 import router from "./routes";
-import { ALLOWED_ORIGINS, isDev } from "./config";
-import { errorHandler } from "./utils";
+import { ALLOWED_ORIGINS } from "./config";
+import {
+  errorHandler,
+  securityHeaders,
+  corsConfig,
+  requestId,
+  validateContentType,
+  sanitizeInput,
+  preventNoSQL,
+  rateLimitApi,
+  metricsMiddleware,
+} from "./utils";
 
 const app = express();
 
+// Trust proxy for accurate IP detection (required for rate limiting)
 app.set("trust proxy", 1);
 
 console.log("Allowed origins:", ALLOWED_ORIGINS);
 
-app.use(
-  cors({
-    origin: ALLOWED_ORIGINS,
-    credentials: true,
-  })
-);
+// ---------------------------------------------------------------------------
+// Security Middleware (order matters)
+// ---------------------------------------------------------------------------
 
-app.use(cookieParser());
+// Request ID for tracing
+app.use(requestId);
 
-// Security headers
-app.use(helmet());
+// Prometheus metrics middleware (track all requests)
+app.use(metricsMiddleware);
+
+// Security headers (helmet)
+app.use(securityHeaders);
 app.disable("x-powered-by");
 
+// CORS configuration
+app.use(corsConfig);
+
+// Cookie parser
+app.use(cookieParser());
+
+// Global API rate limiting (applied before body parsing for efficiency)
+app.use("/api", rateLimitApi);
+
+// Body parsing (after rate limit to protect against large payloads)
+app.use(express.json({ limit: "10mb" }));
+app.use(express.urlencoded({ extended: true, limit: "10mb" }));
+
+// Content-Type validation
+app.use(validateContentType);
+
+// Input sanitization (deep sanitize body/query/params)
+app.use(sanitizeInput);
+
+// NoSQL injection prevention
+app.use(preventNoSQL);
+
+// ---------------------------------------------------------------------------
 // Routes
+// ---------------------------------------------------------------------------
+
 app.use("/api", router);
 
-// Error handler
+// ---------------------------------------------------------------------------
+// Error Handler
+// ---------------------------------------------------------------------------
+
 app.use(errorHandler);
 
 export default app;

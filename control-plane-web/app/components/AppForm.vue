@@ -1,23 +1,23 @@
 <script setup lang="ts">
 /**
- * AppForm — Form component for App resource following goweekdays-web pattern.
+ * AppForm — Form component for App resource following K8s-native pattern.
  *
  * Supports three modes: 'add', 'edit', and 'view'.
  * Uses defineModel() for two-way binding of the resource object and error message.
  * Never calls API functions — only emits events (submit, close, edit, delete, deploy).
+ *
+ * Apps deploy to K8s with a desired replica count (no server selection needed).
  */
 const props = withDefaults(
   defineProps<{
     title?: string
     mode?: 'add' | 'edit' | 'view'
     loading?: boolean
-    servers?: TServer[]
   }>(),
   {
     title: 'App',
     mode: 'add',
-    loading: false,
-    servers: () => []
+    loading: false
   }
 )
 
@@ -30,14 +30,13 @@ const emit = defineEmits<{
 }>()
 
 const message = defineModel<string>('message', { default: '' })
-const app = defineModel<TApp & { serverIds?: string[] }>('app', {
+const app = defineModel<TApp>('app', {
   default: () => ({
     _id: '',
     name: '',
     image: '',
     status: 'unknown',
-    desiredReplicas: 1,
-    serverIds: []
+    desiredReplicas: 1
   })
 })
 
@@ -51,15 +50,8 @@ const submitLabel = computed(() => {
   }
 })
 
-const serverItems = computed(() =>
-  props.servers.map(s => ({ value: s._id, label: `${s.name} (${s.host})` }))
-)
-
 // Check if form is valid
 const canSubmit = computed(() => {
-  if (props.mode === 'add') {
-    return app.value.name && app.value.image && app.value.serverIds?.length
-  }
   return app.value.name && app.value.image
 })
 </script>
@@ -97,57 +89,12 @@ const canSubmit = computed(() => {
           min="0"
           :disabled="!isMutable"
         />
-      </UFormField>
-
-      <UFormField
-        v-if="isMutable"
-        label="Servers"
-        required
-      >
-        <USelectMenu
-          v-model="app.serverIds"
-          :items="serverItems"
-          value-key="value"
-          placeholder="Select servers to deploy to"
-          multiple
-          :disabled="!serverItems.length"
-        />
         <template #hint>
-          <span
-            v-if="serverItems.length"
-            class="text-xs text-muted"
-          >
-            Select one or more servers where the app will be deployed.
-          </span>
-          <span
-            v-else
-            class="text-xs text-error"
-          >
-            No servers available. <NuxtLink
-              to="/dashboard/servers"
-              class="underline font-medium"
-            >Add a server</NuxtLink> first.
+          <span class="text-xs text-muted">
+            Number of pod replicas to run in K8s. Set to 0 to stop the app.
           </span>
         </template>
       </UFormField>
-
-      <UAlert
-        v-if="isMutable && !serverItems.length"
-        color="error"
-        variant="soft"
-        icon="i-lucide-alert-triangle"
-        title="No servers available"
-      >
-        <template #description>
-          <p>
-            You need to add a server before creating an app.
-            <NuxtLink
-              to="/dashboard/servers"
-              class="underline font-medium"
-            >Go to Servers</NuxtLink>
-          </p>
-        </template>
-      </UAlert>
 
       <UFormField
         v-if="mode === 'view'"

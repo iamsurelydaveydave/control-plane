@@ -43,6 +43,13 @@ const items = [
     status: 'active' as const
   },
   {
+    title: 'Single Sign-On',
+    description: 'Configure SAML or OIDC for enterprise authentication.',
+    icon: 'i-lucide-shield-check',
+    to: '/dashboard/settings/sso',
+    status: 'active' as const
+  },
+  {
     title: 'Account',
     description: 'Manage your account and preferences.',
     icon: 'i-lucide-user',

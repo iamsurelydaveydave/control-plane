@@ -28,6 +28,21 @@ export default function useAuth() {
       method: 'POST',
       body: { email, password }
     })
+
+    // After login, fetch permissions for the user
+    if (data.user?._id) {
+      try {
+        const permData = await useNuxtApp().$api<{ permissions: TPermission[] }>(
+          `/users/${data.user._id}/permissions`,
+          { method: 'GET' }
+        )
+        data.user.permissions = permData.permissions
+      } catch {
+        // If permissions fetch fails, continue without them
+        // User might not have access to view their own permissions
+      }
+    }
+
     currentUser.value = data.user
     // Set the user cookie client-side as a hint for the auth middleware
     if (import.meta.client && data.user?._id) {
@@ -82,6 +97,21 @@ export default function useAuth() {
 
     try {
       const data = await useNuxtApp().$api<{ user: TUser }>('/auth/me', { method: 'GET' })
+
+      // Fetch permissions for the user
+      if (data.user?._id) {
+        try {
+          const permData = await useNuxtApp().$api<{ permissions: TPermission[] }>(
+            `/users/${data.user._id}/permissions`,
+            { method: 'GET' }
+          )
+          data.user.permissions = permData.permissions
+        } catch {
+          // If permissions fetch fails, continue without them
+          // User might not have access to view their own permissions
+        }
+      }
+
       currentUser.value = data.user
       return true
     } catch (error) {
@@ -113,12 +143,34 @@ export default function useAuth() {
     return data
   }
 
+  /**
+   * Refresh user permissions from the server.
+   * Call this after role changes or when permissions might have changed.
+   */
+  async function refreshPermissions(): Promise<void> {
+    if (!currentUser.value?._id) return
+
+    try {
+      const permData = await useNuxtApp().$api<{ permissions: TPermission[] }>(
+        `/users/${currentUser.value._id}/permissions`,
+        { method: 'GET' }
+      )
+      currentUser.value = {
+        ...currentUser.value,
+        permissions: permData.permissions
+      }
+    } catch {
+      // Ignore permission refresh failures
+    }
+  }
+
   return {
     currentUser,
     loggedInUser,
     login,
     logout,
     updateProfile,
-    validateSession
+    validateSession,
+    refreshPermissions
   }
 }

@@ -306,4 +306,85 @@ describe("Database Resource", function () {
       expect(db!.backup?.lastBackup).to.be.instanceOf(Date);
     });
   });
+
+  // -------------------------------------------------------------------------
+  // TLS management
+  // -------------------------------------------------------------------------
+
+  describe("useDatabaseRepo() — TLS", () => {
+    it("should update TLS configuration for a database", async () => {
+      const id = await repo.add(makeDbPayload() as any);
+      createdIds.push(id.toString());
+
+      const tlsConfig = {
+        enabled: true,
+        caCert: "-----BEGIN CERTIFICATE-----\nMIIC...\n-----END CERTIFICATE-----",
+        tlsConnectionString: "mongodb://host:27017/?tls=true",
+        configuredAt: new Date(),
+      };
+
+      await repo.updateTLS(id.toString(), tlsConfig);
+
+      const db = await repo.getById(id.toString());
+      expect(db!.tls).to.exist;
+      expect(db!.tls!.enabled).to.be.true;
+      expect(db!.tls!.caCert).to.equal(tlsConfig.caCert);
+      expect(db!.tls!.tlsConnectionString).to.equal(tlsConfig.tlsConnectionString);
+      expect(db!.tls!.configuredAt).to.be.instanceOf(Date);
+    });
+
+    it("should remove TLS configuration from a database", async () => {
+      const id = await repo.add(makeDbPayload() as any);
+      createdIds.push(id.toString());
+
+      // First add TLS config
+      await repo.updateTLS(id.toString(), {
+        enabled: true,
+        caCert: "test-cert",
+        tlsConnectionString: "mongodb://host:27017/?tls=true",
+        configuredAt: new Date(),
+      });
+
+      // Verify it was added
+      let db = await repo.getById(id.toString());
+      expect(db!.tls).to.exist;
+      expect(db!.tls!.enabled).to.be.true;
+
+      // Now remove TLS config
+      await repo.removeTLS(id.toString());
+
+      // Verify it was removed
+      db = await repo.getById(id.toString());
+      expect(db!.tls).to.be.undefined;
+    });
+
+    it("should throw NotFoundError when updating TLS for non-existent database", async () => {
+      const fakeId = new ObjectId().toString();
+      try {
+        await repo.updateTLS(fakeId, {
+          enabled: true,
+          caCert: "test-cert",
+          tlsConnectionString: "mongodb://host:27017/?tls=true",
+          configuredAt: new Date(),
+        });
+        expect.fail("Should have thrown NotFoundError");
+      } catch (err: any) {
+        expect(err.message).to.equal("Database not found.");
+      }
+    });
+
+    it("should throw BadRequestError for invalid database ID format", async () => {
+      try {
+        await repo.updateTLS("invalid-id", {
+          enabled: true,
+          caCert: "test-cert",
+          tlsConnectionString: "mongodb://host:27017/?tls=true",
+          configuredAt: new Date(),
+        });
+        expect.fail("Should have thrown BadRequestError");
+      } catch (err: any) {
+        expect(err.message).to.equal("Invalid database ID format.");
+      }
+    });
+  });
 });

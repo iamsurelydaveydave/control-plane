@@ -50,6 +50,15 @@ export class InternalServerError extends AppError {
   }
 }
 
+export class TooManyRequestsError extends AppError {
+  public readonly retryAfter?: number;
+
+  constructor(message: string = "Too Many Requests", retryAfter?: number) {
+    super(message, 429);
+    this.retryAfter = retryAfter;
+  }
+}
+
 /**
  * True when an error is a transient MongoDB transaction error that
  * `ClientSession.withTransaction` knows how to retry.

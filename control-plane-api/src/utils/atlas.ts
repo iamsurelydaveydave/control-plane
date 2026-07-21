@@ -1,4 +1,5 @@
 import { MongoClient, Db } from "mongodb";
+import { setMongoStatus, mongodbPoolSize } from "./prometheus";
 
 interface AtlasConfig {
   name?: string;
@@ -26,13 +27,28 @@ export class useAtlas {
     });
 
     try {
-      await this.client.connect();
-      this.database = this.client.db(db);
-      console.log(`Connected to database "${db}".`);
-    } catch (error) {
-      this.client = null;
-      throw error;
-    }
+          await this.client.connect();
+          this.database = this.client.db(db);
+          console.log(`Connected to database "${db}".`);
+          setMongoStatus(true);
+
+          // Track connection pool size
+          const poolSize = 10; // From maxPoolSize above
+          mongodbPoolSize.set(poolSize);
+
+          // Listen for topology events to track connection status
+          this.client.on("serverHeartbeatFailed", () => {
+            setMongoStatus(false);
+          });
+
+          this.client.on("serverHeartbeatSucceeded", () => {
+            setMongoStatus(true);
+          });
+        } catch (error) {
+          this.client = null;
+          setMongoStatus(false);
+          throw error;
+        }
   }
 
   public static getClient(): MongoClient | null {
@@ -44,13 +60,14 @@ export class useAtlas {
   }
 
   public static async close(): Promise<void> {
-    if (this.client) {
-      await this.client.close();
-      this.client = null;
-      this.database = null;
-      console.log(`Closed connection to the database.`);
-    } else {
-      console.warn(`No client is currently initialized.`);
+      if (this.client) {
+        await this.client.close();
+        this.client = null;
+        this.database = null;
+        setMongoStatus(false);
+        console.log(`Closed connection to the database.`);
+      } else {
+        console.warn(`No client is currently initialized.`);
+      }
     }
-  }
 }

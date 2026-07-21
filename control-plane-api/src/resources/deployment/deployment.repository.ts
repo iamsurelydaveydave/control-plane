@@ -54,6 +54,45 @@ export function useDeploymentRepo() {
     }
   }
 
+  async function getLatestByAppId(appId: string | ObjectId) {
+    try {
+      appId = new ObjectId(appId);
+    } catch {
+      throw new BadRequestError("Invalid app ID");
+    }
+
+    const cacheKey = makeCacheKey(namespace_collection, {
+      appId: String(appId),
+      tag: "latest-by-app",
+    });
+
+    try {
+      const cached = await repo.getCache<TDeployment>(cacheKey);
+      if (cached) {
+        return cached;
+      }
+
+      const deployment = await repo.collection.findOne<TDeployment>(
+        { appId },
+        { sort: { startedAt: -1 } }
+      );
+
+      if (deployment) {
+        // Shorter cache for latest - it changes frequently
+        repo.setCache(cacheKey, deployment, 30).catch((err) => {
+          logger.log({
+            level: "error",
+            message: `Failed to set cache for latest deployment: ${err.message}`,
+          });
+        });
+      }
+
+      return deployment;
+    } catch (error) {
+      throw new InternalServerError("Failed to get latest deployment");
+    }
+  }
+
   async function getByAppId(appId: string | ObjectId, { page = 1, limit = 10 } = {}) {
     try {
       appId = new ObjectId(appId);
@@ -101,7 +140,7 @@ export function useDeploymentRepo() {
     }
   }
 
-  async function updateStatus(_id: string | ObjectId, status: TDeploymentStatus, logs?: string) {
+  async function updateStatus(_id: string | ObjectId, status: TDeploymentStatus, logs?: string, extra?: { duration?: number; url?: string }) {
     try {
       _id = new ObjectId(_id);
     } catch {
@@ -117,6 +156,14 @@ export function useDeploymentRepo() {
 
       if (status === "success" || status === "failed") {
         update.completedAt = new Date();
+      }
+
+      if (extra?.duration !== undefined) {
+        update.duration = extra.duration;
+      }
+
+      if (extra?.url !== undefined) {
+        update.url = extra.url;
       }
 
       const result = await repo.collection.updateOne({ _id }, { $set: update });
@@ -153,6 +200,7 @@ export function useDeploymentRepo() {
     createIndexes,
     add,
     getById,
+    getLatestByAppId,
     getByAppId,
     updateStatus,
     appendLogs,

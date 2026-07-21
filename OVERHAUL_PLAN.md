@@ -1103,13 +1103,13 @@ src/
 
 **Goal:** Core K8s integration, clean slate
 
-- [ ] Delete Docker/SSH resources and services
-- [ ] Add `@kubernetes/client-node` dependency
-- [ ] Create `KubernetesService` with basic operations
-- [ ] Create `Cluster` resource (local cluster only)
-- [ ] Test: can connect to K8s API, list namespaces
+- [x] Delete Docker/SSH resources and services
+- [x] Add `@kubernetes/client-node` dependency
+- [x] Create `KubernetesService` with basic operations
+- [x] Create `Cluster` resource (local cluster only)
+- [x] Test: can connect to K8s API, list namespaces
 
-**Deliverable:** Clean codebase with working K8s client
+**Deliverable:** Clean codebase with working K8s client ✅
 
 ---
 
@@ -1307,7 +1307,18 @@ DELETE /api/nodes/:id/taints/:key       # Remove taint
 //    - If status was "ready": mark as "offline"
 ```
 
-**Deliverable:** Can generate join command, add worker nodes, see them in dashboard
+**Deliverable:** Can generate join command, add worker nodes, see them in dashboard ✅
+
+**Implementation (completed):**
+- [x] Node model, repository, service, controller (`api-core/src/resources/node/`)
+- [x] Node routes (`api-core/src/routes/node.route.ts`)
+- [x] Node repo registered in `setup.ts → createAllIndexes()`
+- [x] Frontend types (`app/types/node.d.ts`, `app/types/cluster.d.ts`)
+- [x] Frontend composables (`app/composables/useNode.ts`, `app/composables/useCluster.ts`)
+- [x] Frontend NodeForm component (`app/components/NodeForm.vue`)
+- [x] Frontend Nodes page (`app/pages/dashboard/nodes/index.vue`)
+- [x] Navigation updated with Nodes link
+- [x] Proxy routes for `/api/clusters/**` and `/api/nodes/**`
 
 ---
 

@@ -1,0 +1,145 @@
+{{- if .Values.rbac.create }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "control-plane.fullname" . }}
+  labels:
+    {{- include "control-plane.labels" . | nindent 4 }}
+rules:
+  # ===========================================
+  # Core API Resources
+  # ===========================================
+  
+  # Nodes (list, get, watch for node management and monitoring)
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list", "watch", "patch", "update", "delete"]
+  
+  # Pods (for logs, exec, list, management)
+  - apiGroups: [""]
+    resources: ["pods", "pods/log", "pods/exec"]
+    verbs: ["get", "list", "watch", "create", "delete"]
+  
+  # Services (for app deployment and networking)
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  
+  # Namespaces (create per-app/tenant namespaces)
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["get", "list", "watch", "create", "delete"]
+  
+  # Secrets (for app config, registry credentials, TLS certs)
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  
+  # ConfigMaps (for app configuration)
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  
+  # PersistentVolumeClaims (for database and app storage)
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims"]
+    verbs: ["get", "list", "watch", "create", "delete"]
+  
+  # PersistentVolumes (for storage management)
+  - apiGroups: [""]
+    resources: ["persistentvolumes"]
+    verbs: ["get", "list", "watch"]
+  
+  # Events (for monitoring and debugging)
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["get", "list", "watch"]
+  
+  # ===========================================
+  # Apps API Resources
+  # ===========================================
+  
+  # Deployments (for app deployment)
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  
+  # StatefulSets (for stateful apps like databases)
+  - apiGroups: ["apps"]
+    resources: ["statefulsets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  
+  # DaemonSets (for node-level services)
+  - apiGroups: ["apps"]
+    resources: ["daemonsets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  
+  # ReplicaSets (for deployment management)
+  - apiGroups: ["apps"]
+    resources: ["replicasets"]
+    verbs: ["get", "list", "watch"]
+  
+  # ===========================================
+  # Networking API Resources
+  # ===========================================
+  
+  # Ingresses (for routing and TLS termination)
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["ingresses"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  
+  # NetworkPolicies (for network segmentation)
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["networkpolicies"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  
+  # ===========================================
+  # Batch API Resources
+  # ===========================================
+  
+  # Jobs (for one-off tasks, migrations)
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  
+  # CronJobs (for scheduled tasks)
+  - apiGroups: ["batch"]
+    resources: ["cronjobs"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  
+  # ===========================================
+  # Autoscaling API Resources
+  # ===========================================
+  
+  # HorizontalPodAutoscalers (for auto-scaling)
+  - apiGroups: ["autoscaling"]
+    resources: ["horizontalpodautoscalers"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  
+  # ===========================================
+  # Custom Resources (MongoDB Operator)
+  # ===========================================
+  
+  # MongoDB Community Operator CRDs
+  - apiGroups: ["mongodbcommunity.mongodb.com"]
+    resources: ["mongodbcommunity"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  
+  # ===========================================
+  # Traefik CRDs (if using Traefik)
+  # ===========================================
+  
+  # Traefik IngressRoutes
+  - apiGroups: ["traefik.io", "traefik.containo.us"]
+    resources: ["ingressroutes", "ingressroutetcps", "ingressrouteudps", "middlewares", "tlsoptions", "tlsstores", "traefikservices"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  
+  # ===========================================
+  # cert-manager CRDs (if using cert-manager)
+  # ===========================================
+  
+  # Certificates
+  - apiGroups: ["cert-manager.io"]
+    resources: ["certificates", "certificaterequests", "issuers", "clusterissuers"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+{{- end }}

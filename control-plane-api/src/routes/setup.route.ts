@@ -4,7 +4,7 @@ import { execSync } from "child_process";
 import { homedir } from "os";
 import { join } from "path";
 import { useUserRepo, useSettingsRepo } from "../resources";
-import { requireAuth } from "../utils";
+import { requireAuth, rateLimitAuth } from "../utils";
 
 const router = express.Router();
 
@@ -49,7 +49,8 @@ router.get("/status", async (_req, res, next) => {
 });
 
 // Initialize the platform (create first admin user)
-router.post("/init", async (req, res, next) => {
+// Rate limited to prevent brute-force attacks during setup
+router.post("/init", rateLimitAuth, async (req, res, next) => {
   try {
     const userRepo = useUserRepo();
     const settingsRepo = useSettingsRepo();

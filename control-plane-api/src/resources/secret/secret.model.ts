@@ -6,10 +6,14 @@ import { BadRequestError } from "../../utils";
 // Types
 // =============================================================================
 
+export const secretTypes = ["env", "ssh-private-key", "tls-cert", "tls-key", "generic"] as const;
+export type TSecretType = (typeof secretTypes)[number];
+
 export type TSecret = {
   _id?: ObjectId;
   name: string;                // Secret name (e.g., "DATABASE_URL", "API_KEY")
   value: string;               // Encrypted value
+  type?: TSecretType;          // Secret type (default: "env")
   appId?: ObjectId;            // If set, scoped to specific app; null = global
   description?: string;        // Optional description
   createdAt?: Date;
@@ -20,6 +24,7 @@ export type TSecret = {
 export type TSecretResponse = {
   _id: string;
   name: string;
+  type?: TSecretType;
   appId?: string;
   description?: string;
   createdAt: Date;
@@ -33,18 +38,16 @@ export type TSecretResponse = {
 export const schemaSecretCreate = Joi.object({
   name: Joi.string()
     .max(100)
-    .pattern(/^[A-Z][A-Z0-9_]*$/)
-    .required()
-    .messages({
-      'string.pattern.base': 'Secret name must be uppercase with underscores (e.g., DATABASE_URL)',
-    }),
+    .required(),
   value: Joi.string().required(),
+  type: Joi.string().valid(...secretTypes).default("env"),
   appId: Joi.string().optional().allow(null, ""),
   description: Joi.string().max(500).optional().allow(""),
 });
 
 export const schemaSecretUpdate = Joi.object({
   value: Joi.string().optional(),
+  type: Joi.string().valid(...secretTypes).optional(),
   description: Joi.string().max(500).optional().allow(""),
 });
 
@@ -73,6 +76,7 @@ export function modelSecret(data: Partial<TSecret>): TSecret {
     _id: data._id,
     name: value.name,
     value: value.value, // Will be encrypted by repository
+    type: value.type || "env",
     appId,
     description: value.description ?? "",
     createdAt: data.createdAt ?? new Date(),
@@ -88,6 +92,7 @@ export function secretToResponse(secret: TSecret): TSecretResponse {
   return {
     _id: secret._id!.toString(),
     name: secret.name,
+    type: secret.type,
     appId: secret.appId?.toString(),
     description: secret.description,
     createdAt: secret.createdAt!,

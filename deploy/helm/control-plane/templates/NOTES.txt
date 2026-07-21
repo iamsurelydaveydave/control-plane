@@ -1,0 +1,105 @@
+{{- $apiFullname := include "control-plane.api.fullname" . -}}
+{{- $webFullname := include "control-plane.web.fullname" . -}}
+
+╔══════════════════════════════════════════════════════════════════╗
+║                     CONTROL PLANE DEPLOYED                       ║
+╚══════════════════════════════════════════════════════════════════╝
+
+Thank you for installing {{ .Chart.Name }}!
+
+Release: {{ .Release.Name }}
+Namespace: {{ .Release.Namespace }}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+📦 COMPONENTS DEPLOYED:
+
+  • API:  {{ $apiFullname }} ({{ .Values.api.replicas }} replicas)
+  • Web:  {{ $webFullname }} ({{ .Values.web.replicas }} replicas)
+{{- if .Values.redis.enabled }}
+  • Redis: {{ .Release.Name }}-redis-master (internal)
+{{- end }}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+🌐 ACCESS:
+
+{{- if .Values.ingress.enabled }}
+{{- if .Values.ingress.host }}
+
+  URL: {{ if .Values.ingress.tls.enabled }}https{{ else }}http{{ end }}://{{ .Values.ingress.host }}
+
+{{- else }}
+
+  ⚠️  WARNING: No ingress host configured. Set ingress.host in your values.
+
+{{- end }}
+{{- else }}
+
+  Ingress is disabled. To access the application, use port-forwarding:
+
+  # API
+  kubectl port-forward svc/{{ $apiFullname }} 5005:{{ .Values.api.service.port }} -n {{ .Release.Namespace }}
+
+  # Web
+  kubectl port-forward svc/{{ $webFullname }} 3000:{{ .Values.web.service.port }} -n {{ .Release.Namespace }}
+
+  Then access: http://localhost:3000
+
+{{- end }}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+🔍 VERIFICATION:
+
+  # Check pod status
+  kubectl get pods -n {{ .Release.Namespace }} -l app.kubernetes.io/instance={{ .Release.Name }}
+
+  # Check API health
+  kubectl exec -it deploy/{{ $apiFullname }} -n {{ .Release.Namespace }} -- curl -s localhost:5005/api/health
+
+  # View API logs
+  kubectl logs -f deploy/{{ $apiFullname }} -n {{ .Release.Namespace }}
+
+  # View Web logs
+  kubectl logs -f deploy/{{ $webFullname }} -n {{ .Release.Namespace }}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+⚠️  IMPORTANT NOTES:
+
+{{- if not .Values.api.mongodb.uri }}
+{{- if not .Values.api.mongodb.existingSecret }}
+
+  ❌ MongoDB URI is NOT configured!
+     Set api.mongodb.uri or api.mongodb.existingSecret for the API to function.
+
+{{- end }}
+{{- end }}
+
+{{- if not .Values.ingress.host }}
+{{- if .Values.ingress.enabled }}
+
+  ❌ Ingress host is NOT configured!
+     Set ingress.host for external access.
+
+{{- end }}
+{{- end }}
+
+{{- if .Values.rbac.create }}
+
+  ✅ RBAC is enabled. The API has cluster-wide permissions for:
+     - Core: pods, services, secrets, configmaps, namespaces, nodes, PVCs
+     - Apps: deployments, statefulsets, daemonsets
+     - Networking: ingresses, networkpolicies
+     - Batch: jobs, cronjobs
+     - Custom: mongodbcommunity CRDs, Traefik CRDs, cert-manager CRDs
+
+{{- end }}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+📚 For more information, see:
+   https://github.com/yourorg/control-plane
+
+Happy deploying! 🚀

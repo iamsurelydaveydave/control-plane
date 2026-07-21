@@ -1,0 +1,23 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "control-plane.api.configMapName" . }}
+  labels:
+    {{- include "control-plane.api.labels" . | nindent 4 }}
+data:
+  # Node environment
+  NODE_ENV: "production"
+  
+  # API server configuration
+  PORT: "5005"
+  
+  # JWT configuration
+  JWT_EXPIRES_IN: {{ .Values.api.jwt.expiresIn | quote }}
+  
+  # Redis configuration (non-sensitive)
+  REDIS_HOST: {{ include "control-plane.redis.host" . | quote }}
+  REDIS_PORT: {{ .Values.api.redis.port | quote }}
+  
+  # Kubernetes configuration (API runs in-cluster)
+  KUBERNETES_SERVICE_HOST: "kubernetes.default.svc"
+  KUBERNETES_SERVICE_PORT: "443"

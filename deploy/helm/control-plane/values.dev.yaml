@@ -1,0 +1,54 @@
+# values.dev.yaml — local / k3s development overrides
+# Applied on top of values.yaml by the k3s Skaffold profile.
+# Not used in production.
+
+# Single replicas — no need for HA locally
+api:
+  replicas: 1
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+  # imagePullPolicy is set to Never by Skaffold's setValues; listed here for
+  # clarity but Skaffold's --set overrides this anyway.
+  image:
+    pullPolicy: Never
+
+web:
+  replicas: 1
+  resources:
+    requests:
+      cpu: 25m
+      memory: 64Mi
+    limits:
+      cpu: 200m
+      memory: 256Mi
+  image:
+    pullPolicy: Never
+
+# Disable ingress — access the services via kubectl port-forward or NodePort
+ingress:
+  enabled: false
+
+# Enable the bundled Redis subchart so you don't need an external Redis
+redis:
+  enabled: true
+  auth:
+    enabled: true
+    password: dev-redis-password   # fine for local; change for any shared env
+
+# Disable HPA and PDB — not useful for single-replica local setups
+autoscaling:
+  api:
+    enabled: false
+  web:
+    enabled: false
+
+podDisruptionBudget:
+  api:
+    enabled: false
+  web:
+    enabled: false

@@ -14,6 +14,7 @@
 ## VERSION              - Specific version to install (default: latest)
 ## IMAGE_REGISTRY       - Docker image registry (default: ghcr.io/iamsurelydaveydave)
 ## SKIP_K3S             - Set to "true" to skip K3s installation (use existing cluster)
+## BUILD_LOCAL          - Set to "false" to pull pre-built images from registry instead of building on this server (default: true)
 
 set -e
 set -o pipefail
@@ -101,6 +102,284 @@ check_command() {
 
 get_public_ip() {
     curl -s https://api.ipify.org 2>/dev/null || curl -s https://ifconfig.me 2>/dev/null || echo "localhost"
+}
+
+parse_mongo_host() {
+    local uri="$1"
+    if [[ "$uri" =~ "mongodb+srv://" ]]; then
+        echo "$uri" | sed -E 's|mongodb\+srv://([^:@]+:[^@]+@)?([^/?]+).*|\2|'
+    else
+        echo "$uri" | sed -E 's|mongodb://([^:@]+:[^@]+@)?([^:/?]+).*|\2|'
+    fi
+}
+
+parse_mongo_port() {
+    local uri="$1"
+    if [[ "$uri" =~ "mongodb+srv://" ]]; then
+        echo "27017"
+    else
+        local port
+        port=$(echo "$uri" | sed -E 's|mongodb://[^@]+@[^:]+:([0-9]+).*|\1|')
+        # sed returns the full string unchanged if pattern doesn't match
+        if [ "$port" = "$uri" ]; then echo "27017"; else echo "$port"; fi
+    fi
+}
+
+# ================================
+# Check MongoDB Connection
+# ================================
+
+check_mongodb_connection() {
+    log_section "Checking MongoDB Connection"
+
+    if [ "${INSTALL_MONGODB:-}" = "true" ]; then
+        log "Using in-cluster MongoDB — skipping pre-deployment check"
+        return
+    fi
+
+    local host port
+    host=$(parse_mongo_host "$MONGODB_URI")
+    port=$(parse_mongo_port "$MONGODB_URI")
+
+    log "Testing connection to ${host}:${port} (timeout: 10s)..."
+
+    if timeout 10 bash -c "echo >/dev/tcp/${host}/${port}" 2>/dev/null; then
+        log_success "MongoDB is reachable at ${host}:${port}"
+    else
+        echo ""
+        log_error "Cannot reach MongoDB at ${host}:${port}"
+        echo ""
+        log_error "Common causes:"
+        log_error "  • Atlas IP Access List does not include this server (${PUBLIC_IP})"
+        log_error "  • Connection string is wrong or has a typo"
+        log_error "  • A firewall is blocking port ${port}"
+        echo ""
+        echo -ne "${GREEN}→${NC} Continue anyway? [y/N]: "
+        local cont
+        read -r cont < /dev/tty
+        if [[ ! "$cont" =~ ^[Yy]$ ]]; then
+            exit 1
+        fi
+        log_warn "Continuing — API pods may crash on startup until MongoDB is reachable"
+    fi
+}
+
+# ================================
+# Install nerdctl (Docker-compatible CLI for containerd)
+# ================================
+
+install_nerdctl() {
+    log_section "Installing nerdctl"
+
+    if check_command nerdctl; then
+        local ver
+        ver=$(nerdctl --version | awk '{print $3}')
+        log_success "nerdctl already installed (v${ver})"
+        return
+    fi
+
+    # nerdctl needs buildkitd for `nerdctl build`. We'll install the "full"
+    # release which bundles BuildKit, CNI plugins, and rootless helpers.
+    local nerdctl_ver="2.0.4"
+    local url="https://github.com/containerd/nerdctl/releases/download/v${nerdctl_ver}/nerdctl-full-${nerdctl_ver}-linux-${ARCH}.tar.gz"
+
+    log "Downloading nerdctl-full v${nerdctl_ver} (${ARCH})..."
+    curl -fsSL "$url" | tar -xz -C /usr/local
+
+    # Start BuildKit daemon (needed for `nerdctl build`)
+    # We run it against K3s's containerd socket so images land in the k8s.io namespace.
+    if ! pgrep -x buildkitd >/dev/null; then
+        log "Starting buildkitd..."
+        CONTAINERD_NAMESPACE=k8s.io \
+            buildkitd \
+                --oci-worker=false \
+                --containerd-worker=true \
+                --containerd-worker-addr=/run/k3s/containerd/containerd.sock \
+                --containerd-worker-namespace=k8s.io \
+            >/dev/null 2>&1 &
+        sleep 3
+    fi
+
+    log_success "nerdctl installed"
+}
+
+# ================================
+# Install Skaffold
+# ================================
+
+install_skaffold() {
+    log_section "Installing Skaffold"
+
+    if check_command skaffold; then
+        local ver
+        ver=$(skaffold version)
+        log_success "Skaffold already installed (${ver})"
+        return
+    fi
+
+    log "Installing Skaffold (${ARCH})..."
+    curl -fsSLo /tmp/skaffold \
+        "https://storage.googleapis.com/skaffold/releases/latest/skaffold-linux-${ARCH}"
+    install /tmp/skaffold /usr/local/bin/skaffold
+    rm -f /tmp/skaffold
+    log_success "Skaffold installed"
+}
+
+# ================================
+# Fetch Source Code
+# ================================
+
+fetch_source() {
+    log_section "Fetching Source Code"
+
+    local src_dir="${DATA_DIR}/source"
+    local repo="https://github.com/iamsurelydaveydave/control-plane"
+
+    if [ -d "${src_dir}/.git" ]; then
+        log "Updating existing source..."
+        git -C "$src_dir" fetch --quiet
+        git -C "$src_dir" reset --hard origin/main --quiet
+        log_success "Source updated at ${src_dir}"
+        return
+    fi
+
+    mkdir -p "$src_dir"
+
+    if [ "$VERSION" = "latest" ]; then
+        log "Cloning latest source from ${repo}..."
+        git clone --depth 1 "$repo" "$src_dir"
+    else
+        log "Downloading source for v${VERSION}..."
+        curl -fsSL "${repo}/archive/refs/tags/v${VERSION}.tar.gz" \
+            | tar -xz --strip-components=1 -C "$src_dir"
+    fi
+
+    log_success "Source ready at ${src_dir}"
+}
+
+# ================================
+# Build Images with Skaffold
+# ================================
+
+skaffold_build() {
+    log_section "Building Images with Skaffold (this takes ~10 minutes)"
+
+    local src_dir="${DATA_DIR}/source"
+
+    # skaffold build -p k3s runs the customBuild for each artifact:
+    #   docker build -t "$IMAGE" ... && docker save "$IMAGE" | k3s ctr images import -
+    # --tag pins the image tag to $VERSION (default: latest) so the
+    # Kubernetes manifests that reference :${VERSION} resolve correctly.
+    log "Running: skaffold build --profile k3s --tag ${VERSION}"
+    KUBECONFIG=/etc/rancher/k3s/k3s.yaml \
+        skaffold build \
+            --profile k3s \
+            --tag "${VERSION}" \
+            --filename "${src_dir}/skaffold.yaml" \
+            --default-repo "" \
+            2>&1
+
+    log_success "Images built and imported into K3s containerd"
+}
+
+# ================================
+# Wait for Pods (Live Checklist)
+# ================================
+
+wait_for_pods() {
+    log "Waiting for all services to become healthy..."
+    echo ""
+
+    local services=("caddy" "control-plane-api" "control-plane-web")
+    local timeout=300
+    local elapsed=0
+    local interval=5
+    local line_count=${#services[@]}
+    local first_draw=true
+
+    while [ "$elapsed" -lt "$timeout" ]; do
+        local all_ready=true
+        local output=""
+        local fatal=false
+
+        for svc in "${services[@]}"; do
+            local ready phase
+            ready=$(kubectl get pods -n "$NAMESPACE" -l "app=${svc}" \
+                --no-headers 2>/dev/null | awk '{print $2}' | head -1)
+            phase=$(kubectl get pods -n "$NAMESPACE" -l "app=${svc}" \
+                --no-headers 2>/dev/null | awk '{print $3}' | head -1)
+
+            if [ "$ready" = "1/1" ]; then
+                output+="  ${GREEN}✓${NC} ${svc}\n"
+            elif [[ "$phase" == "ErrImagePull" || "$phase" == "ImagePullBackOff" ]]; then
+                output+="  ${RED}✗${NC} ${svc}  ${RED}(image pull failed)${NC}\n"
+                all_ready=false
+                fatal=true
+            elif [[ "$phase" == "CrashLoopBackOff" || "$phase" == "Error" ]]; then
+                output+="  ${RED}✗${NC} ${svc}  ${RED}(crashed — run: kubectl logs -n ${NAMESPACE} -l app=${svc} --tail=30)${NC}\n"
+                all_ready=false
+            else
+                output+="  ${YELLOW}⟳${NC} ${svc}  ${DIM}(${phase:-Pending})${NC}\n"
+                all_ready=false
+            fi
+        done
+
+        if [ "$first_draw" = false ]; then
+            printf "\033[%dA" "$line_count"
+        fi
+        printf "%b" "$output"
+        first_draw=false
+
+        if $all_ready; then
+            echo ""
+            log_success "All services are healthy"
+            return 0
+        fi
+
+        if $fatal; then
+            echo ""
+            log_error "Image pull failed. Re-run with BUILD_LOCAL=true to build images on this server:"
+            log_error "  BUILD_LOCAL=true curl -fsSL https://get.goweekdays.com/install.sh | bash"
+            return 1
+        fi
+
+        sleep "$interval"
+        elapsed=$((elapsed + interval))
+    done
+
+    echo ""
+    log_warn "Timed out after ${timeout}s. Run: kubectl get pods -n ${NAMESPACE}"
+    return 1
+}
+
+# ================================
+# Check API Health
+# ================================
+
+check_api_health() {
+    local url
+    if [[ "$DOMAIN" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        url="http://${DOMAIN}/api/health"
+    else
+        url="https://${DOMAIN}/api/health"
+    fi
+
+    log "Verifying API health at ${url}..."
+
+    local attempts=0
+    while [ "$attempts" -lt 12 ]; do
+        local status
+        status=$(curl -sf -o /dev/null -w "%{http_code}" "$url" 2>/dev/null || echo "000")
+        if [ "$status" = "200" ]; then
+            log_success "API is up and responding"
+            return 0
+        fi
+        attempts=$((attempts + 1))
+        sleep 5
+    done
+
+    log_warn "API health check timed out — the service may still be warming up"
+    log_warn "Check manually: curl ${url}"
 }
 
 # ================================
@@ -548,6 +827,7 @@ spec:
       containers:
         - name: api
           image: ${IMAGE_REGISTRY}/control-plane-api:${VERSION}
+          imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 5005
           env:
@@ -658,6 +938,7 @@ spec:
       containers:
         - name: web
           image: ${IMAGE_REGISTRY}/control-plane-web:${VERSION}
+          imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 3000
           env:
@@ -781,48 +1062,43 @@ EOF
 
 print_summary() {
     log_section "Installation Complete! 🎉"
-    
-    # Wait for pods to be ready
-    log "Waiting for pods to be ready..."
-    kubectl wait --for=condition=Ready pods --all -n $NAMESPACE --timeout=300s 2>/dev/null || true
-    
+
+    wait_for_pods || true
+
     # Get public IP of this server
     PUBLIC_IP=$(get_public_ip)
-    
+
     # Determine URL
     if [[ "$DOMAIN" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
         URL="http://$DOMAIN"
     else
         URL="https://$DOMAIN"
     fi
-    
+
+    check_api_health
+
     echo ""
-    echo -e "${GREEN}Control Plane is now running!${NC}"
+    echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "${GREEN}  Control Plane is ready${NC}"
+    echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     echo ""
     echo -e "  ${BLUE}URL:${NC}         $URL"
     echo -e "  ${BLUE}Server IP:${NC}   $PUBLIC_IP"
     echo -e "  ${BLUE}Email:${NC}       $ROOT_USER_EMAIL"
     echo -e "  ${BLUE}Password:${NC}    $ROOT_USER_PASSWORD"
     echo ""
-    echo -e "${YELLOW}Important:${NC}"
-    echo "  • Save your admin credentials securely"
     if [[ ! "$DOMAIN" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-        echo "  • Make sure your DNS A record for $DOMAIN points to $PUBLIC_IP"
-        echo "  • SSL certificate will be provisioned automatically once DNS propagates"
+        echo -e "${YELLOW}Note:${NC} Point your DNS A record for ${DOMAIN} → ${PUBLIC_IP}"
+        echo -e "      SSL certificate is provisioned automatically once DNS propagates."
+        echo ""
     fi
+    echo -e "${PURPLE}Useful commands:${NC}"
+    echo "  kubectl get pods -n $NAMESPACE"
+    echo "  kubectl logs -n $NAMESPACE -l app=control-plane-api -f"
+    echo "  kubectl logs -n $NAMESPACE -l app=caddy -f"
+    echo "  kubectl exec -n $NAMESPACE deployment/control-plane-api -- node dist/cli.js reset-password EMAIL PASSWORD"
     echo ""
-    echo -e "${PURPLE}Useful Commands:${NC}"
-    echo "  • View pods:     kubectl get pods -n $NAMESPACE"
-    echo "  • View logs:     kubectl logs -n $NAMESPACE -l app=control-plane-api -f"
-    echo "  • Caddy logs:    kubectl logs -n $NAMESPACE -l app=caddy -f"
-    echo "  • Reset password: kubectl exec -n $NAMESPACE deployment/control-plane-api -- node dist/cli.js reset-password EMAIL PASSWORD"
-    echo ""
-    
-    # Show pod status
-    echo -e "${BLUE}Pod Status:${NC}"
-    kubectl get pods -n $NAMESPACE
-    echo ""
-    
+
     # Save credentials
     CREDS_FILE="$DATA_DIR/credentials.txt"
     cat > "$CREDS_FILE" <<EOF
@@ -858,6 +1134,13 @@ main() {
     install_k3s
     install_helm
     collect_config
+    check_mongodb_connection
+    if [ "${BUILD_LOCAL:-true}" = "true" ]; then
+        install_nerdctl
+        install_skaffold
+        fetch_source
+        skaffold_build
+    fi
     install_mongodb
     install_redis
     deploy_control_plane

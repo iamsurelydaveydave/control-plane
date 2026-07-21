@@ -16,7 +16,7 @@ api:
 
   image:
     # -- API image repository
-    repository: ghcr.io/yourorg/controlplane-api
+    repository: ghcr.io/iamsurelydaveydave/control-plane-api
     # -- API image tag (defaults to Chart appVersion)
     tag: ""
     # -- Image pull policy
@@ -137,7 +137,7 @@ web:
 
   image:
     # -- Web image repository
-    repository: ghcr.io/yourorg/controlplane-web
+    repository: ghcr.io/iamsurelydaveydave/control-plane-web
     # -- Web image tag (defaults to Chart appVersion)
     tag: ""
     # -- Image pull policy

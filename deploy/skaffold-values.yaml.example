@@ -1,0 +1,34 @@
+# deploy/skaffold-values.yaml.example
+#
+# Copy this file to deploy/skaffold-values.yaml and fill in the values.
+# skaffold-values.yaml is gitignored — never commit real secrets.
+#
+#   cp deploy/skaffold-values.yaml.example deploy/skaffold-values.yaml
+
+api:
+  mongodb:
+    # MongoDB Atlas connection string (required)
+    # Example: mongodb+srv://user:pass@cluster0.xxxxx.mongodb.net/controlplane?retryWrites=true&w=majority
+    uri: ""
+
+  jwt:
+    # JWT signing secret — generate with: openssl rand -base64 48
+    secret: ""
+
+  redis:
+    # Only needed when NOT using the bundled Redis subchart (i.e. redis.enabled=false)
+    host: ""
+    password: ""
+
+  # Initial admin user created on first boot (api checks if any users exist)
+  env:
+    ROOT_USER_EMAIL: "admin@example.com"
+    ROOT_USER_PASSWORD: ""     # generate with: openssl rand -base64 16
+
+ingress:
+  # Your domain — must have a DNS A record pointing to the server
+  host: "cp.example.com"
+
+  tls:
+    # cert-manager ClusterIssuer name; set to letsencrypt-staging for testing
+    issuer: letsencrypt-prod

@@ -35,6 +35,10 @@ WORKDIR /app
 # Copy source code
 COPY . .
 
+# Set API_URL for the proxy routeRules (internal K8s service URL)
+# This gets baked into the Nitro server at build time
+ENV API_URL=http://control-plane-api:5005
+
 # Build Nuxt for production
 RUN pnpm build
 

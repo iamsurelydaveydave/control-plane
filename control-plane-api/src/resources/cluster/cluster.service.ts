@@ -92,8 +92,30 @@ export function useClusterService() {
     // Check if local cluster already exists
     const existing = await repo.getLocalCluster();
     if (existing) {
-      logger.log({ level: "debug", message: "Local cluster already initialized" });
-      return existing;
+      // Update join token and API server URL if they weren't set before
+      const joinToken = readJoinToken();
+      const apiServerUrl = getApiServerUrl();
+      const updates: Record<string, string> = {};
+
+      if (joinToken && !existing.joinToken) {
+        updates.joinToken = joinToken;
+      }
+      if (apiServerUrl && !existing.apiServerUrl) {
+        updates.apiServerUrl = apiServerUrl;
+      }
+
+      if (Object.keys(updates).length > 0) {
+        await repo.updateById(existing._id!.toString(), updates as Partial<TCluster>);
+        logger.log({
+          level: "info",
+          message: `Updated local cluster with ${Object.keys(updates).join(", ")}`,
+        });
+      }
+
+      // Always sync status on startup
+      await syncClusterStatus(existing._id!.toString());
+
+      return repo.getById(existing._id!.toString());
     }
 
     // Read join token and API server URL

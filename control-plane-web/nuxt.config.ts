@@ -30,65 +30,13 @@ export default defineNuxtConfig({
     },
   },
 
-  // Proxy API routes to the backend — Nuxt handles cookie forwarding automatically
+  // Proxy API routes to the backend in development
+  // In production, Caddy handles /api/* routing, but we still need the proxy
+  // configured for SSR requests from the Nuxt server to the API.
+  // API_URL must be set at build time (in Dockerfile) for production.
   routeRules: {
-    "/api/auth/**": {
-      proxy: `${process.env.API_URL || "http://localhost:5005"}/api/auth/**`,
-    },
-    "/api/setup/**": {
-      proxy: `${process.env.API_URL || "http://localhost:5005"}/api/setup/**`,
-    },
-    "/api/users/**": {
-      proxy: `${process.env.API_URL || "http://localhost:5005"}/api/users/**`,
-    },
-    "/api/servers/**": {
-      proxy: `${process.env.API_URL || "http://localhost:5005"}/api/servers/**`,
-    },
-    "/api/apps/**": {
-      proxy: `${process.env.API_URL || "http://localhost:5005"}/api/apps/**`,
-    },
-    "/api/addons/**": {
-      proxy: `${process.env.API_URL || "http://localhost:5005"}/api/addons/**`,
-    },
-    "/api/ssh-keys/**": {
-      proxy: `${process.env.API_URL || "http://localhost:5005"}/api/ssh-keys/**`,
-    },
-    "/api/api-tokens/**": {
-      proxy: `${process.env.API_URL || "http://localhost:5005"}/api/api-tokens/**`,
-    },
-    "/api/secrets/**": {
-      proxy: `${process.env.API_URL || "http://localhost:5005"}/api/secrets/**`,
-    },
-    "/api/audit-logs/**": {
-      proxy: `${process.env.API_URL || "http://localhost:5005"}/api/audit-logs/**`,
-    },
-    "/api/alerts/**": {
-      proxy: `${process.env.API_URL || "http://localhost:5005"}/api/alerts/**`,
-    },
-    "/api/settings/**": {
-      proxy: `${process.env.API_URL || "http://localhost:5005"}/api/settings/**`,
-    },
-    // K8s-native resources
-    "/api/clusters/**": {
-      proxy: `${process.env.API_URL || "http://localhost:5005"}/api/clusters/**`,
-    },
-    "/api/nodes/**": {
-      proxy: `${process.env.API_URL || "http://localhost:5005"}/api/nodes/**`,
-    },
-    "/api/metrics/**": {
-      proxy: `${process.env.API_URL || "http://localhost:5005"}/api/metrics/**`,
-    },
-    "/api/logs/**": {
-      proxy: `${process.env.API_URL || "http://localhost:5005"}/api/logs/**`,
-    },
-    "/api/pipelines/**": {
-      proxy: `${process.env.API_URL || "http://localhost:5005"}/api/pipelines/**`,
-    },
-    "/api/registries/**": {
-      proxy: `${process.env.API_URL || "http://localhost:5005"}/api/registries/**`,
-    },
-    "/api/approvals/**": {
-      proxy: `${process.env.API_URL || "http://localhost:5005"}/api/approvals/**`,
+    "/api/**": {
+      proxy: `${process.env.API_URL || "http://localhost:5005"}/api/**`,
     },
   },
 

@@ -1,6 +1,7 @@
 import cron from "node-cron";
 import { logger } from "../utils";
 import { useClusterRepo } from "../resources/cluster/cluster.repository";
+import { useClusterService } from "../resources/cluster/cluster.service";
 import { useNodeService } from "../resources/node/node.service";
 
 let isRunning = false;
@@ -18,6 +19,7 @@ export function startNodeSyncWorker() {
     try {
       // Get local cluster
       const clusterRepo = useClusterRepo();
+      const clusterService = useClusterService();
       const cluster = await clusterRepo.getLocalCluster();
 
       if (!cluster) {
@@ -25,9 +27,14 @@ export function startNodeSyncWorker() {
         return;
       }
 
+      const clusterId = cluster._id!.toString();
+
+      // Sync cluster status first
+      await clusterService.syncClusterStatus(clusterId);
+
       // Sync nodes
       const nodeService = useNodeService();
-      const nodes = await nodeService.syncAllNodes(cluster._id!.toString());
+      const nodes = await nodeService.syncAllNodes(clusterId);
 
       logger.log({
         level: "debug",

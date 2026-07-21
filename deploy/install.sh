@@ -162,6 +162,67 @@ preflight_checks() {
 }
 
 # ================================
+# Open Firewall Ports
+# ================================
+
+open_firewall_ports() {
+    log_section "Configuring Firewall"
+    
+    # Check if iptables has a REJECT rule that would block traffic
+    if iptables -L INPUT -n 2>/dev/null | grep -q "REJECT\|DROP"; then
+        log "Opening ports 80 and 443 in iptables..."
+        
+        # Insert rules before any REJECT/DROP rules
+        # Find the line number of the first REJECT/DROP rule
+        REJECT_LINE=$(iptables -L INPUT -n --line-numbers 2>/dev/null | grep -E "REJECT|DROP" | head -1 | awk '{print $1}')
+        
+        if [ -n "$REJECT_LINE" ]; then
+            # Insert HTTP rule before REJECT
+            iptables -I INPUT "$REJECT_LINE" -p tcp --dport 80 -j ACCEPT 2>/dev/null || true
+            # Insert HTTPS rule (REJECT_LINE + 1 because we just inserted one)
+            iptables -I INPUT "$((REJECT_LINE + 1))" -p tcp --dport 443 -j ACCEPT 2>/dev/null || true
+        else
+            # No REJECT rule, just append
+            iptables -A INPUT -p tcp --dport 80 -j ACCEPT 2>/dev/null || true
+            iptables -A INPUT -p tcp --dport 443 -j ACCEPT 2>/dev/null || true
+        fi
+        
+        # Also open 6443 for Kubernetes API (for joining nodes later)
+        iptables -I INPUT "$REJECT_LINE" -p tcp --dport 6443 -j ACCEPT 2>/dev/null || true
+        
+        # Save iptables rules
+        if command -v netfilter-persistent &>/dev/null; then
+            netfilter-persistent save 2>/dev/null || true
+        elif [ -d /etc/iptables ]; then
+            iptables-save > /etc/iptables/rules.v4 2>/dev/null || true
+        fi
+        
+        log_success "Firewall ports opened (80, 443, 6443)"
+    else
+        log_success "No restrictive firewall rules detected"
+    fi
+    
+    # Also check for ufw
+    if command -v ufw &>/dev/null && ufw status | grep -q "active"; then
+        log "Opening ports in UFW..."
+        ufw allow 80/tcp >/dev/null 2>&1 || true
+        ufw allow 443/tcp >/dev/null 2>&1 || true
+        ufw allow 6443/tcp >/dev/null 2>&1 || true
+        log_success "UFW ports opened"
+    fi
+    
+    # Check for firewalld
+    if command -v firewall-cmd &>/dev/null && systemctl is-active firewalld &>/dev/null; then
+        log "Opening ports in firewalld..."
+        firewall-cmd --permanent --add-port=80/tcp >/dev/null 2>&1 || true
+        firewall-cmd --permanent --add-port=443/tcp >/dev/null 2>&1 || true
+        firewall-cmd --permanent --add-port=6443/tcp >/dev/null 2>&1 || true
+        firewall-cmd --reload >/dev/null 2>&1 || true
+        log_success "Firewalld ports opened"
+    fi
+}
+
+# ================================
 # Install K3s
 # ================================
 
@@ -422,6 +483,42 @@ $DOMAIN {
         --from-literal=Caddyfile="$CADDY_CONFIG" \
         --dry-run=client -o yaml | kubectl apply -f -
     
+    # Create ServiceAccount and RBAC for API pod
+    log "Configuring RBAC for API..."
+    cat <<EOF | kubectl apply -f -
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: control-plane-api
+  namespace: $NAMESPACE
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: control-plane-api-admin
+subjects:
+  - kind: ServiceAccount
+    name: control-plane-api
+    namespace: $NAMESPACE
+roleRef:
+  kind: ClusterRole
+  name: cluster-admin
+  apiGroup: rbac.authorization.k8s.io
+EOF
+
+    # Store k3s join token as a secret for the API pod
+    log "Storing K3s join token..."
+    local K3S_TOKEN
+    K3S_TOKEN=$(cat /var/lib/rancher/k3s/server/token 2>/dev/null || true)
+    if [ -n "$K3S_TOKEN" ]; then
+        kubectl create secret generic k3s-token -n $NAMESPACE \
+            --from-literal=token="$K3S_TOKEN" \
+            --dry-run=client -o yaml | kubectl apply -f -
+        log_success "K3s join token stored"
+    else
+        log_warn "K3s token file not found — join token will need to be set manually"
+    fi
+
     # Deploy Control Plane API
     log "Deploying Control Plane API..."
     cat <<EOF | kubectl apply -f -
@@ -442,6 +539,7 @@ spec:
       labels:
         app: control-plane-api
     spec:
+      serviceAccountName: control-plane-api
       containers:
         - name: api
           image: ${IMAGE_REGISTRY}/control-plane-api:${VERSION}
@@ -484,8 +582,14 @@ spec:
                   key: root-user-password
             - name: COOKIE_DOMAIN
               value: "$DOMAIN"
+            - name: ALLOWED_ORIGINS
+              value: "https://$DOMAIN"
             - name: K8S_ENABLED
               value: "true"
+          volumeMounts:
+            - name: k3s-token
+              mountPath: /var/lib/rancher/k3s/server
+              readOnly: true
           resources:
             requests:
               cpu: 100m
@@ -505,6 +609,13 @@ spec:
               port: 5005
             initialDelaySeconds: 15
             periodSeconds: 20
+      volumes:
+        - name: k3s-token
+          secret:
+            secretName: k3s-token
+            items:
+              - key: token
+                path: token
 ---
 apiVersion: v1
 kind: Service
@@ -582,7 +693,23 @@ spec:
       targetPort: 3000
 EOF
 
-    # Deploy Caddy
+    # Create PersistentVolumeClaim for Caddy data (certificates)
+    log "Creating persistent storage for Caddy certificates..."
+    cat <<EOF | kubectl apply -f -
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: caddy-data
+  namespace: $NAMESPACE
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+EOF
+
+    # Deploy Caddy with hostNetwork (required since K3s doesn't have cloud LB)
     log "Deploying Caddy (reverse proxy with auto-SSL)..."
     cat <<EOF | kubectl apply -f -
 apiVersion: apps/v1
@@ -594,6 +721,8 @@ metadata:
     app: caddy
 spec:
   replicas: 1
+  strategy:
+    type: Recreate  # Required for hostNetwork to avoid port conflicts
   selector:
     matchLabels:
       app: caddy
@@ -602,12 +731,16 @@ spec:
       labels:
         app: caddy
     spec:
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
       containers:
         - name: caddy
           image: caddy:2-alpine
           ports:
             - containerPort: 80
+              hostPort: 80
             - containerPort: 443
+              hostPort: 443
           volumeMounts:
             - name: caddy-config
               mountPath: /etc/caddy/Caddyfile
@@ -628,26 +761,10 @@ spec:
           configMap:
             name: caddy-config
         - name: caddy-data
-          emptyDir: {}
+          persistentVolumeClaim:
+            claimName: caddy-data
         - name: caddy-config-storage
           emptyDir: {}
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: caddy
-  namespace: $NAMESPACE
-spec:
-  type: LoadBalancer
-  selector:
-    app: caddy
-  ports:
-    - name: http
-      port: 80
-      targetPort: 80
-    - name: https
-      port: 443
-      targetPort: 443
 EOF
     
     log_success "Control Plane deployed successfully"
@@ -664,23 +781,8 @@ print_summary() {
     log "Waiting for pods to be ready..."
     kubectl wait --for=condition=Ready pods --all -n $NAMESPACE --timeout=300s 2>/dev/null || true
     
-    # Get external IP
-    EXTERNAL_IP=""
-    for i in {1..30}; do
-        EXTERNAL_IP=$(kubectl get svc caddy -n $NAMESPACE -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null)
-        if [ -n "$EXTERNAL_IP" ]; then
-            break
-        fi
-        sleep 2
-    done
-    
-    if [ -z "$EXTERNAL_IP" ]; then
-        EXTERNAL_IP=$(kubectl get svc caddy -n $NAMESPACE -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null)
-    fi
-    
-    if [ -z "$EXTERNAL_IP" ]; then
-        EXTERNAL_IP="<pending>"
-    fi
+    # Get public IP of this server
+    PUBLIC_IP=$(get_public_ip)
     
     # Determine URL
     if [[ "$DOMAIN" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
@@ -693,14 +795,14 @@ print_summary() {
     echo -e "${GREEN}Control Plane is now running!${NC}"
     echo ""
     echo -e "  ${BLUE}URL:${NC}         $URL"
-    echo -e "  ${BLUE}External IP:${NC} $EXTERNAL_IP"
+    echo -e "  ${BLUE}Server IP:${NC}   $PUBLIC_IP"
     echo -e "  ${BLUE}Email:${NC}       $ROOT_USER_EMAIL"
     echo -e "  ${BLUE}Password:${NC}    $ROOT_USER_PASSWORD"
     echo ""
     echo -e "${YELLOW}Important:${NC}"
     echo "  • Save your admin credentials securely"
     if [[ ! "$DOMAIN" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-        echo "  • Point your DNS A record for $DOMAIN to $EXTERNAL_IP"
+        echo "  • Make sure your DNS A record for $DOMAIN points to $PUBLIC_IP"
         echo "  • SSL certificate will be provisioned automatically once DNS propagates"
     fi
     echo ""
@@ -708,6 +810,7 @@ print_summary() {
     echo "  • View pods:     kubectl get pods -n $NAMESPACE"
     echo "  • View logs:     kubectl logs -n $NAMESPACE -l app=control-plane-api -f"
     echo "  • Caddy logs:    kubectl logs -n $NAMESPACE -l app=caddy -f"
+    echo "  • Reset password: kubectl exec -n $NAMESPACE deployment/control-plane-api -- node dist/cli.js reset-password EMAIL PASSWORD"
     echo ""
     
     # Show pod status
@@ -746,6 +849,7 @@ main() {
     echo ""
     
     preflight_checks
+    open_firewall_ports
     install_k3s
     install_helm
     collect_config

@@ -87,12 +87,7 @@ Nuxt UI registers `@nuxt/icon` automatically. Format: `i-{collection}-{name}`. P
 <UAlert icon="i-lucide-info" title="Heads up" />
 ```
 
-Install collections locally for reliable SSR and best performance:
-
-```bash
-pnpm i @iconify-json/lucide
-pnpm i @iconify-json/simple-icons
-```
+Icons are fetched from the Iconify API at runtime. Browse available icons at https://icones.js.org
 
 Custom local collections (Nuxt only):
 

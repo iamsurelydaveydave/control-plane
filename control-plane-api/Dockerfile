@@ -1,5 +1,5 @@
 # Control Plane API Dockerfile
-# Multi-stage build for production
+# Multi-stage build for production (multi-architecture: amd64 + arm64)
 
 # Build arguments for metadata
 ARG VERSION=dev
@@ -7,9 +7,9 @@ ARG BUILD_DATE
 ARG VCS_REF
 
 # ================================
-# Stage 1: Dependencies
+# Stage 1: Build
 # ================================
-FROM node:22-alpine AS deps
+FROM --platform=$BUILDPLATFORM node:22-alpine AS builder
 
 WORKDIR /app
 
@@ -21,13 +21,6 @@ COPY package.json yarn.lock ./
 
 # Install all dependencies (including devDependencies for build)
 RUN yarn install --frozen-lockfile
-
-# ================================
-# Stage 2: Build
-# ================================
-FROM deps AS builder
-
-WORKDIR /app
 
 # Copy source code
 COPY . .
@@ -44,20 +37,28 @@ FROM node:22-alpine AS production
 ARG VERSION=dev
 ARG BUILD_DATE
 ARG VCS_REF
+ARG TARGETPLATFORM
 
 WORKDIR /app
 
-# Install runtime dependencies only
+# Install runtime dependencies and build tools for native modules
 RUN apk add --no-cache \
     openssh-client \
-    curl
+    curl \
+    python3 \
+    make \
+    g++
 
 # Copy package files
 COPY package.json yarn.lock ./
 
-# Install production dependencies only
-RUN yarn install --frozen-lockfile --production && \
+# Install production dependencies and rebuild native modules for target platform
+RUN yarn install --frozen-lockfile --production --ignore-scripts && \
+    npm rebuild bcrypt --build-from-source && \
     yarn cache clean
+
+# Remove build tools to reduce image size
+RUN apk del python3 make g++
 
 # Copy built files from builder
 COPY --from=builder /app/dist ./dist

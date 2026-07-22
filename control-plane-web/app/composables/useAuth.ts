@@ -5,7 +5,7 @@
  * cookie set by the backend.
  */
 export default function useAuth() {
-  const { cookieConfig } = useRuntimeConfig().public
+  const cookieConfig = useCookieConfig()
   const currentUser = useState<TUser | null>('currentUser', () => null)
 
   function clearCookies() {

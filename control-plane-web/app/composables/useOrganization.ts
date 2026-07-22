@@ -4,7 +4,7 @@
  * Manages the current organization context and provides organization-scoped API calls.
  */
 export default function useOrganization() {
-  const { cookieConfig } = useRuntimeConfig().public
+  const cookieConfig = useCookieConfig()
 
   // Current organization state
   const currentOrganization = useState<TOrganization | null>('currentOrganization', () => null)

@@ -38,10 +38,15 @@ function ensureSSHKey(): { publicKey: string; privateKeyPath: string } {
 router.get("/status", async (_req, res, next) => {
   try {
     const userRepo = useUserRepo();
+    const settingsRepo = useSettingsRepo();
     const count = await userRepo.count();
+
+    // Also return API URL if configured
+    const apiUrl = await settingsRepo.get("apiUrl");
     
     res.json({
       initialized: count > 0,
+      apiUrl: apiUrl || null,
     });
   } catch (error) {
     next(error);
@@ -64,7 +69,7 @@ router.post("/init", rateLimitAuth, async (req, res, next) => {
       return;
     }
     
-    const { email, password } = req.body;
+    const { email, password, apiUrl } = req.body;
     
     if (!email || !password) {
       res.status(400).json({ error: "Email and password are required" });
@@ -85,10 +90,49 @@ router.post("/init", rateLimitAuth, async (req, res, next) => {
     // Mark as initialized
     await settingsRepo.set("initialized", "true");
     await settingsRepo.set("initializedAt", new Date().toISOString());
+
+    // Store API URL if provided (for frontend reference)
+    if (apiUrl) {
+      await settingsRepo.set("apiUrl", apiUrl);
+    }
     
     res.status(201).json({
       message: "Platform initialized successfully",
       userId,
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// Get or update platform configuration
+router.get("/config", requireAuth, async (_req, res, next) => {
+  try {
+    const settingsRepo = useSettingsRepo();
+    
+    const apiUrl = await settingsRepo.get("apiUrl");
+    const initializedAt = await settingsRepo.get("initializedAt");
+    
+    res.json({
+      apiUrl: apiUrl || null,
+      initializedAt: initializedAt || null,
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.patch("/config", requireAuth, async (req, res, next) => {
+  try {
+    const settingsRepo = useSettingsRepo();
+    const { apiUrl } = req.body;
+    
+    if (apiUrl !== undefined) {
+      await settingsRepo.set("apiUrl", apiUrl);
+    }
+    
+    res.json({
+      message: "Configuration updated",
     });
   } catch (error) {
     next(error);

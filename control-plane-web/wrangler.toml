@@ -1,0 +1,18 @@
+# Cloudflare Workers configuration for control-plane-web
+# https://developers.cloudflare.com/workers/wrangler/configuration/
+
+name = "control-plane-web"
+main = "./.output/server/index.mjs"
+compatibility_date = "2025-04-22"
+compatibility_flags = ["nodejs_compat"]
+assets = { binding = "ASSETS", directory = "./.output/public/" }
+observability = { enabled = true }
+
+[env.production]
+name = "control-plane-web"
+
+[env.staging]
+name = "control-plane-web-staging"
+
+[env.development]
+name = "control-plane-web-dev"

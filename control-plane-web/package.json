@@ -8,20 +8,28 @@
     "preview": "nuxt preview",
     "postinstall": "nuxt prepare",
     "lint": "eslint .",
-    "typecheck": "nuxt typecheck"
+    "typecheck": "nuxt typecheck",
+    "deploy": "wrangler deploy",
+    "deploy:production": "wrangler deploy --env production",
+    "deploy:staging": "wrangler deploy --env staging",
+    "deploy:dev": "wrangler deploy --env development"
   },
   "dependencies": {
     "@nuxt/image": "2.0.0",
     "@nuxt/ui": "^4.10.0",
+    "@nuxthub/core": "^0.8.19",
     "nuxt": "^4.4.8",
     "tailwindcss": "^4.3.2",
     "zod": "^3.24.0"
   },
   "devDependencies": {
+    "@cloudflare/workers-types": "^4.20250612.0",
     "@nuxt/eslint": "^1.16.0",
     "eslint": "^10.7.0",
+    "nitro-cloudflare-dev": "^0.2.2",
     "typescript": "^6.0.3",
-    "vue-tsc": "^3.3.7"
+    "vue-tsc": "^3.3.7",
+    "wrangler": "^4.11.1"
   },
   "packageManager": "pnpm@11.13.1"
 }

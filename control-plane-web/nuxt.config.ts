@@ -1,60 +1,73 @@
 // https://nuxt.com/docs/api/configuration/nuxt-config
-declare const process: { env: Record<string, string | undefined> };
+declare const process: { env: Record<string, string | undefined> }
 
 export default defineNuxtConfig({
-  modules: ["@nuxt/eslint", "@nuxt/ui", "@nuxt/image"],
+  modules: ['@nuxt/eslint', '@nuxt/ui', '@nuxt/image'],
+
+  ssr: false, // SPA mode for Cloudflare Workers
 
   devtools: {
-    enabled: true,
+    enabled: true
   },
 
-  css: ["~/assets/css/main.css"],
+  css: ['~/assets/css/main.css'],
 
   // Icons are fetched from Iconify API (icones.js.org) at runtime.
   // Browse available icons at https://icones.js.org
   icon: {
     // Use Iconify API for fetching icons (default behavior without local packages)
-    serverBundle: false,
+    serverBundle: false
   },
 
   runtimeConfig: {
     public: {
-      // Cookie config for useCookie() — mainly affects writes.
-      // In dev, don't set domain (matches backend's host-only cookie).
-      // The backend sets the real cookie options; this is just for client-side reads/writes.
-      cookieConfig:
-        process.env.NODE_ENV === "production"
-          ? {
-              domain: process.env.COOKIE_DOMAIN,
-              secure: true,
-              maxAge: 30 * 24 * 60 * 60,
-            }
-          : {
-              maxAge: 30 * 24 * 60 * 60,
-            },
-    },
+      // API URL for client-side requests (set at build time)
+      // e.g., https://api.cplane.goweekdays.com
+      apiUrl: process.env.API_URL || 'http://localhost:5005',
+
+      // Cookie domain for cross-subdomain authentication
+      cookieDomain: process.env.COOKIE_DOMAIN || '',
+
+      // Cookie max age (30 days)
+      cookieMaxAge: 30 * 24 * 60 * 60,
+
+      // Whether cookies should be secure (HTTPS only)
+      cookieSecure: process.env.NODE_ENV === 'production'
+    }
   },
 
-  // Proxy /api routes to the backend.
-  // In production, Caddy handles this; in dev/SSR, Nuxt proxies.
-  routeRules: {
-    "/api/**": {
-      proxy: `${process.env.API_URL || "http://localhost:5005"}/api/**`,
-    },
+  // Nitro configuration for Cloudflare Workers
+  nitro: {
+    preset: 'cloudflare_module',
+    cloudflare: {
+      deployConfig: true,
+      nodeCompat: true
+    }
   },
+
+  // In SPA mode, no server-side proxy — client calls API directly.
+  // The API_URL env var is baked into runtimeConfig.public.apiUrl at build time.
+  // For local dev, we still proxy to avoid CORS issues.
+  routeRules: process.env.NODE_ENV === 'production'
+    ? {}
+    : {
+        '/api/**': {
+          proxy: `${process.env.API_URL || 'http://localhost:5005'}/api/**`
+        }
+      },
 
   devServer: {
-    port: 4000,
+    port: 4000
   },
 
-  compatibilityDate: "2026-06-30",
+  compatibilityDate: '2026-06-30',
 
   eslint: {
     config: {
       stylistic: {
-        commaDangle: "never",
-        braceStyle: "1tbs",
-      },
-    },
-  },
-});
+        commaDangle: 'never',
+        braceStyle: '1tbs'
+      }
+    }
+  }
+})

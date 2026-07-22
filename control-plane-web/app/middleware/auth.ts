@@ -2,7 +2,7 @@ export default defineNuxtRouteMiddleware(async (to) => {
   // Ensure middleware runs only on the client side
   if (import.meta.server) return
 
-  const { cookieConfig } = useRuntimeConfig().public
+  const cookieConfig = useCookieConfig()
 
   // The real session secret (`sid`) is httpOnly, so client-side JS can NEVER read
   // it — only the server can (it validates `sid` on every API call via

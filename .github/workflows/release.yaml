@@ -95,9 +95,8 @@ jobs:
           echo "## 🐳 Docker Images" >> CHANGELOG_RELEASE.md
           echo "" >> CHANGELOG_RELEASE.md
           echo "\`\`\`bash" >> CHANGELOG_RELEASE.md
-          echo "# Pull the images" >> CHANGELOG_RELEASE.md
+          echo "# Pull the image" >> CHANGELOG_RELEASE.md
           echo "docker pull ghcr.io/${{ github.repository_owner }}/control-plane-api:${{ steps.version.outputs.version }}" >> CHANGELOG_RELEASE.md
-          echo "docker pull ghcr.io/${{ github.repository_owner }}/control-plane-web:${{ steps.version.outputs.version }}" >> CHANGELOG_RELEASE.md
           echo "\`\`\`" >> CHANGELOG_RELEASE.md
           echo "" >> CHANGELOG_RELEASE.md
           

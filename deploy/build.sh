@@ -1,6 +1,6 @@
 #!/bin/bash
 # =============================================================================
-# Multi-architecture Docker Build Script
+# Multi-architecture Docker Build Script (API only)
 # Builds and pushes images for both amd64 and arm64
 # =============================================================================
 
@@ -14,7 +14,6 @@ PLATFORMS="${PLATFORMS:-linux/amd64,linux/arm64}"
 
 # Image names
 API_IMAGE="$REGISTRY/$OWNER/control-plane-api"
-WEB_IMAGE="$REGISTRY/$OWNER/control-plane-web"
 
 # Colors
 RED='\033[0;31m'
@@ -55,14 +54,10 @@ docker buildx use "$BUILDER_NAME"
 # ---------------------------------------------------------------------------
 
 PUSH=false
-BUILD_API=true
-BUILD_WEB=true
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --push)      PUSH=true;     shift ;;
-        --api-only)  BUILD_WEB=false; shift ;;
-        --web-only)  BUILD_API=false; shift ;;
         --version)   VERSION="$2";  shift 2 ;;
         --platform)  PLATFORMS="$2"; shift 2 ;;
         *)           log_error "Unknown option: $1"; exit 1 ;;
@@ -93,37 +88,17 @@ fi
 # Build API
 # ---------------------------------------------------------------------------
 
-if [ "$BUILD_API" = true ]; then
-    log "Building API image: $API_IMAGE:$VERSION"
-    log "Platforms: $PLATFORMS"
-    
-    docker buildx build \
-        $BUILD_OPTS \
-        -t "$API_IMAGE:$VERSION" \
-        -t "$API_IMAGE:latest" \
-        -f deploy/Dockerfile.api \
-        control-plane-api/
-    
-    log_success "API image built: $API_IMAGE:$VERSION"
-fi
+log "Building API image: $API_IMAGE:$VERSION"
+log "Platforms: $PLATFORMS"
 
-# ---------------------------------------------------------------------------
-# Build Web
-# ---------------------------------------------------------------------------
+docker buildx build \
+    $BUILD_OPTS \
+    -t "$API_IMAGE:$VERSION" \
+    -t "$API_IMAGE:latest" \
+    -f deploy/Dockerfile.api \
+    control-plane-api/
 
-if [ "$BUILD_WEB" = true ]; then
-    log "Building Web image: $WEB_IMAGE:$VERSION"
-    log "Platforms: $PLATFORMS"
-    
-    docker buildx build \
-        $BUILD_OPTS \
-        -t "$WEB_IMAGE:$VERSION" \
-        -t "$WEB_IMAGE:latest" \
-        -f deploy/Dockerfile.web \
-        control-plane-web/
-    
-    log_success "Web image built: $WEB_IMAGE:$VERSION"
-fi
+log_success "API image built: $API_IMAGE:$VERSION"
 
 # ---------------------------------------------------------------------------
 # Summary
@@ -132,16 +107,15 @@ fi
 echo ""
 echo -e "${GREEN}Build complete!${NC}"
 echo ""
-echo "Images:"
-[ "$BUILD_API" = true ] && echo "  - $API_IMAGE:$VERSION"
-[ "$BUILD_WEB" = true ] && echo "  - $WEB_IMAGE:$VERSION"
+echo "Image:"
+echo "  - $API_IMAGE:$VERSION"
 echo ""
 echo "Platforms: $PLATFORMS"
 echo ""
 
 if [ "$PUSH" = true ]; then
-    echo "Images pushed to registry."
+    echo "Image pushed to registry."
 else
-    echo "To push images, run with --push flag:"
+    echo "To push image, run with --push flag:"
     echo "  ./deploy/build.sh --push"
 fi

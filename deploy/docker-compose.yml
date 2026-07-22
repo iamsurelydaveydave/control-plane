@@ -1,12 +1,12 @@
 # Control Plane - Docker Compose
-# Production deployment with external MongoDB and Redis
+# Production deployment with external MongoDB and Redis (API only)
 
 services:
   # ================================
   # Control Plane API
   # ================================
   control-plane-api:
-    image: ${REGISTRY_URL:-ghcr.io}/goweekdays/control-plane-api:${VERSION:-latest}
+    image: ghcr.io/iamsurelydaveydave/control-plane-api:${VERSION:-latest}
     container_name: control-plane-api
     restart: unless-stopped
     networks:
@@ -45,31 +45,6 @@ services:
       start_period: 15s
 
   # ================================
-  # Control Plane Web (Nuxt)
-  # ================================
-  control-plane-web:
-    image: ${REGISTRY_URL:-ghcr.io}/goweekdays/control-plane-web:${VERSION:-latest}
-    container_name: control-plane-web
-    restart: unless-stopped
-    networks:
-      - control-plane
-    environment:
-      - NODE_ENV=production
-      - NUXT_HOST=0.0.0.0
-      - NUXT_PORT=3000
-      - API_URL=http://control-plane-api:5005
-      - COOKIE_DOMAIN=${COOKIE_DOMAIN:-}
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 15s
-    depends_on:
-      control-plane-api:
-        condition: service_healthy
-
-  # ================================
   # Caddy (Reverse Proxy + Auto SSL + Dynamic Routing)
   # ================================
   control-plane-proxy:
@@ -91,8 +66,8 @@ services:
     # Expose admin API on internal network only (not to host)
     # API listens on 0.0.0.0:2019 inside container
     depends_on:
-      - control-plane-web
-      - control-plane-api
+      control-plane-api:
+        condition: service_healthy
 
 networks:
   control-plane:

@@ -91,7 +91,7 @@ The frontend is deployed separately to Cloudflare Workers. See [Frontend Deploym
 | `VERSION` | Specific version to install | Default: `latest` |
 | `IMAGE_REGISTRY` | Docker image registry | Default: `ghcr.io/iamsurelydaveydave` |
 | `SKIP_K3S` | Skip K3s installation (use existing cluster) | Default: `false` |
-| `BUILD_LOCAL` | Build images locally vs pull from registry | Default: `true` |
+| `BUILD_LOCAL` | Build images locally vs pull from registry | Default: `false` |
 
 ### Frontend Deployment
 
@@ -203,14 +203,12 @@ kubectl exec -n control-plane deployment/control-plane-api -- \
 
 | File | Description |
 |------|-------------|
-| `install-api.sh` | API installer script (K3s + API only) |
-| `install.sh` | Legacy full-stack installer |
+| `install.sh` | API installer script (K3s + API only) |
 | `upgrade.sh` | Upgrade script |
 | `docker-compose.yml` | Docker Compose file (legacy) |
 | `Caddyfile` | Caddy config template |
 | `versions.json` | Version information |
 | `Dockerfile.api` | API Docker image |
-| `Dockerfile.web` | Web Docker image (legacy) |
 
 ## Security Considerations
 

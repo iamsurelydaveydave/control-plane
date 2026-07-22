@@ -26,22 +26,14 @@ spec:
     - host: {{ .Values.ingress.host | quote }}
       http:
         paths:
-          # API routes - must come first for specificity
-          - path: {{ .Values.ingress.paths.api }}
+          # API routes
+          - path: /
             pathType: Prefix
             backend:
               service:
                 name: {{ include "control-plane.api.fullname" . }}
                 port:
                   number: {{ .Values.api.service.port }}
-          # Web routes - catch all remaining traffic
-          - path: {{ .Values.ingress.paths.web }}
-            pathType: Prefix
-            backend:
-              service:
-                name: {{ include "control-plane.web.fullname" . }}
-                port:
-                  number: {{ .Values.web.service.port }}
 {{- end }}
 
 ---
@@ -58,21 +50,11 @@ spec:
     {{- toYaml .Values.ingressRoute.entryPoints | nindent 4 }}
   routes:
     # API routes
-    - match: Host(`{{ .Values.ingress.host }}`) && PathPrefix(`{{ .Values.ingress.paths.api }}`)
+    - match: Host(`{{ .Values.ingress.host }}`)
       kind: Rule
       services:
         - name: {{ include "control-plane.api.fullname" . }}
           port: {{ .Values.api.service.port }}
-      {{- if .Values.ingressRoute.middlewares }}
-      middlewares:
-        {{- toYaml .Values.ingressRoute.middlewares | nindent 8 }}
-      {{- end }}
-    # Web routes (catch-all)
-    - match: Host(`{{ .Values.ingress.host }}`)
-      kind: Rule
-      services:
-        - name: {{ include "control-plane.web.fullname" . }}
-          port: {{ .Values.web.service.port }}
       {{- if .Values.ingressRoute.middlewares }}
       middlewares:
         {{- toYaml .Values.ingressRoute.middlewares | nindent 8 }}

@@ -273,9 +273,8 @@ WAITED=0
 
 while [ $WAITED -lt $MAX_WAIT ]; do
     API_HEALTH=$(docker inspect --format='{{.State.Health.Status}}' control-plane-api 2>/dev/null || echo "starting")
-    WEB_HEALTH=$(docker inspect --format='{{.State.Health.Status}}' control-plane-web 2>/dev/null || echo "starting")
     
-    if [ "$API_HEALTH" = "healthy" ] && [ "$WEB_HEALTH" = "healthy" ]; then
+    if [ "$API_HEALTH" = "healthy" ]; then
         break
     fi
     
@@ -283,9 +282,9 @@ while [ $WAITED -lt $MAX_WAIT ]; do
     WAITED=$((WAITED + 2))
 done
 
-if [ "$API_HEALTH" != "healthy" ] || [ "$WEB_HEALTH" != "healthy" ]; then
-    log_error "Services did not become healthy. Rolling back..."
-    write_status "error" "Upgrade failed - services unhealthy"
+if [ "$API_HEALTH" != "healthy" ]; then
+    log_error "API service did not become healthy. Rolling back..."
+    write_status "error" "Upgrade failed - API unhealthy"
     
     # Rollback
     cp "$BACKUP_DIR/docker-compose.yml" "$SOURCE_DIR/" 2>/dev/null || true

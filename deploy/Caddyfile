@@ -1,4 +1,4 @@
-# Control Plane Caddyfile
+# Control Plane Caddyfile (API only)
 # Automatic HTTPS with Let's Encrypt
 # Dynamic routing via Admin API for deployed apps
 
@@ -15,17 +15,9 @@
     }
 }
 
-# Control Plane UI and API
+# Control Plane API
 {$DOMAIN:localhost} {
-    # API routes
-    handle /api/* {
-        reverse_proxy control-plane-api:5005
-    }
-
-    # Everything else to Web (Nuxt)
-    handle {
-        reverse_proxy control-plane-web:3000
-    }
+    reverse_proxy control-plane-api:5005
 }
 
 # Dynamic routes for deployed apps are added via Admin API

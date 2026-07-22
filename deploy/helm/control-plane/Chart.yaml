@@ -1,6 +1,6 @@
 apiVersion: v2
 name: control-plane
-description: A Helm chart for deploying Control Plane - Kubernetes cluster management platform
+description: A Helm chart for deploying Control Plane API - Kubernetes cluster management platform (frontend deployed separately to Cloudflare Workers)
 type: application
 version: 1.0.0
 appVersion: "1.0.0"
@@ -9,7 +9,8 @@ keywords:
   - management
   - control-plane
   - paas
-home: https://github.com/yourorg/control-plane
+  - api
+home: https://github.com/iamsurelydaveydave/control-plane
 maintainers:
   - name: Control Plane Team
     email: team@example.com

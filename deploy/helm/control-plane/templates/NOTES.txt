@@ -1,8 +1,7 @@
 {{- $apiFullname := include "control-plane.api.fullname" . -}}
-{{- $webFullname := include "control-plane.web.fullname" . -}}
 
 ╔══════════════════════════════════════════════════════════════════╗
-║                     CONTROL PLANE DEPLOYED                       ║
+║               CONTROL PLANE API DEPLOYED                         ║
 ╚══════════════════════════════════════════════════════════════════╝
 
 Thank you for installing {{ .Chart.Name }}!
@@ -15,7 +14,6 @@ Namespace: {{ .Release.Namespace }}
 📦 COMPONENTS DEPLOYED:
 
   • API:  {{ $apiFullname }} ({{ .Values.api.replicas }} replicas)
-  • Web:  {{ $webFullname }} ({{ .Values.web.replicas }} replicas)
 {{- if .Values.redis.enabled }}
   • Redis: {{ .Release.Name }}-redis-master (internal)
 {{- end }}
@@ -27,7 +25,7 @@ Namespace: {{ .Release.Namespace }}
 {{- if .Values.ingress.enabled }}
 {{- if .Values.ingress.host }}
 
-  URL: {{ if .Values.ingress.tls.enabled }}https{{ else }}http{{ end }}://{{ .Values.ingress.host }}
+  API URL: {{ if .Values.ingress.tls.enabled }}https{{ else }}http{{ end }}://{{ .Values.ingress.host }}
 
 {{- else }}
 
@@ -36,16 +34,28 @@ Namespace: {{ .Release.Namespace }}
 {{- end }}
 {{- else }}
 
-  Ingress is disabled. To access the application, use port-forwarding:
+  Ingress is disabled. To access the API, use port-forwarding:
 
-  # API
   kubectl port-forward svc/{{ $apiFullname }} 5005:{{ .Values.api.service.port }} -n {{ .Release.Namespace }}
 
-  # Web
-  kubectl port-forward svc/{{ $webFullname }} 3000:{{ .Values.web.service.port }} -n {{ .Release.Namespace }}
+  Then access: http://localhost:5005/api/health
 
-  Then access: http://localhost:3000
+{{- end }}
 
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+🖥️  FRONTEND DEPLOYMENT:
+
+  The frontend is deployed separately to Cloudflare Workers.
+  
+  When building the frontend, set these environment variables:
+{{- if .Values.ingress.enabled }}
+{{- if .Values.ingress.host }}
+    API_URL={{ if .Values.ingress.tls.enabled }}https{{ else }}http{{ end }}://{{ .Values.ingress.host }}
+{{- if .Values.api.cookieDomain }}
+    COOKIE_DOMAIN={{ .Values.api.cookieDomain }}
+{{- end }}
+{{- end }}
 {{- end }}
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -60,9 +70,6 @@ Namespace: {{ .Release.Namespace }}
 
   # View API logs
   kubectl logs -f deploy/{{ $apiFullname }} -n {{ .Release.Namespace }}
-
-  # View Web logs
-  kubectl logs -f deploy/{{ $webFullname }} -n {{ .Release.Namespace }}
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -100,6 +107,6 @@ Namespace: {{ .Release.Namespace }}
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 📚 For more information, see:
-   https://github.com/yourorg/control-plane
+   https://github.com/iamsurelydaveydave/control-plane
 
 Happy deploying! 🚀

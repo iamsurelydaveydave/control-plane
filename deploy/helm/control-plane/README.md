@@ -1,12 +1,13 @@
-# Control Plane Helm Chart
+# Control Plane Helm Chart (API Only)
 
-A Helm chart for deploying Control Plane - a Kubernetes cluster management platform.
+A Helm chart for deploying Control Plane API - a Kubernetes cluster management platform.
+
+> **Note:** The frontend is deployed separately to Cloudflare Workers.
 
 ## Overview
 
 This chart deploys:
 - **API** (Express backend) - Deployment, Service, ConfigMap, Secret
-- **Web** (Nuxt frontend) - Deployment, Service
 - **Ingress** - Standard Kubernetes Ingress or Traefik IngressRoute
 - **RBAC** - ServiceAccount, ClusterRole, ClusterRoleBinding for K8s API access
 - **Redis** - Optional Bitnami Redis subchart
@@ -21,13 +22,6 @@ This chart deploys:
 
 ## Installation
 
-### Add Helm Repository (if published)
-
-```bash
-helm repo add control-plane https://charts.example.com
-helm repo update
-```
-
 ### Install from Local Chart
 
 ```bash
@@ -38,7 +32,9 @@ kubectl create namespace control-plane
 helm install control-plane ./deploy/helm/control-plane \
   --namespace control-plane \
   --set api.mongodb.uri="mongodb+srv://user:pass@cluster.mongodb.net/controlplane" \
-  --set ingress.host="cp.example.com"
+  --set api.cors.allowedOrigins="https://cplane.goweekdays.com" \
+  --set api.cookieDomain=".cplane.goweekdays.com" \
+  --set ingress.host="api.cplane.goweekdays.com"
 ```
 
 ### Install with Values File
@@ -51,9 +47,12 @@ api:
     uri: "mongodb+srv://user:pass@cluster.mongodb.net/controlplane"
   redis:
     host: "redis.example.com"
+  cors:
+    allowedOrigins: "https://cplane.goweekdays.com"
+  cookieDomain: ".cplane.goweekdays.com"
 
 ingress:
-  host: "cp.example.com"
+  host: "api.cplane.goweekdays.com"
   tls:
     enabled: true
     issuer: letsencrypt-prod
@@ -76,13 +75,14 @@ helm install control-plane ./deploy/helm/control-plane \
 | Parameter | Description |
 |-----------|-------------|
 | `api.mongodb.uri` | MongoDB connection URI (required) |
-| `ingress.host` | Hostname for the ingress (required when ingress enabled) |
+| `api.cors.allowedOrigins` | Frontend URL for CORS (required) |
+| `ingress.host` | Hostname for the API ingress (required when ingress enabled) |
 
 ### Key Values
 
 | Parameter | Description | Default |
 |-----------|-------------|---------|
-| `api.image.repository` | API image repository | `ghcr.io/yourorg/controlplane-api` |
+| `api.image.repository` | API image repository | `ghcr.io/iamsurelydaveydave/control-plane-api` |
 | `api.image.tag` | API image tag | Chart appVersion |
 | `api.replicas` | Number of API replicas | `2` |
 | `api.mongodb.uri` | MongoDB connection string | `""` |
@@ -91,10 +91,9 @@ helm install control-plane ./deploy/helm/control-plane \
 | `api.redis.port` | Redis port | `6379` |
 | `api.jwt.secret` | JWT secret (auto-generated if empty) | `""` |
 | `api.jwt.expiresIn` | JWT expiration | `7d` |
+| `api.cors.allowedOrigins` | CORS allowed origins (frontend URL) | `""` |
+| `api.cookieDomain` | Cookie domain for cross-subdomain auth | `""` |
 | `api.env` | Additional environment variables | `{}` |
-| `web.image.repository` | Web image repository | `ghcr.io/yourorg/controlplane-web` |
-| `web.image.tag` | Web image tag | Chart appVersion |
-| `web.replicas` | Number of Web replicas | `2` |
 | `ingress.enabled` | Enable ingress | `true` |
 | `ingress.className` | Ingress class name | `traefik` |
 | `ingress.host` | Ingress hostname | `""` |
@@ -164,7 +163,7 @@ For Traefik-specific features, use IngressRoute instead of standard Ingress:
 ```yaml
 ingress:
   enabled: false  # Disable standard ingress
-  host: "cp.example.com"
+  host: "api.cplane.goweekdays.com"
 
 ingressRoute:
   enabled: true
@@ -189,15 +188,6 @@ api:
     limits:
       cpu: 500m
       memory: 512Mi
-
-web:
-  resources:
-    requests:
-      cpu: 50m
-      memory: 128Mi
-    limits:
-      cpu: 200m
-      memory: 256Mi
 ```
 
 ### Autoscaling
@@ -205,12 +195,6 @@ web:
 ```yaml
 autoscaling:
   api:
-    enabled: true
-    minReplicas: 2
-    maxReplicas: 10
-    targetCPUUtilizationPercentage: 80
-  
-  web:
     enabled: true
     minReplicas: 2
     maxReplicas: 10
@@ -224,10 +208,15 @@ podDisruptionBudget:
   api:
     enabled: true
     minAvailable: 1
-  
-  web:
-    enabled: true
-    minAvailable: 1
+```
+
+## Frontend Deployment
+
+The frontend is deployed separately to Cloudflare Workers. When building the frontend, set these environment variables:
+
+```bash
+API_URL=https://api.cplane.goweekdays.com
+COOKIE_DOMAIN=.cplane.goweekdays.com
 ```
 
 ## RBAC Permissions
@@ -290,6 +279,14 @@ kubectl auth can-i create deployments --as=system:serviceaccount:control-plane:c
 ### MongoDB Connection Issues
 
 Ensure the MongoDB URI is correctly formatted and the network allows connections from the cluster. For MongoDB Atlas, ensure the cluster's IP is whitelisted.
+
+## Docker Image
+
+The API is pulled from GitHub Container Registry:
+
+```bash
+docker pull ghcr.io/iamsurelydaveydave/control-plane-api:latest
+```
 
 ## License
 

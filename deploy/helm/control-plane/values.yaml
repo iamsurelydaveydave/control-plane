@@ -1,5 +1,6 @@
-# Control Plane Helm Chart Values
-# ================================
+# Control Plane Helm Chart Values (API only)
+# ============================================
+# The frontend is deployed separately to Cloudflare Workers
 
 # -- Global settings
 global:
@@ -113,6 +114,16 @@ api:
     existingSecret: ""
     existingSecretKey: "jwt-secret"
 
+  # -- CORS configuration
+  cors:
+    # -- Allowed origins for CORS (frontend URLs)
+    # Example: https://cplane.goweekdays.com
+    allowedOrigins: ""
+
+  # -- Cookie domain for cross-subdomain auth
+  # Example: .cplane.goweekdays.com
+  cookieDomain: ""
+
   # -- Additional environment variables
   # Example:
   #   LOG_LEVEL: debug
@@ -129,81 +140,6 @@ api:
   envFrom: []
 
 # ================================
-# Web (Nuxt Frontend)
-# ================================
-web:
-  # -- Number of Web replicas
-  replicas: 2
-
-  image:
-    # -- Web image repository
-    repository: ghcr.io/iamsurelydaveydave/control-plane-web
-    # -- Web image tag (defaults to Chart appVersion)
-    tag: ""
-    # -- Image pull policy
-    pullPolicy: IfNotPresent
-
-  # -- Pod annotations
-  podAnnotations: {}
-
-  # -- Pod security context
-  podSecurityContext:
-    fsGroup: 9999
-
-  # -- Container security context
-  securityContext:
-    runAsNonRoot: true
-    runAsUser: 9999
-    readOnlyRootFilesystem: true
-    allowPrivilegeEscalation: false
-
-  # -- Resource requests and limits
-  resources:
-    requests:
-      cpu: 50m
-      memory: 128Mi
-    limits:
-      cpu: 200m
-      memory: 256Mi
-
-  # -- Node selector
-  nodeSelector: {}
-
-  # -- Tolerations
-  tolerations: []
-
-  # -- Affinity rules
-  affinity: {}
-
-  # -- Service configuration
-  service:
-    type: ClusterIP
-    port: 3000
-
-  # -- Liveness probe
-  livenessProbe:
-    httpGet:
-      path: /health
-      port: http
-    initialDelaySeconds: 15
-    periodSeconds: 20
-    timeoutSeconds: 5
-    failureThreshold: 3
-
-  # -- Readiness probe
-  readinessProbe:
-    httpGet:
-      path: /health
-      port: http
-    initialDelaySeconds: 5
-    periodSeconds: 10
-    timeoutSeconds: 5
-    failureThreshold: 3
-
-  # -- Additional environment variables
-  env: {}
-
-# ================================
 # Ingress Configuration
 # ================================
 ingress:
@@ -214,7 +150,7 @@ ingress:
   className: traefik
 
   # -- Host for the ingress (required when enabled)
-  # Example: cp.example.com
+  # Example: api.cplane.goweekdays.com
   host: ""
 
   # -- Additional ingress annotations
@@ -229,13 +165,6 @@ ingress:
     issuer: letsencrypt-prod
     # -- Use existing TLS secret (if not using cert-manager)
     existingSecret: ""
-
-  # -- Path configuration
-  paths:
-    # -- API path prefix
-    api: /api
-    # -- Web path (catch-all)
-    web: /
 
 # ================================
 # Traefik IngressRoute (alternative to standard Ingress)
@@ -319,11 +248,6 @@ podDisruptionBudget:
     minAvailable: 1
     # maxUnavailable: 1
 
-  # -- Enable PDB for Web
-  web:
-    enabled: false
-    minAvailable: 1
-
 # ================================
 # Horizontal Pod Autoscaler
 # ================================
@@ -335,10 +259,3 @@ autoscaling:
     maxReplicas: 10
     targetCPUUtilizationPercentage: 80
     targetMemoryUtilizationPercentage: 80
-
-  web:
-    # -- Enable HPA for Web
-    enabled: false
-    minReplicas: 2
-    maxReplicas: 10
-    targetCPUUtilizationPercentage: 80

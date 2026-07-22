@@ -14,7 +14,7 @@
 ## VERSION               - Specific version to install (default: latest)
 ## IMAGE_REGISTRY        - Docker image registry (default: ghcr.io/iamsurelydaveydave)
 ## SKIP_K3S              - Set to "true" to skip K3s installation (use existing cluster)
-## BUILD_LOCAL           - Set to "false" to pull pre-built images from registry instead of building on this server (default: true)
+## BUILD_LOCAL           - Set to "true" to build images locally instead of pulling from registry (default: false)
 ## WEB_ORIGIN            - Origin of the frontend app for CORS (e.g., https://cplane.goweekdays.com)
 
 set -e
@@ -358,7 +358,9 @@ wait_for_pods() {
 
         if $fatal; then
             echo ""
-            log_error "Image pull failed. Re-run with BUILD_LOCAL=true to build images on this server:"
+            log_error "Image pull failed. Ensure the image exists in the registry:"
+            log_error "  docker pull ${IMAGE_REGISTRY}/control-plane-api:${VERSION}"
+            log_error "Or re-run with BUILD_LOCAL=true to build images on this server:"
             log_error "  BUILD_LOCAL=true curl -fsSL https://get.goweekdays.com/install.sh | bash"
             return 1
         fi
@@ -1142,7 +1144,7 @@ main() {
     install_helm
     collect_config
     check_mongodb_connection
-    if [ "${BUILD_LOCAL:-true}" = "true" ]; then
+    if [ "${BUILD_LOCAL:-false}" = "true" ]; then
         install_nerdctl
         fetch_source
         build_images

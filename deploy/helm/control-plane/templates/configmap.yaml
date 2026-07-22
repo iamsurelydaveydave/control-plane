@@ -18,6 +18,16 @@ data:
   REDIS_HOST: {{ include "control-plane.redis.host" . | quote }}
   REDIS_PORT: {{ .Values.api.redis.port | quote }}
   
+  # CORS configuration
+  {{- if .Values.api.cors.allowedOrigins }}
+  ALLOWED_ORIGINS: {{ .Values.api.cors.allowedOrigins | quote }}
+  {{- end }}
+  
+  # Cookie domain for cross-subdomain auth
+  {{- if .Values.api.cookieDomain }}
+  COOKIE_DOMAIN: {{ .Values.api.cookieDomain | quote }}
+  {{- end }}
+  
   # Kubernetes configuration (API runs in-cluster)
   KUBERNETES_SERVICE_HOST: "kubernetes.default.svc"
   KUBERNETES_SERVICE_PORT: "443"

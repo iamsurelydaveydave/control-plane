@@ -1,20 +1,21 @@
 #!/bin/bash
-## Control Plane Installation Script (K8s-Native with Caddy)
+## Control Plane API Installation Script (API-only, K8s-Native with Caddy)
 ## One-liner: curl -fsSL https://get.goweekdays.com/install.sh | bash
 ##
-## Installs K3s and deploys Control Plane via Helm chart.
-## Uses Caddy for automatic HTTPS.
+## Installs K3s and deploys the Control Plane API via Helm chart.
+## The frontend is deployed separately to Cloudflare Workers.
 ##
 ## Environment variables:
-## DOMAIN               - Domain for HTTPS (required for production)
-## MONGODB_URI          - External MongoDB URI (optional, installs in-cluster if not set)
-## ACME_EMAIL           - Email for Let's Encrypt SSL certificates
-## ROOT_USER_EMAIL      - Initial admin email
-## ROOT_USER_PASSWORD   - Initial admin password
-## VERSION              - Specific version to install (default: latest)
-## IMAGE_REGISTRY       - Docker image registry (default: ghcr.io/iamsurelydaveydave)
-## SKIP_K3S             - Set to "true" to skip K3s installation (use existing cluster)
-## BUILD_LOCAL          - Set to "false" to pull pre-built images from registry instead of building on this server (default: true)
+## API_SUBDOMAIN         - Subdomain for the API (e.g., api.cplane.goweekdays.com)
+## MONGODB_URI           - External MongoDB URI (optional, installs in-cluster if not set)
+## ACME_EMAIL            - Email for Let's Encrypt SSL certificates
+## ROOT_USER_EMAIL       - Initial admin email
+## ROOT_USER_PASSWORD    - Initial admin password
+## VERSION               - Specific version to install (default: latest)
+## IMAGE_REGISTRY        - Docker image registry (default: ghcr.io/iamsurelydaveydave)
+## SKIP_K3S              - Set to "true" to skip K3s installation (use existing cluster)
+## BUILD_LOCAL           - Set to "false" to pull pre-built images from registry instead of building on this server (default: true)
+## WEB_ORIGIN            - Origin of the frontend app for CORS (e.g., https://cplane.goweekdays.com)
 
 set -e
 set -o pipefail
@@ -281,26 +282,18 @@ fetch_source() {
 # ================================
 
 build_images() {
-    log_section "Building Images (this takes ~10 minutes)"
+    log_section "Building Images (API only)"
 
     local src_dir="${DATA_DIR}/source"
     local nerdctl_cmd="nerdctl --address /run/k3s/containerd/containerd.sock --namespace k8s.io"
 
-    # Build API image
+    # Build API image only
     log "Building control-plane-api..."
     cd "${src_dir}/control-plane-api" || { log_error "Cannot cd to ${src_dir}/control-plane-api"; exit 1; }
     $nerdctl_cmd build \
         -t "${IMAGE_REGISTRY}/control-plane-api:${VERSION}" \
         -f Dockerfile . 2>&1
     log_success "control-plane-api:${VERSION} built"
-
-    # Build Web image
-    log "Building control-plane-web..."
-    cd "${src_dir}/control-plane-web" || { log_error "Cannot cd to ${src_dir}/control-plane-web"; exit 1; }
-    $nerdctl_cmd build \
-        -t "${IMAGE_REGISTRY}/control-plane-web:${VERSION}" \
-        -f Dockerfile . 2>&1
-    log_success "control-plane-web:${VERSION} built"
 
     # Verify images exist
     log "Verifying images in K3s containerd..."
@@ -317,7 +310,7 @@ wait_for_pods() {
     log "Waiting for all services to become healthy..."
     echo ""
 
-    local services=("caddy" "control-plane-api" "control-plane-web")
+    local services=("caddy" "control-plane-api")
     local timeout=300
     local elapsed=0
     local interval=5
@@ -385,10 +378,10 @@ wait_for_pods() {
 
 check_api_health() {
     local url
-    if [[ "$DOMAIN" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-        url="http://${DOMAIN}/api/health"
+    if [[ "$API_SUBDOMAIN" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        url="http://${API_SUBDOMAIN}/api/health"
     else
-        url="https://${DOMAIN}/api/health"
+        url="https://${API_SUBDOMAIN}/api/health"
     fi
 
     log "Verifying API health at ${url}..."
@@ -608,11 +601,37 @@ collect_config() {
     
     PUBLIC_IP=$(get_public_ip)
     
-    # Domain
-    if [ -z "$DOMAIN" ]; then
-        prompt DOMAIN "Enter domain for Control Plane (or press Enter to use IP)" "$PUBLIC_IP"
+    # API Subdomain
+    if [ -z "$API_SUBDOMAIN" ]; then
+        prompt API_SUBDOMAIN "Enter subdomain for Control Plane API (e.g., api.cplane.goweekdays.com)" ""
+        if [ -z "$API_SUBDOMAIN" ]; then
+            log_error "API subdomain is required"
+            exit 1
+        fi
     fi
-    log "Domain: $DOMAIN"
+    log "API Subdomain: $API_SUBDOMAIN"
+
+    # Web Origin (for CORS)
+    if [ -z "$WEB_ORIGIN" ]; then
+        # Default: derive from API subdomain (replace api. with empty or use parent domain)
+        local default_origin
+        if [[ "$API_SUBDOMAIN" =~ ^api\. ]]; then
+            # e.g., api.cplane.goweekdays.com -> https://cplane.goweekdays.com
+            default_origin="https://$(echo "$API_SUBDOMAIN" | sed 's/^api\.//')"
+        else
+            default_origin=""
+        fi
+        prompt WEB_ORIGIN "Enter frontend origin for CORS (e.g., https://cplane.goweekdays.com)" "$default_origin"
+    fi
+    log "Web Origin: $WEB_ORIGIN"
+
+    # Cookie domain (parent domain for cross-subdomain cookies)
+    # Extract the parent domain from API_SUBDOMAIN (e.g., api.cplane.goweekdays.com -> .cplane.goweekdays.com)
+    COOKIE_DOMAIN_VALUE=$(echo "$API_SUBDOMAIN" | sed -E 's/^[^.]+//')  # .cplane.goweekdays.com
+    if [ -z "$COOKIE_DOMAIN_VALUE" ]; then
+        COOKIE_DOMAIN_VALUE=".$API_SUBDOMAIN"
+    fi
+    log "Cookie Domain: $COOKIE_DOMAIN_VALUE"
     
     # ACME Email for Let's Encrypt
     if [ -z "$ACME_EMAIL" ]; then
@@ -642,7 +661,7 @@ collect_config() {
     
     # Admin credentials
     if [ -z "$ROOT_USER_EMAIL" ]; then
-        prompt ROOT_USER_EMAIL "Enter admin email" "admin@$DOMAIN"
+        prompt ROOT_USER_EMAIL "Enter admin email" "admin@${API_SUBDOMAIN#api.}"
     fi
     log "Admin email: $ROOT_USER_EMAIL"
     
@@ -733,14 +752,21 @@ install_redis() {
 }
 
 # ================================
-# Deploy Control Plane with Caddy
+# Deploy Control Plane API with Caddy
 # ================================
 
 deploy_control_plane() {
-    log_section "Deploying Control Plane"
+    log_section "Deploying Control Plane API"
     
     # Create namespace
     kubectl create namespace $NAMESPACE --dry-run=client -o yaml | kubectl apply -f -
+    
+    # Compute API URL based on subdomain
+    if [[ "$API_SUBDOMAIN" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        API_URL="http://${API_SUBDOMAIN}"
+    else
+        API_URL="https://${API_SUBDOMAIN}"
+    fi
     
     # Create secrets
     log "Creating secrets..."
@@ -754,21 +780,18 @@ deploy_control_plane() {
         --from-literal=redis-url="$REDIS_URL" \
         --from-literal=root-user-email="$ROOT_USER_EMAIL" \
         --from-literal=root-user-password="$ROOT_USER_PASSWORD" \
+        --from-literal=api-url="$API_URL" \
+        --from-literal=web-origin="$WEB_ORIGIN" \
         --dry-run=client -o yaml | kubectl apply -f -
     
-    # Create Caddyfile ConfigMap
+    # Create Caddyfile ConfigMap (API only)
     log "Creating Caddy configuration..."
     
     # Determine if we should use HTTPS
-    if [[ "$DOMAIN" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    if [[ "$API_SUBDOMAIN" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
         # IP address - use HTTP only
-        CADDY_CONFIG="http://$DOMAIN {
-    handle /api/* {
-        reverse_proxy control-plane-api:5005
-    }
-    handle {
-        reverse_proxy control-plane-web:3000
-    }
+        CADDY_CONFIG="http://$API_SUBDOMAIN {
+    reverse_proxy control-plane-api:5005
 }"
     else
         # Domain - use HTTPS with automatic certs
@@ -777,22 +800,12 @@ deploy_control_plane() {
     email $ACME_EMAIL
 }
 
-$DOMAIN {
-    handle /api/* {
-        reverse_proxy control-plane-api:5005
-    }
-    handle {
-        reverse_proxy control-plane-web:3000
-    }
+$API_SUBDOMAIN {
+    reverse_proxy control-plane-api:5005
 }"
         else
-            CADDY_CONFIG="$DOMAIN {
-    handle /api/* {
-        reverse_proxy control-plane-api:5005
-    }
-    handle {
-        reverse_proxy control-plane-web:3000
-    }
+            CADDY_CONFIG="$API_SUBDOMAIN {
+    reverse_proxy control-plane-api:5005
 }"
         fi
     fi
@@ -911,9 +924,9 @@ spec:
                   name: control-plane-secrets
                   key: root-user-password
             - name: COOKIE_DOMAIN
-              value: "$DOMAIN"
+              value: "$COOKIE_DOMAIN_VALUE"
             - name: ALLOWED_ORIGINS
-              value: "$(if [[ "$DOMAIN" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then echo "http://$DOMAIN"; else echo "https://$DOMAIN"; fi)"
+              value: "$WEB_ORIGIN"
             - name: K8S_ENABLED
               value: "true"
           volumeMounts:
@@ -958,70 +971,6 @@ spec:
   ports:
     - port: 5005
       targetPort: 5005
-EOF
-
-    # Deploy Control Plane Web
-    log "Deploying Control Plane Web..."
-    cat <<EOF | kubectl apply -f -
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: control-plane-web
-  namespace: $NAMESPACE
-  labels:
-    app: control-plane-web
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: control-plane-web
-  template:
-    metadata:
-      labels:
-        app: control-plane-web
-    spec:
-      containers:
-        - name: web
-          image: ${IMAGE_REGISTRY}/control-plane-web:${VERSION}
-          imagePullPolicy: IfNotPresent
-          ports:
-            - containerPort: 3000
-          env:
-            - name: NODE_ENV
-              value: "production"
-            - name: NUXT_HOST
-              value: "0.0.0.0"
-            - name: NUXT_PORT
-              value: "3000"
-            - name: API_URL
-              value: "http://control-plane-api:5005"
-            - name: COOKIE_DOMAIN
-              value: "$DOMAIN"
-          resources:
-            requests:
-              cpu: 50m
-              memory: 128Mi
-            limits:
-              cpu: 200m
-              memory: 256Mi
-          readinessProbe:
-            httpGet:
-              path: /
-              port: 3000
-            initialDelaySeconds: 10
-            periodSeconds: 10
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: control-plane-web
-  namespace: $NAMESPACE
-spec:
-  selector:
-    app: control-plane-web
-  ports:
-    - port: 3000
-      targetPort: 3000
 EOF
 
     # Create PersistentVolumeClaim for Caddy data (certificates)
@@ -1098,7 +1047,7 @@ spec:
           emptyDir: {}
 EOF
     
-    log_success "Control Plane deployed successfully"
+    log_success "Control Plane API deployed successfully"
 }
 
 # ================================
@@ -1113,30 +1062,35 @@ print_summary() {
     # Get public IP of this server
     PUBLIC_IP=$(get_public_ip)
 
-    # Determine URL
-    if [[ "$DOMAIN" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-        URL="http://$DOMAIN"
+    # Determine API URL
+    if [[ "$API_SUBDOMAIN" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        API_URL="http://$API_SUBDOMAIN"
     else
-        URL="https://$DOMAIN"
+        API_URL="https://$API_SUBDOMAIN"
     fi
 
     check_api_health
 
     echo ""
     echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    echo -e "${GREEN}  Control Plane is ready${NC}"
+    echo -e "${GREEN}  Control Plane API is ready${NC}"
     echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     echo ""
-    echo -e "  ${BLUE}URL:${NC}         $URL"
-    echo -e "  ${BLUE}Server IP:${NC}   $PUBLIC_IP"
-    echo -e "  ${BLUE}Email:${NC}       $ROOT_USER_EMAIL"
-    echo -e "  ${BLUE}Password:${NC}    $ROOT_USER_PASSWORD"
+    echo -e "  ${BLUE}API URL:${NC}       $API_URL"
+    echo -e "  ${BLUE}Server IP:${NC}     $PUBLIC_IP"
+    echo -e "  ${BLUE}Admin Email:${NC}   $ROOT_USER_EMAIL"
+    echo -e "  ${BLUE}Admin Password:${NC} $ROOT_USER_PASSWORD"
     echo ""
-    if [[ ! "$DOMAIN" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-        echo -e "${YELLOW}Note:${NC} Point your DNS A record for ${DOMAIN} → ${PUBLIC_IP}"
+    if [[ ! "$API_SUBDOMAIN" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        echo -e "${YELLOW}Note:${NC} Point your DNS A record for ${API_SUBDOMAIN} → ${PUBLIC_IP}"
         echo -e "      SSL certificate is provisioned automatically once DNS propagates."
         echo ""
     fi
+    echo -e "${PURPLE}Frontend Deployment:${NC}"
+    echo "  The frontend is deployed separately to Cloudflare Workers."
+    echo "  Set the following environment variable when building the frontend:"
+    echo "    API_URL=${API_URL}"
+    echo ""
     echo -e "${PURPLE}Useful commands:${NC}"
     echo "  kubectl get pods -n $NAMESPACE"
     echo "  kubectl logs -n $NAMESPACE -l app=control-plane-api -f"
@@ -1147,11 +1101,16 @@ print_summary() {
     # Save credentials
     CREDS_FILE="$DATA_DIR/credentials.txt"
     cat > "$CREDS_FILE" <<EOF
-Control Plane Credentials
-========================
-URL:      $URL
-Email:    $ROOT_USER_EMAIL
-Password: $ROOT_USER_PASSWORD
+Control Plane API Credentials
+==============================
+API URL:       $API_URL
+Server IP:     $PUBLIC_IP
+Admin Email:   $ROOT_USER_EMAIL
+Admin Password: $ROOT_USER_PASSWORD
+
+Frontend Environment:
+  API_URL=$API_URL
+  COOKIE_DOMAIN=$COOKIE_DOMAIN_VALUE
 
 Generated: $(date)
 EOF
@@ -1168,10 +1127,13 @@ main() {
     echo ""
     echo -e "${PURPLE}╔═══════════════════════════════════════════════════════════╗${NC}"
     echo -e "${PURPLE}║                                                           ║${NC}"
-    echo -e "${PURPLE}║   ${GREEN}Control Plane Installer${PURPLE}                               ║${NC}"
-    echo -e "${PURPLE}║   ${NC}Kubernetes-Native Self-Hosted PaaS${PURPLE}                    ║${NC}"
+    echo -e "${PURPLE}║   ${GREEN}Control Plane API Installer${PURPLE}                           ║${NC}"
+    echo -e "${PURPLE}║   ${NC}Kubernetes-Native Self-Hosted PaaS (API Only)${PURPLE}         ║${NC}"
     echo -e "${PURPLE}║                                                           ║${NC}"
     echo -e "${PURPLE}╚═══════════════════════════════════════════════════════════╝${NC}"
+    echo ""
+    echo -e "${YELLOW}Note:${NC} This installer deploys only the API. The frontend is"
+    echo -e "      deployed separately to Cloudflare Workers."
     echo ""
     
     preflight_checks

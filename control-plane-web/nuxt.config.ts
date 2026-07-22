@@ -10,11 +10,11 @@ export default defineNuxtConfig({
 
   css: ["~/assets/css/main.css"],
 
-  // Bundle all icons at build time so they're available on first render
-  // instead of being loaded on demand at runtime (which requires the API endpoint)
+  // Bundle all icons at build time — both server-side and client-side.
+  // This eliminates the need for the /api/_nuxt_icon endpoint entirely.
   icon: {
+    serverBundle: "local",
     clientBundle: {
-      // Scan all source files and bundle every icon used
       scan: true,
     },
   },
@@ -44,6 +44,8 @@ export default defineNuxtConfig({
   // configured for SSR requests from the Nuxt server to the API.
   // API_URL must be set at build time (in Dockerfile) for production.
   routeRules: {
+    // Exclude Nuxt internal endpoints from the proxy
+    "/api/_nuxt_icon/**": {},
     "/api/**": {
       proxy: `${process.env.API_URL || "http://localhost:5005"}/api/**`,
     },

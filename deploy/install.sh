@@ -293,11 +293,12 @@ skaffold_build() {
     #   nerdctl build -t "$IMAGE" ... (directly into K3s containerd)
     # --tag pins the image tag to $VERSION (default: latest) so the
     # Kubernetes manifests that reference :${VERSION} resolve correctly.
-    log "Running: skaffold build --profile k3s --tag ${VERSION}"
+    log "Running: skaffold build --profile k3s --tag ${VERSION} --cache-artifacts=false"
     KUBECONFIG=/etc/rancher/k3s/k3s.yaml \
         skaffold build \
             --profile k3s \
             --tag "${VERSION}" \
+            --cache-artifacts=false \
             2>&1
 
     log_success "Images built and imported into K3s containerd"

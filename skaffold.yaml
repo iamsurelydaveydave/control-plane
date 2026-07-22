@@ -113,6 +113,8 @@ profiles:
         sha256: {}      # content-based tag — stable across re-runs if source unchanged
 
       local:
+        push: false     # never push — images stay local in K3s containerd
+        tryImportMissing: false  # don't check remote registry for cached images
         concurrency: 1  # build sequentially to avoid OOM on small servers
 
     deploy:

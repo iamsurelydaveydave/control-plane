@@ -107,174 +107,185 @@ defineExpose({ setTestResult })
 </script>
 
 <template>
-  <div class="space-y-4 p-4">
-    <!-- Header -->
-    <div class="flex items-center gap-3">
-      <div class="flex size-10 items-center justify-center rounded-lg bg-primary/10">
-        <UIcon name="i-lucide-plus" class="size-5 text-primary" />
-      </div>
-      <div>
-        <h3 class="font-semibold text-highlighted">
-          Add Worker Node
-        </h3>
-        <p class="text-sm text-muted">
-          Enter VM details to provision a new worker node.
-        </p>
-      </div>
-    </div>
-
-    <UForm
-      :schema="schema"
-      :state="form"
-      class="space-y-4"
-      @submit="onSubmit"
-    >
-      <!-- Node Name -->
-      <UFormField label="Node Name" name="name" required>
-        <UInput
-          v-model="form.name"
-          placeholder="worker-1"
-          icon="i-lucide-tag"
-        />
-      </UFormField>
-
-      <!-- Host / IP -->
-      <UFormField label="Host / IP Address" name="host" required>
-        <UInput
-          v-model="form.host"
-          placeholder="192.168.1.100"
-          icon="i-lucide-server"
-        />
-      </UFormField>
-
-      <!-- SSH Configuration -->
-      <div class="grid grid-cols-2 gap-4">
-        <UFormField label="SSH User" name="sshUser">
-          <UInput
-            v-model="form.sshUser"
-            placeholder="root"
-            icon="i-lucide-user"
-          />
-        </UFormField>
-
-        <UFormField label="SSH Port" name="sshPort">
-          <UInput
-            v-model.number="form.sshPort"
-            type="number"
-            placeholder="22"
-            icon="i-lucide-hash"
-          />
-        </UFormField>
-      </div>
-
-      <!-- SSH Key -->
-      <UFormField label="SSH Key" name="sshKeyId" required>
-        <USelect
-          v-model="form.sshKeyId"
-          :items="sshKeyOptions"
-          placeholder="Select SSH key..."
-          icon="i-lucide-key"
-          value-key="value"
-        />
-        <template #hint>
-          <span class="text-xs text-muted">
-            The private key will be used to connect to the VM.
-            <NuxtLink
-              to="/settings/secrets"
-              class="text-primary hover:underline"
-            >
-              Manage SSH keys
-            </NuxtLink>
-          </span>
-        </template>
-      </UFormField>
-
-      <!-- Test Connection Button -->
-      <div class="flex items-center gap-4">
-        <UButton
-          type="button"
-          variant="soft"
-          color="neutral"
-          icon="i-lucide-plug"
-          label="Test Connection"
-          :loading="testingConnection"
-          :disabled="!form.host || !form.sshKeyId"
-          @click="handleTestConnection"
-        />
-
-        <!-- Test Result -->
-        <div v-if="connectionTestResult" class="flex-1">
-          <UAlert
-            v-if="connectionTestResult.success"
-            color="success"
-            variant="soft"
-            icon="i-lucide-check-circle"
-          >
-            <template #title>
-              Connection successful
-            </template>
-            <template #description>
-              <span v-if="connectionTestResult.serverInfo">
-                {{ connectionTestResult.serverInfo.hostname }} · {{ connectionTestResult.serverInfo.os }}
-              </span>
-            </template>
-          </UAlert>
-          <UAlert
-            v-else
-            color="error"
-            variant="soft"
-            icon="i-lucide-x-circle"
-          >
-            <template #title>
-              Connection failed
-            </template>
-            <template #description>
-              {{ connectionTestResult.error || 'Unable to connect' }}
-            </template>
-          </UAlert>
+  <div class="flex flex-col max-h-[80vh]">
+    <!-- Scrollable content -->
+    <div class="flex-1 overflow-y-auto p-4 space-y-4">
+      <!-- Header -->
+      <div class="flex items-center gap-3">
+        <div class="flex size-10 items-center justify-center rounded-lg bg-primary/10">
+          <UIcon name="i-lucide-plus" class="size-5 text-primary" />
+        </div>
+        <div>
+          <h3 class="font-semibold text-highlighted">
+            Add Worker Node
+          </h3>
+          <p class="text-sm text-muted">
+            Enter VM details to provision a new worker node.
+          </p>
         </div>
       </div>
 
-      <!-- Info about what happens -->
-      <UAlert
-        title="What happens next?"
-        icon="i-lucide-info"
-        color="info"
-        variant="subtle"
+      <UForm
+        id="provision-form"
+        :schema="schema"
+        :state="form"
+        class="space-y-4"
+        @submit="onSubmit"
       >
-        <template #description>
-          <ol class="list-decimal list-inside text-sm space-y-1 mt-2">
-            <li>Control Plane will SSH to your VM</li>
-            <li>Install k3s agent to join the cluster</li>
-            <li>The node will appear in the list once ready</li>
-          </ol>
-        </template>
-      </UAlert>
+        <!-- Node Name -->
+        <UFormField label="Node Name" name="name" required>
+          <UInput
+            v-model="form.name"
+            placeholder="worker-1"
+            icon="i-lucide-tag"
+            class="w-full"
+          />
+        </UFormField>
 
-      <!-- Error message -->
-      <UAlert
-        v-if="message"
-        :description="message"
-        color="error"
-        variant="soft"
-        icon="i-lucide-alert-circle"
+        <!-- Host / IP -->
+        <UFormField label="Host / IP Address" name="host" required>
+          <UInput
+            v-model="form.host"
+            placeholder="192.168.1.100"
+            icon="i-lucide-server"
+            class="w-full"
+          />
+        </UFormField>
+
+        <!-- SSH Configuration -->
+        <div class="grid grid-cols-2 gap-4">
+          <UFormField label="SSH User" name="sshUser">
+            <UInput
+              v-model="form.sshUser"
+              placeholder="root"
+              icon="i-lucide-user"
+              class="w-full"
+            />
+          </UFormField>
+
+          <UFormField label="SSH Port" name="sshPort">
+            <UInput
+              v-model.number="form.sshPort"
+              type="number"
+              placeholder="22"
+              icon="i-lucide-hash"
+              class="w-full"
+            />
+          </UFormField>
+        </div>
+
+        <!-- SSH Key -->
+        <UFormField label="SSH Key" name="sshKeyId" required>
+          <USelect
+            v-model="form.sshKeyId"
+            :items="sshKeyOptions"
+            placeholder="Select SSH key..."
+            icon="i-lucide-key"
+            value-key="value"
+            class="w-full"
+          />
+          <template #hint>
+            <span class="text-xs text-muted">
+              The private key will be used to connect to the VM.
+              <NuxtLink
+                to="/settings/secrets"
+                class="text-primary hover:underline"
+              >
+                Manage SSH keys
+              </NuxtLink>
+            </span>
+          </template>
+        </UFormField>
+
+        <!-- Test Connection Button -->
+        <div class="flex items-center gap-4">
+          <UButton
+            type="button"
+            variant="soft"
+            color="neutral"
+            icon="i-lucide-plug"
+            label="Test Connection"
+            :loading="testingConnection"
+            :disabled="!form.host || !form.sshKeyId"
+            @click="handleTestConnection"
+          />
+
+          <!-- Test Result -->
+          <div v-if="connectionTestResult" class="flex-1">
+            <UAlert
+              v-if="connectionTestResult.success"
+              color="success"
+              variant="soft"
+              icon="i-lucide-check-circle"
+            >
+              <template #title>
+                Connection successful
+              </template>
+              <template #description>
+                <span v-if="connectionTestResult.serverInfo">
+                  {{ connectionTestResult.serverInfo.hostname }} · {{ connectionTestResult.serverInfo.os }}
+                </span>
+              </template>
+            </UAlert>
+            <UAlert
+              v-else
+              color="error"
+              variant="soft"
+              icon="i-lucide-x-circle"
+            >
+              <template #title>
+                Connection failed
+              </template>
+              <template #description>
+                {{ connectionTestResult.error || 'Unable to connect' }}
+              </template>
+            </UAlert>
+          </div>
+        </div>
+
+        <!-- Info about what happens -->
+        <UAlert
+          title="What happens next?"
+          icon="i-lucide-info"
+          color="info"
+          variant="subtle"
+        >
+          <template #description>
+            <ol class="list-decimal list-inside text-sm space-y-1 mt-2">
+              <li>Control Plane will SSH to your VM</li>
+              <li>Install k3s agent to join the cluster</li>
+              <li>The node will appear in the list once ready</li>
+            </ol>
+          </template>
+        </UAlert>
+
+        <!-- Error message -->
+        <UAlert
+          v-if="message"
+          :description="message"
+          color="error"
+          variant="soft"
+          icon="i-lucide-alert-circle"
+        />
+      </UForm>
+    </div>
+
+    <!-- Sticky Footer -->
+    <div class="flex items-center justify-end gap-2 border-t border-default bg-default px-4 py-3">
+      <UButton
+        variant="ghost"
+        color="neutral"
+        label="Cancel"
+        @click="emit('close')"
       />
-
-      <!-- Footer -->
-      <div class="flex justify-end gap-2 pt-4 border-t border-default">
-        <UButton
-          variant="ghost"
-          label="Cancel"
-          @click="emit('close')"
-        />
-        <UButton
-          type="submit"
-          label="Provision Node"
-          icon="i-lucide-rocket"
-          :loading="loading"
-          :disabled="!canSubmit"
-        />
-      </div>
-    </UForm>
+      <UButton
+        type="submit"
+        form="provision-form"
+        label="Provision Node"
+        icon="i-lucide-rocket"
+        :loading="loading"
+        :disabled="!canSubmit"
+      />
+    </div>
   </div>
 </template>

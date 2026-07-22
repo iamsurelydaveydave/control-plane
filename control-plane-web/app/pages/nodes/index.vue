@@ -145,12 +145,6 @@ const columns: TableColumn<TNode>[] = [
 
 type ModalMode = 'add' | 'provision' | 'view' | 'edit' | 'delete' | 'drain' | 'joinCommand' | 'provisioningStatus'
 
-interface SetItemOptions {
-  mode: ModalMode
-  node?: TNode
-  open?: boolean
-}
-
 const openAdd = ref(false)
 const openProvision = ref(false)
 const openProvisioningStatus = ref(false)
@@ -168,77 +162,57 @@ const provisionFormRef = ref<{ setTestResult: (result: TTestConnectionResponse) 
 // SSH keys for provisioning form
 const sshKeys = ref<Array<{ _id: string; name: string }>>([])
 
-// Form state for manual add
-const addForm = ref({ nodeName: '' })
-
-function setItem(opts: SetItemOptions) {
-  const { mode, node, open = true } = opts
-
-  // Reset all modals
-  openAdd.value = false
-  openProvision.value = false
-  openProvisioningStatus.value = false
-  openView.value = false
-  openEdit.value = false
-  openDelete.value = false
-  openDrain.value = false
-  openJoinCommand.value = false
+/**
+ * Central state setter — resets the resource, message, and opens/closes the right modal.
+ * Never toggle modal refs directly; always use setItem().
+ */
+function setItem({
+  value = { ...useNode().node.value },
+  mode = '' as ModalMode | '',
+  open = false
+} = {}) {
+  // Deep copy the node value to avoid mutations
+  Object.assign(nodeRef.value, JSON.parse(JSON.stringify(value)))
   formMessage.value = ''
 
-  if (node) {
-    selectedNode.value = node
-    nodeRef.value = { ...node }
+  if (mode === 'add') {
+    // Reset the node to a fresh default for add mode
+    nodeRef.value = { ...useNode().node.value }
+    openAdd.value = open
   }
-
-  switch (mode) {
-    case 'add':
-      addForm.value = { nodeName: '' }
-      openAdd.value = open
-      break
-    case 'provision':
-      openProvision.value = open
-      break
-    case 'provisioningStatus':
-      openProvisioningStatus.value = open
-      break
-    case 'view':
-      openView.value = open
-      break
-    case 'edit':
-      openEdit.value = open
-      break
-    case 'delete':
-      openDelete.value = open
-      break
-    case 'drain':
-      openDrain.value = open
-      break
-    case 'joinCommand':
-      joinCommand.value = node?.joinCommand || ''
-      openJoinCommand.value = open
-      break
+  if (mode === 'provision') openProvision.value = open
+  if (mode === 'provisioningStatus') openProvisioningStatus.value = open
+  if (mode === 'view') {
+    selectedNode.value = value as TNode
+    openView.value = open
+  }
+  if (mode === 'edit') openEdit.value = open
+  if (mode === 'delete') openDelete.value = open
+  if (mode === 'drain') openDrain.value = open
+  if (mode === 'joinCommand') {
+    joinCommand.value = (value as TNode)?.joinCommand || ''
+    openJoinCommand.value = open
   }
 }
 
 // Load SSH keys when opening provision modal
 async function openProvisionModal() {
   try {
-    const result = await getSecrets()
-    sshKeys.value = (result.items || [])
-      .filter((s: TSecret) => s.type === 'ssh-private-key')
-      .map((s: TSecret) => ({ _id: s._id, name: s.name }))
+    // SSH keys are stored via /ssh-keys API, not /secrets
+    const result = await useNuxtApp().$api<{ items: Array<{ _id: string; name: string }> }>('/ssh-keys')
+    sshKeys.value = (result.items || []).map((k) => ({ _id: k._id, name: k.name }))
   } catch {
     sshKeys.value = []
   }
-  setItem({ mode: 'provision' })
+  setItem({ mode: 'provision', open: true })
 }
 
 function handleRowClick(_e: Event, row: { original: TNode }) {
   // If node is provisioning, show provisioning status
   if (row.original.provisioningStatus === 'running' || row.original.status === 'provisioning') {
-    setItem({ mode: 'provisioningStatus', node: row.original })
+    setItem({ value: row.original, mode: 'provisioningStatus', open: true })
   } else {
-    setItem({ mode: 'view', node: row.original })
+    setItem({ value: row.original, mode: 'view', open: true })
   }
 }
 
@@ -274,9 +248,7 @@ async function handleProvision(data: TNodeProvisionInput) {
     })
 
     // Close provision form and open provisioning status
-    openProvision.value = false
-    selectedNode.value = result.node
-    openProvisioningStatus.value = true
+    setItem({ value: result.node, mode: 'provisioningStatus', open: true })
 
     await refreshNodes()
   } catch (error) {
@@ -333,25 +305,22 @@ async function handleRetryProvision() {
 }
 
 async function handleGenerateJoinToken() {
-  if (!clusterId.value || !addForm.value.nodeName.trim()) return
+  if (!clusterId.value || !nodeRef.value.name?.trim()) return
 
   loadingForm.value = true
   formMessage.value = ''
 
   try {
-    const result = await generateJoinToken(clusterId.value, addForm.value.nodeName.trim())
+    const result = await generateJoinToken(clusterId.value, nodeRef.value.name.trim())
     toast.add({
       title: 'Join token generated',
-      description: `Run the command on your VM to join "${addForm.value.nodeName}" to the cluster.`,
+      description: `Run the command on your VM to join "${nodeRef.value.name}" to the cluster.`,
       color: 'success',
       icon: 'i-lucide-check-circle'
     })
 
-    // Show the join command modal
-    openAdd.value = false
-    joinCommand.value = result.joinCommand
-    selectedNode.value = result.node
-    openJoinCommand.value = true
+    // Show the join command modal (close add modal, open joinCommand modal)
+    setItem({ value: result.node, mode: 'joinCommand', open: true })
 
     await refreshNodes()
   } catch (error) {
@@ -521,7 +490,7 @@ function getNodeActions(node: TNode) {
       {
         label: 'View provisioning status',
         icon: 'i-lucide-loader',
-        onSelect: () => setItem({ mode: 'provisioningStatus', node })
+        onSelect: () => setItem({ value: node, mode: 'provisioningStatus', open: true })
       }
     ])
   } else if (node.status === 'failed') {
@@ -529,7 +498,7 @@ function getNodeActions(node: TNode) {
       {
         label: 'View failure details',
         icon: 'i-lucide-alert-circle',
-        onSelect: () => setItem({ mode: 'provisioningStatus', node })
+        onSelect: () => setItem({ value: node, mode: 'provisioningStatus', open: true })
       },
       {
         label: 'Retry provisioning',
@@ -545,7 +514,7 @@ function getNodeActions(node: TNode) {
       {
         label: 'View details',
         icon: 'i-lucide-eye',
-        onSelect: () => setItem({ mode: 'view', node })
+        onSelect: () => setItem({ value: node, mode: 'view', open: true })
       }
     ])
   }
@@ -571,7 +540,7 @@ function getNodeActions(node: TNode) {
     ops.push({
       label: 'Drain (evict pods)',
       icon: 'i-lucide-arrow-right-from-line',
-      onSelect: () => setItem({ mode: 'drain', node })
+      onSelect: () => setItem({ value: node, mode: 'drain', open: true })
     })
 
     actions.push(ops)
@@ -583,7 +552,7 @@ function getNodeActions(node: TNode) {
       {
         label: 'Show join command',
         icon: 'i-lucide-terminal',
-        onSelect: () => setItem({ mode: 'joinCommand', node })
+        onSelect: () => setItem({ value: node, mode: 'joinCommand', open: true })
       }
     ])
   }
@@ -595,7 +564,7 @@ function getNodeActions(node: TNode) {
         label: 'Remove from cluster',
         icon: 'i-lucide-trash-2',
         color: 'error' as const,
-        onSelect: () => setItem({ mode: 'delete', node })
+        onSelect: () => setItem({ value: node, mode: 'delete', open: true })
       }
     ])
   }
@@ -654,7 +623,7 @@ async function copyToClipboard(text: string) {
               {
                 label: 'Manual join (advanced)',
                 icon: 'i-lucide-terminal',
-                onSelect: () => setItem({ mode: 'add' })
+                onSelect: () => setItem({ mode: 'add', open: true })
               }
             ]
           ]"
@@ -802,7 +771,7 @@ async function copyToClipboard(text: string) {
               class="mt-4"
               icon="i-lucide-plus"
               label="Add Worker"
-              @click="setItem({ mode: 'add' })"
+              @click="setItem({ mode: 'add', open: true })"
             />
           </div>
         </template>
@@ -821,60 +790,15 @@ async function copyToClipboard(text: string) {
     <!-- Add Worker Modal -->
     <UModal v-model:open="openAdd">
       <template #content>
-        <div class="p-4 space-y-4">
-          <div class="flex items-center gap-3">
-            <div class="flex size-10 items-center justify-center rounded-lg bg-primary/10">
-              <UIcon name="i-lucide-plus" class="size-5 text-primary" />
-            </div>
-            <div>
-              <h3 class="font-semibold text-highlighted">
-                Add Worker Node
-              </h3>
-              <p class="text-sm text-muted">
-                Generate a join command for a new worker VM.
-              </p>
-            </div>
-          </div>
-
-          <UAlert
-            title="How it works"
-            description="Enter a name for your worker node, then run the generated command on your VM to join it to the cluster."
-            icon="i-lucide-info"
-            color="info"
-            variant="subtle"
-          />
-
-          <UFormField label="Node name" name="nodeName">
-            <UInput
-              v-model="addForm.nodeName"
-              placeholder="worker-1"
-              icon="i-lucide-hard-drive"
-            />
-          </UFormField>
-
-          <UAlert
-            v-if="formMessage"
-            :description="formMessage"
-            color="error"
-            variant="subtle"
-          />
-        </div>
-
-        <div class="sticky bottom-0 border-t border-default bg-default flex gap-2 p-4">
-          <UButton
-            class="flex-1"
-            variant="ghost"
-            label="Cancel"
-            @click="openAdd = false"
-          />
-          <UButton
-            class="flex-1"
-            label="Generate Join Token"
-            :loading="loadingForm"
-            :disabled="!addForm.nodeName.trim()"
-            @click="handleGenerateJoinToken"
-          />
-        </div>
+        <NodeForm
+          v-model="nodeRef"
+          v-model:message="formMessage"
+          title="Add Worker Node"
+          mode="add"
+          :loading="loadingForm"
+          @close="setItem({ mode: 'add' })"
+          @submit="handleGenerateJoinToken"
+        />
       </template>
     </UModal>
 
@@ -924,7 +848,7 @@ async function copyToClipboard(text: string) {
         <div class="sticky bottom-0 border-t border-default bg-default flex justify-end p-4">
           <UButton
             label="Done"
-            @click="openJoinCommand = false"
+            @click="setItem({ mode: 'joinCommand' })"
           />
         </div>
       </template>
@@ -935,13 +859,13 @@ async function copyToClipboard(text: string) {
       <template #content>
         <NodeForm
           v-if="selectedNode"
-          v-model:node="nodeRef"
+          v-model="nodeRef"
           v-model:message="formMessage"
           mode="view"
           :loading="loadingForm"
-          @close="openView = false"
-          @edit="setItem({ mode: 'edit', node: selectedNode })"
-          @delete="setItem({ mode: 'delete', node: selectedNode })"
+          @close="setItem({ mode: 'view' })"
+          @edit="setItem({ value: selectedNode, mode: 'edit', open: true })"
+          @delete="setItem({ value: selectedNode, mode: 'delete', open: true })"
         />
       </template>
     </UModal>
@@ -951,12 +875,12 @@ async function copyToClipboard(text: string) {
       <template #content>
         <NodeForm
           v-if="selectedNode"
-          v-model:node="nodeRef"
+          v-model="nodeRef"
           v-model:message="formMessage"
           mode="edit"
           :loading="loadingForm"
-          @close="openEdit = false"
-          @submit="openEdit = false"
+          @close="setItem({ mode: 'edit' })"
+          @submit="setItem({ mode: 'edit' })"
         />
       </template>
     </UModal>
@@ -993,7 +917,7 @@ async function copyToClipboard(text: string) {
             class="flex-1"
             variant="ghost"
             label="Cancel"
-            @click="openDrain = false"
+            @click="setItem({ mode: 'drain' })"
           />
           <UButton
             class="flex-1"
@@ -1015,14 +939,14 @@ async function copyToClipboard(text: string) {
           confirm-text="Remove"
           confirm-color="error"
           :loading="loadingForm"
-          @close="openDelete = false"
+          @close="setItem({ mode: 'delete' })"
           @confirm="handleRemove"
         />
       </template>
     </UModal>
 
     <!-- Provision Node Modal -->
-    <UModal v-model:open="openProvision">
+    <UModal v-model:open="openProvision" :ui="{ content: 'sm:max-w-lg' }">
       <template #content>
         <NodeProvisionForm
           v-if="clusterId"
@@ -1031,7 +955,7 @@ async function copyToClipboard(text: string) {
           :ssh-keys="sshKeys"
           :loading="loadingForm"
           v-model:message="formMessage"
-          @close="openProvision = false"
+          @close="setItem({ mode: 'provision' })"
           @submit="handleProvision"
           @test-connection="handleTestConnection"
         />
@@ -1045,7 +969,7 @@ async function copyToClipboard(text: string) {
           v-if="selectedNode"
           :node="selectedNode"
           :loading="loadingForm"
-          @close="openProvisioningStatus = false; refreshNodes()"
+          @close="setItem({ mode: 'provisioningStatus' }); refreshNodes()"
           @retry="handleRetryProvision"
           @refresh="handleRefreshProvisioningStatus"
         />

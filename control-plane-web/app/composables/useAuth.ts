@@ -52,14 +52,9 @@ export default function useAuth() {
   }
 
   async function logout() {
-    try {
-      await useNuxtApp().$api('/auth/logout', { method: 'DELETE' })
-    } catch {
-      // Ignore
-    }
-    currentUser.value = null
-    clearCookies()
-    await navigateTo('/login')
+    // Navigate to the logout page which handles cleanup.
+    // Using replace prevents the back button from returning to authenticated pages.
+    await navigateTo('/logout', { replace: true })
   }
 
   // True when a caught $fetch error is an authentication failure — i.e. the

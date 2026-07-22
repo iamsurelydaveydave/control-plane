@@ -1,6 +1,5 @@
 <script setup lang="ts">
 import { z } from 'zod'
-import type { FormSubmitEvent } from '#ui/types'
 
 /**
  * NodeForm — Form component for Node resource.
@@ -11,13 +10,16 @@ import type { FormSubmitEvent } from '#ui/types'
  * - 'edit': Limited editing (name only)
  *
  * Never calls API functions — only emits events (submit, close, edit, delete).
+ * Uses defineModel for two-way binding of the node object and error message.
  */
 const props = withDefaults(
   defineProps<{
+    title?: string
     mode?: 'add' | 'edit' | 'view'
     loading?: boolean
   }>(),
   {
+    title: '',
     mode: 'add',
     loading: false
   }
@@ -30,23 +32,15 @@ const emit = defineEmits<{
   delete: []
 }>()
 
+// Two-way binding via defineModel — parent owns the state
 const message = defineModel<string>('message', { default: '' })
-const node = defineModel<TNode>('node', {
-  default: () => ({
-    _id: '',
-    clusterId: '',
-    name: '',
-    role: 'worker' as TNodeRole,
-    host: '',
-    status: 'pending' as TNodeStatus,
-    createdAt: '',
-    updatedAt: ''
-  })
-})
+const node = defineModel<TNode>({ required: true })
 
 // ---------------------------------------------------------------------------
 // Computed helpers
 // ---------------------------------------------------------------------------
+
+const isMutable = computed(() => ['add', 'edit'].includes(props.mode))
 
 const submitLabel = computed(() => {
   switch (props.mode) {
@@ -56,44 +50,43 @@ const submitLabel = computed(() => {
   }
 })
 
+const formTitle = computed(() => {
+  if (props.title) return props.title
+  switch (props.mode) {
+    case 'add': return 'Add Worker Node'
+    case 'edit': return 'Edit Node'
+    case 'view': return 'Node Details'
+    default: return 'Node'
+  }
+})
+
 // ---------------------------------------------------------------------------
-// Add mode: Form validation
+// Form validation schemas
 // ---------------------------------------------------------------------------
 
 const addSchema = z.object({
-  name: z.string().min(1, 'Node name is required').max(63, 'Name must be 63 characters or less')
-    .regex(/^[a-z0-9][a-z0-9-]*[a-z0-9]$|^[a-z0-9]$/, 'Must be lowercase alphanumeric with hyphens, cannot start/end with hyphen')
+  name: z.string()
+    .min(1, 'Node name is required')
+    .max(63, 'Name must be 63 characters or less')
+    .regex(
+      /^[a-z0-9][a-z0-9-]*[a-z0-9]$|^[a-z0-9]$/,
+      'Must be lowercase alphanumeric with hyphens, cannot start/end with hyphen'
+    )
 })
-
-type AddFormState = z.output<typeof addSchema>
-
-const addFormState = ref<AddFormState>({
-  name: ''
-})
-
-function onAddSubmit(event: FormSubmitEvent<AddFormState>) {
-  node.value.name = event.data.name
-  emit('submit')
-}
-
-// ---------------------------------------------------------------------------
-// Edit mode: Form validation
-// ---------------------------------------------------------------------------
 
 const editSchema = z.object({
-  name: z.string().min(1, 'Node name is required').max(63, 'Name must be 63 characters or less')
+  name: z.string()
+    .min(1, 'Node name is required')
+    .max(63, 'Name must be 63 characters or less')
 })
 
-type EditFormState = z.output<typeof editSchema>
+const schema = computed(() => props.mode === 'add' ? addSchema : editSchema)
 
-const editFormState = computed(() => ({
-  name: node.value.name
-}))
-
-function onEditSubmit(event: FormSubmitEvent<EditFormState>) {
-  node.value.name = event.data.name
-  emit('submit')
-}
+// More actions menu for view mode
+const moreActions = computed(() => [[
+  { label: 'Edit', icon: 'i-lucide-pencil', onSelect: () => emit('edit') },
+  { label: 'Delete', icon: 'i-lucide-trash-2', class: 'text-error', onSelect: () => emit('delete') }
+]])
 
 // ---------------------------------------------------------------------------
 // Status badge colors
@@ -186,17 +179,28 @@ const labelEntries = computed(() => {
 </script>
 
 <template>
-  <div class="p-6 space-y-6">
+  <div class="space-y-4 p-4">
+    <!-- Modal header -->
+    <div class="font-semibold text-lg">{{ formTitle }}</div>
+
     <!-- ══════════════════════════════════════════════════════════════════════
          ADD MODE: Generate join token form
          ══════════════════════════════════════════════════════════════════════ -->
     <template v-if="mode === 'add'">
       <UForm
-        :schema="addSchema"
-        :state="addFormState"
+        :schema="schema"
+        :state="node"
         class="space-y-4"
-        @submit="onAddSubmit"
+        @submit="emit('submit')"
       >
+        <UAlert
+          color="info"
+          variant="soft"
+          icon="i-lucide-info"
+          title="How it works"
+          description="Enter a name for your worker node, then run the generated command on your VM to join it to the cluster."
+        />
+
         <UFormField
           label="Node Name"
           name="name"
@@ -204,51 +208,23 @@ const labelEntries = computed(() => {
           required
         >
           <UInput
-            v-model="addFormState.name"
+            v-model="node.name"
             placeholder="worker-1"
+            icon="i-lucide-hard-drive"
+            :readonly="!isMutable"
             class="w-full"
           />
         </UFormField>
-
-        <UAlert
-          color="info"
-          variant="soft"
-          icon="i-lucide-info"
-          title="How it works"
-        >
-          <template #description>
-            <ol class="list-decimal list-inside text-sm space-y-1">
-              <li>Enter a name for your new worker node</li>
-              <li>Click "Generate Join Token" to create a join command</li>
-              <li>Run the command on your worker server to join it to the cluster</li>
-            </ol>
-          </template>
-        </UAlert>
 
         <!-- Error message -->
         <UAlert
           v-if="message"
           color="error"
-          variant="subtle"
+          variant="soft"
           icon="i-lucide-circle-alert"
           :description="message"
+          @close="message = ''"
         />
-
-        <!-- Footer -->
-        <div class="flex justify-end gap-2 pt-2 border-t border-default">
-          <UButton
-            color="neutral"
-            variant="outline"
-            label="Cancel"
-            :disabled="loading"
-            @click="emit('close')"
-          />
-          <UButton
-            type="submit"
-            :label="submitLabel"
-            :loading="loading"
-          />
-        </div>
       </UForm>
     </template>
 
@@ -262,7 +238,6 @@ const labelEntries = computed(() => {
           <UFormField label="Name">
             <span class="text-sm font-mono">{{ node.name }}</span>
           </UFormField>
-
           <UFormField label="Role">
             <UBadge
               :color="roleColor(node.role)"
@@ -271,7 +246,6 @@ const labelEntries = computed(() => {
             />
           </UFormField>
         </div>
-
         <div class="grid grid-cols-2 gap-4">
           <UFormField label="Status">
             <div class="flex items-center gap-2">
@@ -281,20 +255,20 @@ const labelEntries = computed(() => {
                 variant="subtle"
               />
               <UIcon
-                v-if="['joining', 'draining', 'deleting'].includes(node.status)"
-                name="i-lucide-loader-2"
-                class="size-4 animate-spin text-muted"
+                v-if="node.unschedulable"
+                name="i-lucide-ban"
+                class="size-4 text-warning"
+                title="Cordoned - unschedulable"
               />
             </div>
           </UFormField>
-
           <UFormField label="Host / IP">
             <span class="text-sm font-mono">{{ node.host || '—' }}</span>
           </UFormField>
         </div>
       </div>
 
-      <!-- K8s info -->
+      <!-- Kubernetes info -->
       <template v-if="node.k8sName || node.k8sVersion">
         <USeparator>
           <div class="flex items-center gap-2 px-2">
@@ -302,53 +276,42 @@ const labelEntries = computed(() => {
               name="i-lucide-box"
               class="size-4 text-muted"
             />
-            <span class="text-sm font-medium">Kubernetes Info</span>
+            <span class="text-sm font-medium">Kubernetes</span>
           </div>
         </USeparator>
 
         <div class="grid grid-cols-2 gap-4">
           <UFormField
             v-if="node.k8sName"
-            label="K8s Node Name"
+            label="Kubernetes Name"
           >
             <span class="text-sm font-mono">{{ node.k8sName }}</span>
           </UFormField>
-
           <UFormField
             v-if="node.k8sVersion"
-            label="K8s Version"
+            label="Version"
           >
             <span class="text-sm font-mono">{{ node.k8sVersion }}</span>
           </UFormField>
-
-          <UFormField
-            v-if="node.containerRuntime"
-            label="Container Runtime"
-          >
-            <span class="text-sm font-mono">{{ node.containerRuntime }}</span>
-          </UFormField>
-
           <UFormField
             v-if="node.osImage"
-            label="OS Image"
+            label="OS"
           >
             <span class="text-sm">{{ node.osImage }}</span>
           </UFormField>
-
           <UFormField
             v-if="node.architecture"
             label="Architecture"
           >
             <span class="text-sm font-mono">{{ node.architecture }}</span>
           </UFormField>
-
           <UFormField
-            v-if="node.unschedulable !== undefined"
-            label="Schedulable"
+            v-if="node.containerRuntime"
+            label="Container Runtime"
           >
             <UBadge
-              :color="node.unschedulable ? 'warning' : 'success'"
-              :label="node.unschedulable ? 'Cordoned' : 'Yes'"
+              color="neutral"
+              :label="node.containerRuntime"
               variant="subtle"
             />
           </UFormField>
@@ -370,20 +333,18 @@ const labelEntries = computed(() => {
         <div class="grid grid-cols-3 gap-4">
           <div class="rounded-lg border border-default bg-elevated/50 p-3">
             <span class="text-xs text-muted uppercase tracking-wide mb-1 block">CPU</span>
-            <span class="text-lg font-semibold block">{{ node.resources.cpuCapacity }}</span>
-            <span class="text-xs text-muted block">{{ node.resources.cpuAllocatable }} allocatable</span>
+            <span class="text-lg font-semibold block">{{ node.resources.cpuCapacity || '—' }}</span>
+            <span class="text-xs text-muted block">{{ node.resources.cpuAllocatable || '' }} allocatable</span>
           </div>
-
           <div class="rounded-lg border border-default bg-elevated/50 p-3">
             <span class="text-xs text-muted uppercase tracking-wide mb-1 block">Memory</span>
-            <span class="text-lg font-semibold block">{{ node.resources.memoryCapacity }}</span>
-            <span class="text-xs text-muted block">{{ node.resources.memoryAllocatable }} allocatable</span>
+            <span class="text-lg font-semibold block">{{ node.resources.memoryCapacity || '—' }}</span>
+            <span class="text-xs text-muted block">{{ node.resources.memoryAllocatable || '' }} allocatable</span>
           </div>
-
           <div class="rounded-lg border border-default bg-elevated/50 p-3">
             <span class="text-xs text-muted uppercase tracking-wide mb-1 block">Pods</span>
             <span class="text-lg font-semibold block">
-              {{ node.resources.podsRunning ?? '—' }} / {{ node.resources.podsCapacity }}
+              {{ node.resources.podsRunning || 0 }} / {{ node.resources.podsCapacity || '—' }}
             </span>
             <span class="text-xs text-muted block">running / capacity</span>
           </div>
@@ -411,9 +372,12 @@ const labelEntries = computed(() => {
             <div class="flex items-center gap-2">
               <span class="text-sm font-medium">{{ condition.type }}</span>
               <span
-                v-if="condition.reason"
-                class="text-xs text-muted"
-              >({{ condition.reason }})</span>
+                :class="[
+                  'size-2 rounded-full',
+                  conditionStatusColor(condition.status) === 'success' ? 'bg-success' :
+                  conditionStatusColor(condition.status) === 'error' ? 'bg-error' : 'bg-neutral'
+                ]"
+              />
             </div>
             <UBadge
               :color="conditionStatusColor(condition.status)"
@@ -430,13 +394,13 @@ const labelEntries = computed(() => {
         <USeparator>
           <div class="flex items-center gap-2 px-2">
             <UIcon
-              name="i-lucide-tag"
+              name="i-lucide-tags"
               class="size-4 text-muted"
             />
             <span class="text-sm font-medium">Labels</span>
             <UBadge
-              :label="String(labelEntries.length)"
               color="neutral"
+              :label="String(labelEntries.length)"
               variant="subtle"
               size="xs"
             />
@@ -448,7 +412,7 @@ const labelEntries = computed(() => {
             v-for="[key, value] in labelEntries"
             :key="key"
             color="neutral"
-            variant="outline"
+            variant="subtle"
             size="sm"
           >
             <span class="font-mono text-xs">{{ key }}={{ value }}</span>
@@ -466,8 +430,8 @@ const labelEntries = computed(() => {
             />
             <span class="text-sm font-medium">Taints</span>
             <UBadge
-              :label="String(node.taints.length)"
               color="warning"
+              :label="String(node.taints.length)"
               variant="subtle"
               size="xs"
             />
@@ -476,16 +440,16 @@ const labelEntries = computed(() => {
 
         <div class="rounded-lg border border-default divide-y divide-default">
           <div
-            v-for="(taint, idx) in node.taints"
-            :key="idx"
+            v-for="taint in node.taints"
+            :key="taint.key"
             class="flex items-center justify-between px-3 py-2"
           >
             <span class="text-sm font-mono">
               {{ taint.key }}{{ taint.value ? `=${taint.value}` : '' }}
             </span>
             <UBadge
-              :label="taint.effect"
               color="warning"
+              :label="taint.effect"
               variant="subtle"
               size="xs"
             />
@@ -493,7 +457,7 @@ const labelEntries = computed(() => {
         </div>
       </template>
 
-      <!-- Join command (for pending workers) -->
+      <!-- Join command (for pending nodes) -->
       <template v-if="node.joinCommand && ['pending', 'joining'].includes(node.status)">
         <USeparator>
           <div class="flex items-center gap-2 px-2">
@@ -506,14 +470,14 @@ const labelEntries = computed(() => {
         </USeparator>
 
         <UAlert
-          color="info"
+          color="warning"
           variant="soft"
-          icon="i-lucide-info"
-          title="Run this on your worker server"
+          icon="i-lucide-alert-triangle"
+          title="Run this command on your worker VM"
         >
           <template #description>
             <p class="text-sm mb-2">
-              SSH into your server and execute the command below to join this node to the cluster.
+              Run as root to join the node to the cluster.
             </p>
           </template>
         </UAlert>
@@ -521,15 +485,13 @@ const labelEntries = computed(() => {
         <div class="relative">
           <pre class="bg-elevated rounded-lg p-4 text-sm font-mono overflow-x-auto whitespace-pre-wrap break-all border border-default">{{ node.joinCommand }}</pre>
           <UButton
+            class="absolute right-2 top-2"
             :icon="copied ? 'i-lucide-check' : 'i-lucide-copy'"
             :color="copied ? 'success' : 'neutral'"
             variant="ghost"
             size="xs"
-            class="absolute top-2 right-2"
             @click="copyJoinCommand"
-          >
-            {{ copied ? 'Copied!' : 'Copy' }}
-          </UButton>
+          />
         </div>
       </template>
 
@@ -540,7 +502,7 @@ const labelEntries = computed(() => {
             name="i-lucide-clock"
             class="size-4 text-muted"
           />
-          <span class="text-sm font-medium">Timestamps</span>
+          <span class="text-sm font-medium">Timeline</span>
         </div>
       </USeparator>
 
@@ -548,11 +510,9 @@ const labelEntries = computed(() => {
         <UFormField label="Created">
           <span class="text-muted">{{ formatDate(node.createdAt) }}</span>
         </UFormField>
-
         <UFormField label="Joined">
           <span class="text-muted">{{ formatDate(node.joinedAt) }}</span>
         </UFormField>
-
         <UFormField label="Last Seen">
           <span class="text-muted">
             {{ node.lastSeenAt ? formatRelativeTime(node.lastSeenAt) : '—' }}
@@ -560,46 +520,24 @@ const labelEntries = computed(() => {
         </UFormField>
       </div>
 
-      <!-- Status message -->
+      <!-- Error message (view mode) -->
       <UAlert
-        v-if="node.statusMessage"
-        color="warning"
-        variant="soft"
-        icon="i-lucide-alert-triangle"
-        :description="node.statusMessage"
-      />
-
-      <!-- Error message -->
-      <UAlert
-        v-if="message"
+        v-if="node.status === 'offline'"
         color="error"
-        variant="subtle"
-        icon="i-lucide-circle-alert"
-        :description="message"
+        variant="soft"
+        icon="i-lucide-wifi-off"
+        title="Node Offline"
+        description="This node has not been seen recently. Check the node's network connectivity and kubelet status."
       />
 
-      <!-- Footer -->
-      <div class="flex justify-end gap-2 pt-2 border-t border-default">
-        <UButton
-          color="neutral"
-          variant="outline"
-          label="Close"
-          @click="emit('close')"
-        />
-
-        <UDropdownMenu
-          :items="[
-            [{ label: 'Edit', icon: 'i-lucide-edit', onSelect: () => emit('edit') }],
-            [{ label: 'Delete', icon: 'i-lucide-trash', color: 'error' as const, onSelect: () => emit('delete') }]
-          ]"
-        >
-          <UButton
-            color="neutral"
-            label="More actions"
-            trailing-icon="i-lucide-chevron-down"
-          />
-        </UDropdownMenu>
-      </div>
+      <UAlert
+        v-if="node.provisioningStatus === 'failed'"
+        color="error"
+        variant="soft"
+        icon="i-lucide-circle-x"
+        title="Provisioning Failed"
+        description="Node provisioning failed. Check the provisioning logs for details."
+      />
     </template>
 
     <!-- ══════════════════════════════════════════════════════════════════════
@@ -607,10 +545,10 @@ const labelEntries = computed(() => {
          ══════════════════════════════════════════════════════════════════════ -->
     <template v-if="mode === 'edit'">
       <UForm
-        :schema="editSchema"
-        :state="editFormState"
+        :schema="schema"
+        :state="node"
         class="space-y-4"
-        @submit="onEditSubmit"
+        @submit="emit('submit')"
       >
         <UFormField
           label="Name"
@@ -620,6 +558,7 @@ const labelEntries = computed(() => {
           <UInput
             v-model="node.name"
             placeholder="worker-1"
+            :readonly="!isMutable"
             class="w-full"
           />
         </UFormField>
@@ -650,27 +589,41 @@ const labelEntries = computed(() => {
         <UAlert
           v-if="message"
           color="error"
-          variant="subtle"
+          variant="soft"
           icon="i-lucide-circle-alert"
           :description="message"
+          @close="message = ''"
         />
-
-        <!-- Footer -->
-        <div class="flex justify-end gap-2 pt-2 border-t border-default">
-          <UButton
-            color="neutral"
-            variant="outline"
-            label="Cancel"
-            :disabled="loading"
-            @click="emit('close')"
-          />
-          <UButton
-            type="submit"
-            :label="submitLabel"
-            :loading="loading"
-          />
-        </div>
       </UForm>
     </template>
+
+    <!-- ══════════════════════════════════════════════════════════════════════
+         FOOTER ACTION BAR
+         ══════════════════════════════════════════════════════════════════════ -->
+    <div class="sticky bottom-0 flex items-center justify-end gap-2 border-t border-default bg-default px-4 py-3">
+      <!-- Cancel / Close -->
+      <UButton
+        variant="ghost"
+        color="neutral"
+        :disabled="loading"
+        @click="emit('close')"
+      >
+        {{ isMutable ? 'Cancel' : 'Close' }}
+      </UButton>
+
+      <!-- View mode: More actions menu -->
+      <UDropdownMenu v-if="mode === 'view'" :items="moreActions">
+        <UButton color="neutral" trailing-icon="i-lucide-chevron-down">More actions</UButton>
+      </UDropdownMenu>
+
+      <!-- Add/Edit mode: Submit button -->
+      <UButton
+        v-if="isMutable"
+        :loading="loading"
+        @click="emit('submit')"
+      >
+        {{ submitLabel }}
+      </UButton>
+    </div>
   </div>
 </template>

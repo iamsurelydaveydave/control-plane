@@ -10,7 +10,7 @@
 
 import { useNodeRepo } from "./node.repository";
 import { useClusterRepo } from "../cluster/cluster.repository";
-import { useSecretRepo } from "../secret/secret.repository";
+import { useSSHKeyRepo } from "../ssh-key/ssh-key.repository";
 import { useSSHService } from "../../services/ssh.service";
 import { useKubernetesService } from "../../services/kubernetes.service";
 import { TNode, TProvisioningStep } from "./node.model";
@@ -29,7 +29,7 @@ const PROVISIONING_STEPS = [
 export function useNodeProvisioningService() {
   const nodeRepo = useNodeRepo();
   const clusterRepo = useClusterRepo();
-  const secretRepo = useSecretRepo();
+  const sshKeyRepo = useSSHKeyRepo();
   const sshService = useSSHService();
   const k8sService = useKubernetesService();
 
@@ -44,13 +44,15 @@ export function useNodeProvisioningService() {
   }): Promise<{ success: boolean; error?: string; serverInfo?: { os: string; hostname: string } }> {
     const { host, sshPort = 22, sshUser = "root", sshKeyId } = params;
 
-    // Get SSH private key from secrets
-    const secret = await secretRepo.getById(sshKeyId);
-    if (!secret || secret.type !== "ssh-private-key") {
-      return { success: false, error: "SSH key not found or invalid type" };
+    // Get SSH private key from ssh-keys collection
+    let sshKey;
+    try {
+      sshKey = await sshKeyRepo.getById(sshKeyId);
+    } catch (error: any) {
+      return { success: false, error: error.message || "SSH key not found" };
     }
 
-    const privateKey = secret.value;
+    const privateKey = sshKey.privateKey;
 
     try {
       const result = await sshService.testConnection({
@@ -116,13 +118,9 @@ export function useNodeProvisioningService() {
       );
     }
 
-    // Get SSH private key
-    const secret = await secretRepo.getById(node.sshKeyId);
-    if (!secret || secret.type !== "ssh-private-key") {
-      throw new BadRequestError("SSH key not found or invalid type");
-    }
-
-    const privateKey = secret.value;
+    // Get SSH private key from ssh-keys collection
+    const sshKey = await sshKeyRepo.getById(node.sshKeyId);
+    const privateKey = sshKey.privateKey;
 
     // Initialize provisioning log
     const log: TProvisioningStep[] = PROVISIONING_STEPS.map((step) => ({

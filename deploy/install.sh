@@ -653,7 +653,9 @@ collect_config() {
     
     # Generate secrets
     JWT_SECRET=$(generate_password)
+    REFRESH_TOKEN_SECRET=$(generate_password)
     SESSION_SECRET=$(generate_password)
+    SECRET_KEY=$(generate_password)
     REDIS_PASSWORD=$(generate_password)
 }
 
@@ -746,7 +748,9 @@ deploy_control_plane() {
         --namespace $NAMESPACE \
         --from-literal=mongodb-uri="$MONGODB_URI" \
         --from-literal=jwt-secret="$JWT_SECRET" \
+        --from-literal=refresh-token-secret="$REFRESH_TOKEN_SECRET" \
         --from-literal=session-secret="$SESSION_SECRET" \
+        --from-literal=secret-key="$SECRET_KEY" \
         --from-literal=redis-url="$REDIS_URL" \
         --from-literal=root-user-email="$ROOT_USER_EMAIL" \
         --from-literal=root-user-password="$ROOT_USER_PASSWORD" \
@@ -881,11 +885,21 @@ spec:
                 secretKeyRef:
                   name: control-plane-secrets
                   key: jwt-secret
+            - name: REFRESH_TOKEN_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: control-plane-secrets
+                  key: refresh-token-secret
             - name: SESSION_SECRET
               valueFrom:
                 secretKeyRef:
                   name: control-plane-secrets
                   key: session-secret
+            - name: SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: control-plane-secrets
+                  key: secret-key
             - name: ROOT_USER_EMAIL
               valueFrom:
                 secretKeyRef:

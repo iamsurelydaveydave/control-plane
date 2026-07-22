@@ -4,16 +4,14 @@
  * Uses Nuxt route rules to proxy requests, so cookies work properly.
  */
 export default defineNuxtPlugin(() => {
-  const config = useRuntimeConfig()
-
   const api = $fetch.create({
-    baseURL: config.public.apiUrl as string,
-    credentials: 'include'
+    baseURL: "/api",
+    credentials: "include",
   })
 
   return {
     provide: {
-      api
-    }
+      api,
+    },
   }
 })

@@ -137,8 +137,6 @@ export default defineNuxtConfig({
 
   runtimeConfig: {
     public: {
-      // Client uses relative path (goes through the proxy routeRules)
-      apiUrl: "/api",
       // Cookie config for useCookie() — mainly affects writes.
       // In dev, don't set domain (matches backend's host-only cookie).
       // The backend sets the real cookie options; this is just for client-side reads/writes.
@@ -155,13 +153,9 @@ export default defineNuxtConfig({
     },
   },
 
-  // Proxy API routes to the backend in development
-  // In production, Caddy handles /api/* routing, but we still need the proxy
-  // configured for SSR requests from the Nuxt server to the API.
-  // API_URL must be set at build time (in Dockerfile) for production.
+  // Proxy /api routes to the backend.
+  // In production, Caddy handles this; in dev/SSR, Nuxt proxies.
   routeRules: {
-    // Exclude Nuxt internal endpoints from the proxy
-    "/api/_nuxt_icon/**": {},
     "/api/**": {
       proxy: `${process.env.API_URL || "http://localhost:5005"}/api/**`,
     },

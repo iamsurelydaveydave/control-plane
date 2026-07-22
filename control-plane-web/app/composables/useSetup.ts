@@ -161,7 +161,7 @@ export default function useSetup() {
 
           // Look for "- name:" pattern
           const nameMatch = line.match(/^\s*-?\s*name:\s*(.+)$/)
-          if (nameMatch) {
+          if (nameMatch && nameMatch[1]) {
             contexts.push(nameMatch[1].trim())
           }
 
@@ -175,7 +175,7 @@ export default function useSetup() {
 
         // Look for current-context
         const currentContextMatch = line.match(/^current-context:\s*(.+)$/)
-        if (currentContextMatch) {
+        if (currentContextMatch && currentContextMatch[1]) {
           currentContext = currentContextMatch[1].trim()
         }
       }
@@ -185,7 +185,7 @@ export default function useSetup() {
       // Set current context
       if (currentContext && contexts.includes(currentContext)) {
         kubeContext.value = currentContext
-      } else if (contexts.length > 0) {
+      } else if (contexts.length > 0 && contexts[0]) {
         kubeContext.value = contexts[0]
       }
     } catch (error) {

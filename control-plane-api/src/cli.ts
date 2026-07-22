@@ -18,7 +18,7 @@
 
 import "dotenv/config";
 import { MongoClient, ObjectId } from "mongodb";
-import bcrypt from "bcrypt";
+import bcrypt from "bcryptjs";
 import Redis from "ioredis";
 
 // Load environment variables

@@ -13,9 +13,6 @@ FROM --platform=$BUILDPLATFORM node:22-alpine AS builder
 
 WORKDIR /app
 
-# Install build dependencies for native modules
-RUN apk add --no-cache python3 make g++
-
 # Copy package files first for better layer caching
 COPY package.json yarn.lock ./
 
@@ -37,28 +34,20 @@ FROM node:22-alpine AS production
 ARG VERSION=dev
 ARG BUILD_DATE
 ARG VCS_REF
-ARG TARGETPLATFORM
 
 WORKDIR /app
 
-# Install runtime dependencies and build tools for native modules
+# Install runtime dependencies
 RUN apk add --no-cache \
     openssh-client \
-    curl \
-    python3 \
-    make \
-    g++
+    curl
 
 # Copy package files
 COPY package.json yarn.lock ./
 
-# Install production dependencies and rebuild native modules for target platform
-RUN yarn install --frozen-lockfile --production --ignore-scripts && \
-    npm rebuild bcrypt --build-from-source && \
+# Install production dependencies only
+RUN yarn install --frozen-lockfile --production && \
     yarn cache clean
-
-# Remove build tools to reduce image size
-RUN apk del python3 make g++
 
 # Copy built files from builder
 COPY --from=builder /app/dist ./dist

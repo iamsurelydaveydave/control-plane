@@ -10,12 +10,13 @@ export default defineNuxtConfig({
 
   css: ["~/assets/css/main.css"],
 
-  // Configure icon bundling for production SSR
+  // Bundle all icons at build time so they're available on first render
+  // instead of being loaded on demand at runtime (which requires the API endpoint)
   icon: {
-    // Bundle all used icons at build time (no client-side fetching)
-    serverBundle: "local",
-    // Only include icons from these collections
-    collections: ["lucide", "simple-icons"],
+    clientBundle: {
+      // Scan all source files and bundle every icon used
+      scan: true,
+    },
   },
 
   runtimeConfig: {

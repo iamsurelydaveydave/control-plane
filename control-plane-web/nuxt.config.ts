@@ -10,6 +10,14 @@ export default defineNuxtConfig({
 
   css: ["~/assets/css/main.css"],
 
+  // Configure icon bundling for production SSR
+  icon: {
+    // Bundle all used icons at build time (no client-side fetching)
+    serverBundle: "local",
+    // Only include icons from these collections
+    collections: ["lucide", "simple-icons"],
+  },
+
   runtimeConfig: {
     public: {
       // Client uses relative path (goes through the proxy routeRules)

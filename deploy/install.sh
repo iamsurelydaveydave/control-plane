@@ -277,31 +277,36 @@ fetch_source() {
 }
 
 # ================================
-# Build Images with Skaffold
+# Build Images with nerdctl (directly into K3s containerd)
 # ================================
 
-skaffold_build() {
-    log_section "Building Images with Skaffold (this takes ~10 minutes)"
+build_images() {
+    log_section "Building Images (this takes ~10 minutes)"
 
     local src_dir="${DATA_DIR}/source"
+    local nerdctl_cmd="nerdctl --address /run/k3s/containerd/containerd.sock --namespace k8s.io"
 
-    # Skaffold resolves artifact contexts relative to the working directory,
-    # so we must cd into the source tree where skaffold.yaml lives.
-    cd "$src_dir" || { log_error "Cannot cd to ${src_dir}"; exit 1; }
+    # Build API image
+    log "Building control-plane-api..."
+    cd "${src_dir}/control-plane-api" || { log_error "Cannot cd to ${src_dir}/control-plane-api"; exit 1; }
+    $nerdctl_cmd build \
+        -t "${IMAGE_REGISTRY}/control-plane-api:${VERSION}" \
+        -f Dockerfile . 2>&1
+    log_success "control-plane-api:${VERSION} built"
 
-    # skaffold build -p k3s runs the customBuild for each artifact:
-    #   nerdctl build -t "$IMAGE" ... (directly into K3s containerd)
-    # --tag pins the image tag to $VERSION (default: latest) so the
-    # Kubernetes manifests that reference :${VERSION} resolve correctly.
-    log "Running: skaffold build --profile k3s --tag ${VERSION} --cache-artifacts=false"
-    KUBECONFIG=/etc/rancher/k3s/k3s.yaml \
-        skaffold build \
-            --profile k3s \
-            --tag "${VERSION}" \
-            --cache-artifacts=false \
-            2>&1
+    # Build Web image
+    log "Building control-plane-web..."
+    cd "${src_dir}/control-plane-web" || { log_error "Cannot cd to ${src_dir}/control-plane-web"; exit 1; }
+    $nerdctl_cmd build \
+        -t "${IMAGE_REGISTRY}/control-plane-web:${VERSION}" \
+        -f Dockerfile . 2>&1
+    log_success "control-plane-web:${VERSION} built"
 
-    log_success "Images built and imported into K3s containerd"
+    # Verify images exist
+    log "Verifying images in K3s containerd..."
+    $nerdctl_cmd images | grep control-plane || true
+
+    log_success "Images built and available in K3s containerd"
 }
 
 # ================================
@@ -1163,9 +1168,8 @@ main() {
     check_mongodb_connection
     if [ "${BUILD_LOCAL:-true}" = "true" ]; then
         install_nerdctl
-        install_skaffold
         fetch_source
-        skaffold_build
+        build_images
     fi
     install_mongodb
     install_redis
